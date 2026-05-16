@@ -313,6 +313,8 @@ export interface BrowserSearchEntry {
   source: BrowserSearchSource;
   sourceProfileId?: string;
   sourceProfileName?: string;
+  bookmarkFolder?: string;
+  bookmarkOrder?: number;
 }
 
 export interface BrowserSearchAutocomplete {
