@@ -7,19 +7,19 @@
   "main": "dist/main/main.js",
   "repository": "https://github.com/SuperCmdLabs/SuperCmd",
   "scripts": {
-    "dev": "npm run build:main && concurrently \"npm run watch:main\" \"npm run dev:renderer\" \"npm run start:electron\"",
+    "dev": "pnpm run build:main && concurrently \"pnpm run watch:main\" \"pnpm run dev:renderer\" \"pnpm run start:electron\"",
     "watch:main": "tsc -p tsconfig.main.json --watch",
     "dev:renderer": "vite",
-    "start:electron": "wait-on dist/main/main.js && cross-env NODE_ENV=development SUPERCMD_OPEN_DEVTOOLS_ON_STARTUP=1 electron .",
-    "build": "npm run build:main && npm run build:renderer && npm run build:native",
+    "start:electron": "wait-on dist/main/main.js && sleep 2 && mkdir -p dist/native && unset ELECTRON_RUN_AS_NODE && cross-env NODE_ENV=development SUPERCMD_OPEN_DEVTOOLS_ON_STARTUP=1 electron .",
+    "build": "pnpm run build:main && pnpm run build:renderer && pnpm run build:native",
     "build:main": "tsc -p tsconfig.main.json && cp src/main/emoji-data.json dist/main/emoji-data.json",
     "build:renderer": "vite build",
     "check:i18n": "node scripts/check-i18n.mjs",
     "build:native": "node scripts/build-native.mjs",
     "postinstall": "electron-builder install-app-deps",
-    "start": "electron .",
-    "package": "cross-env NODE_ENV=production npm run build && electron-builder",
-    "package:unsigned": "cross-env NODE_ENV=production CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --mac dmg -c.mac.identity=null -c.mac.notarize=false"
+    "start": "mkdir -p dist/native && unset ELECTRON_RUN_AS_NODE && electron .",
+    "package": "cross-env NODE_ENV=production pnpm run build && electron-builder",
+    "package:unsigned": "cross-env NODE_ENV=production CSC_IDENTITY_AUTO_DISCOVERY=false pnpm run build && electron-builder --mac dmg -c.mac.identity=null -c.mac.notarize=false"
   },
   "license": "ISC",
   "devDependencies": {

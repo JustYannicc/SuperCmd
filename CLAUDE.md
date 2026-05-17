@@ -335,6 +335,33 @@ When contributing:
 3. **Test Extensions**: Verify changes don't break existing extensions
 4. **Follow Patterns**: Use existing code patterns for consistency
 
+## Yannic's Branch And Stacked PR Workflow
+
+This repository is often used with local workflow/environment fixes that should
+remain on the local `main` working tree but should not be included in focused PR
+branches.
+
+When preparing work for stacked PRs:
+
+1. Keep working on local `main` as the integration branch, including local-only
+   setup fixes when needed.
+2. Commit each reviewable product/code slice on local `main` with a focused
+   Conventional Commit message.
+3. Before creating or resetting any PR branch, tell the user exactly what
+   changed and give a concrete manual test checklist for the focused slice.
+4. Create or reset a dedicated PR branch only after the user says the slice is
+   good to use for a PR. Point the branch to the exact focused commit(s) that
+   belong in that PR.
+5. Exclude local environment/tooling fixes, untracked planning files, and
+   temporary setup artifacts from PR branches unless the user explicitly asks to
+   ship them.
+6. For follow-up stacked PRs, branch from the previous PR branch or copy only the
+   relevant focused commits onto a new branch. Do not assume every local `main`
+   working-tree change belongs in the stack.
+7. Do not commit `plans/`, `AGENTS.md`, package-manager lock/workspace files, or
+   local pnpm/dev setup changes unless the user explicitly asks for those files
+   to be part of the PR.
+
 ## Roadmap
 
 ### Short Term
