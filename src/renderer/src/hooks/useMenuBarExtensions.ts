@@ -19,18 +19,13 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ExtensionBundle } from '../../types/electron';
+import type { BackgroundNoViewRun } from '../utils/background-no-view-runs';
+
+export type { BackgroundNoViewRun } from '../utils/background-no-view-runs';
 
 export interface MenuBarEntry {
   key: string;
   bundle: ExtensionBundle;
-}
-
-export interface BackgroundNoViewRun {
-  runId: string;
-  bundle: ExtensionBundle;
-  launchType: 'userInitiated' | 'background';
-  /** When true, execution status is mirrored to the system status-bar badge. */
-  reportStatus?: boolean;
 }
 
 export interface UseMenuBarExtensionsReturn {
