@@ -218,6 +218,10 @@ import {
   importRaycastConfigFromFile,
   previewRaycastConfigImport,
 } from './raycast-config-import';
+import {
+  createCachedMenuBarNativeImage,
+  createMenuBarNativeImageCache,
+} from './menubar-native-image-cache';
 
 import { initialize as initAptabase, trackEvent } from "@aptabase/electron/main";
 
@@ -7369,6 +7373,7 @@ app.on('open-url', (event: any, url: string) => {
 // ─── Menu Bar (Tray) Management ─────────────────────────────────────
 
 const menuBarTrays = new Map<string, InstanceType<typeof Tray>>();
+const menuBarNativeImageCache = createMenuBarNativeImageCache();
 let appTray: InstanceType<typeof Tray> | null = null;
 
 function buildDefaultMacTrayTemplateIcon(): any | null {
@@ -19090,93 +19095,44 @@ if let tiff = image?.tiffRepresentation {
 
     let tray = menuBarTrays.get(extId);
 
-    const createNativeImageFromMenuIcon = (
-      payload: { pathValue?: string; dataUrlValue?: string; bitmapScale?: number },
-      size: number,
-    ) => {
-      try {
-        const fs = require('fs');
-        let image: any;
-        const dataUrlValue = String(payload?.dataUrlValue || '').trim();
-        const pathValue = String(payload?.pathValue || '').trim();
-        const requestedScale = Number(payload?.bitmapScale);
-        const bitmapScale = Number.isFinite(requestedScale) && requestedScale >= 1 ? requestedScale : 1;
-
-        if (dataUrlValue.startsWith('data:')) {
-          // For raster PNG data URLs that the renderer pre-rasterized at higher
-          // DPR (bitmapScale > 1), reconstruct via createFromBuffer with the
-          // matching scaleFactor so the Tray treats it as a retina rep instead
-          // of stretching a low-res bitmap.
-          const isRasterPng = dataUrlValue.startsWith('data:image/png');
-          if (isRasterPng && bitmapScale > 1) {
-            const commaIdx = dataUrlValue.indexOf(',');
-            const base64Body = commaIdx >= 0 ? dataUrlValue.slice(commaIdx + 1) : '';
-            const buf = base64Body ? Buffer.from(base64Body, 'base64') : null;
-            if (buf && buf.length > 0) {
-              image = nativeImage.createFromBuffer(buf, { scaleFactor: bitmapScale });
-            }
-          }
-          if (!image || image.isEmpty?.()) {
-            image = nativeImage.createFromDataURL(dataUrlValue);
-          }
-        } else {
-          if (!pathValue || !fs.existsSync(pathValue)) return null;
-          image = nativeImage.createFromPath(pathValue);
-          if ((!image || image.isEmpty()) && /\.svg$/i.test(pathValue)) {
-            const svg = fs.readFileSync(pathValue, 'utf8');
-            const svgDataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
-            image = nativeImage.createFromDataURL(svgDataUrl);
-          }
-        }
-        if (!image || image.isEmpty()) return null;
-
-        // When the source already carries a retina backing (scaleFactor > 1),
-        // resizing to logical px would discard the @2x rep — keep it intact.
-        const currentSize = image.getSize?.() || { width: 0, height: 0 };
-        if (bitmapScale > 1 && currentSize.width === size && currentSize.height === size) {
-          return image;
-        }
-        return image.resize({ width: size, height: size, quality: 'best' });
-      } catch {
-        return null;
-      }
-    };
-
     let lastResolvedTrayIconOk = false;
     const hasEmojiIcon = typeof iconEmoji === 'string' && iconEmoji.trim().length > 0;
+    const isPrimaryGeneratedDataUrl = typeof iconDataUrl === 'string' && iconDataUrl.startsWith('data:');
+    const isPrimarySvgPath = /\.svg$/i.test(iconPath || '');
+    const primaryTemplate =
+      typeof iconTemplate === 'boolean'
+        ? iconTemplate
+        : (isPrimaryGeneratedDataUrl ? true : !isPrimarySvgPath);
     const resolveTrayIcon = () => {
-      const primaryImg = createNativeImageFromMenuIcon(
-        { pathValue: iconPath, dataUrlValue: iconDataUrl, bitmapScale: iconBitmapScale },
-        18,
-      );
-      const usingPrimary = Boolean(primaryImg);
+      const primaryImg = createCachedMenuBarNativeImage({
+        cache: menuBarNativeImageCache,
+        nativeImage,
+        fs,
+        pathValue: iconPath,
+        dataUrlValue: iconDataUrl,
+        bitmapScale: iconBitmapScale,
+        size: 18,
+        template: primaryTemplate,
+        resizeQuality: 'best',
+      });
       // When the extension supplies an emoji as its tray icon (e.g. "🎉"), we render that
       // emoji as the tray title and leave the tray image empty. Falling back to the
       // extension's package icon here would produce two visuals side-by-side in one slot.
       const img =
         primaryImg ||
-        (hasEmojiIcon ? null : createNativeImageFromMenuIcon({ dataUrlValue: fallbackIconDataUrl }, 18));
+        (hasEmojiIcon
+          ? null
+          : createCachedMenuBarNativeImage({
+              cache: menuBarNativeImageCache,
+              nativeImage,
+              fs,
+              dataUrlValue: fallbackIconDataUrl,
+              size: 18,
+              template: false,
+              resizeQuality: 'best',
+            }));
       lastResolvedTrayIconOk = Boolean(img);
-      if (img) {
-        // Raycast icon tokens are serialized as data URLs and should be template images
-        // so macOS can adapt them to menu bar foreground contrast.
-        const isGeneratedDataUrl = typeof iconDataUrl === 'string' && iconDataUrl.startsWith('data:');
-        // Keep template rendering for bitmap assets (classic menubar style).
-        // For SVG asset paths, preserve source appearance (e.g., explicit light/dark icon variants).
-        const isSvg = /\.svg$/i.test(iconPath || '');
-        const shouldTemplate =
-          !usingPrimary
-            ? false
-            : (
-                typeof iconTemplate === 'boolean'
-                  ? iconTemplate
-                  : (isGeneratedDataUrl ? true : !isSvg)
-              );
-        try {
-          img.setTemplateImage(shouldTemplate);
-        } catch {}
-        return img;
-      }
+      if (img) return img;
       return nativeImage.createEmpty();
     };
 
@@ -19184,10 +19140,10 @@ if let tiff = image?.tiffRepresentation {
       const icon = resolveTrayIcon();
       tray = new Tray(icon);
       menuBarTrays.set(extId, tray);
+    } else {
+      // Refresh icon on accepted updates after creation (first payload can be incomplete).
+      tray.setImage(resolveTrayIcon());
     }
-
-    // Always refresh icon on update (first payload can be incomplete).
-    tray.setImage(resolveTrayIcon());
 
     // Update title: if there's a text title, show it; if only emoji icon, show that
     if (title) {
@@ -19225,31 +19181,19 @@ if let tiff = image?.tiffRepresentation {
       const iconDataUrl = typeof item?.iconDataUrl === 'string' ? item.iconDataUrl.trim() : '';
       const iconPath = typeof item?.iconPath === 'string' ? item.iconPath : '';
       const explicitTemplate = typeof item?.iconTemplate === 'boolean' ? item.iconTemplate : undefined;
-      try {
-        let img: any;
-        if (iconDataUrl.startsWith('data:')) {
-          img = nativeImage.createFromDataURL(iconDataUrl);
-        } else {
-          if (!iconPath) return undefined;
-          const fs = require('fs');
-          if (!fs.existsSync(iconPath)) return undefined;
-          img = nativeImage.createFromPath(iconPath);
-          if ((!img || img.isEmpty()) && /\.svg$/i.test(iconPath)) {
-            const svg = fs.readFileSync(iconPath, 'utf8');
-            const svgDataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
-            img = nativeImage.createFromDataURL(svgDataUrl);
-          }
-        }
-        if (!img || img.isEmpty()) return undefined;
-        const shouldTemplate =
-          explicitTemplate ?? (iconDataUrl.startsWith('data:image/svg+xml') ? true : false);
-        const resized = img.resize({ width: 16, height: 16 });
-        try {
-          resized.setTemplateImage(shouldTemplate);
-        } catch {}
-        return resized;
-      } catch {}
-      return undefined;
+      const shouldTemplate =
+        explicitTemplate ?? (iconDataUrl.startsWith('data:image/svg+xml') ? true : false);
+      const image = createCachedMenuBarNativeImage({
+        cache: menuBarNativeImageCache,
+        nativeImage,
+        fs,
+        pathValue: iconPath,
+        dataUrlValue: iconDataUrl,
+        bitmapScale: item?.iconBitmapScale,
+        size: 16,
+        template: shouldTemplate,
+      });
+      return image || undefined;
     };
 
     const labelWithEmoji = (item: any) => {
@@ -19465,4 +19409,5 @@ app.on('will-quit', () => {
     tray.destroy();
   }
   menuBarTrays.clear();
+  menuBarNativeImageCache.clear();
 });
