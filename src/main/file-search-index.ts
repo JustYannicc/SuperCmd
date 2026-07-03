@@ -63,6 +63,7 @@ const MAX_QUERY_RESULTS = 5_000;
 const MAX_FILE_METADATA_STAT_RESULTS = 240;
 const MIN_REBUILD_GAP_MS = 45_000;
 const DEFAULT_REFRESH_INTERVAL_MS = 8 * 60_000;
+const SAFETY_REBUILD_INTERVAL_MS = 6 * 60 * 60_000;
 const WATCH_EVENT_DEBOUNCE_MS = 500;
 const MAX_SPOTLIGHT_CANDIDATES = 10_000;
 const SPOTLIGHT_SEARCH_TIMEOUT_MS = 2_400;
@@ -143,10 +144,12 @@ let includeProtectedHomeRoots = false;
 let indexing = false;
 let lastIndexError: string | null = null;
 let lastBuildStartedAt = 0;
+let lastSuccessfulFullRebuildAt = 0;
 let activeWatcher: fs.FSWatcher | null = null;
 let pendingWatchEvents: Set<string> = new Set();
 let watchDebounceTimer: NodeJS.Timeout | null = null;
 let watchedHomeDir = '';
+let lastWatcherError: string | null = null;
 
 type DirectoryQueueEntry = {
   scanPath: string;
@@ -632,7 +635,8 @@ export async function rebuildFileSearchIndex(reason = 'manual'): Promise<void> {
   if (rebuildPromise) return rebuildPromise;
 
   const now = Date.now();
-  if (now - lastBuildStartedAt < MIN_REBUILD_GAP_MS) return;
+  const bypassRebuildThrottle = reason === 'startup' || reason === 'watcher-error';
+  if (!bypassRebuildThrottle && now - lastBuildStartedAt < MIN_REBUILD_GAP_MS) return;
   lastBuildStartedAt = now;
 
   rebuildPromise = (async () => {
@@ -640,6 +644,7 @@ export async function rebuildFileSearchIndex(reason = 'manual'): Promise<void> {
     try {
       const snapshot = await buildIndexSnapshot(configuredHomeDir);
       activeIndex = snapshot;
+      lastSuccessfulFullRebuildAt = snapshot.builtAt;
       lastIndexError = null;
       if (reason) {
         console.log(
@@ -660,7 +665,30 @@ export async function rebuildFileSearchIndex(reason = 'manual'): Promise<void> {
 
 export function requestFileSearchIndexRefresh(reason = 'manual'): void {
   if (rebuildPromise) return;
+  if (reason === 'interval' && canUseIncrementalIntervalRefresh()) {
+    flushPendingWatchEventsNow();
+    return;
+  }
   void rebuildFileSearchIndex(reason);
+}
+
+function canUseIncrementalIntervalRefresh(): boolean {
+  if (!activeIndex) return false;
+  if (!isFileSearchWatcherHealthy()) return false;
+  if (!lastSuccessfulFullRebuildAt) return false;
+  return Date.now() - lastSuccessfulFullRebuildAt < SAFETY_REBUILD_INTERVAL_MS;
+}
+
+function isFileSearchWatcherHealthy(): boolean {
+  return Boolean(activeWatcher && watchedHomeDir === configuredHomeDir && !lastWatcherError);
+}
+
+function flushPendingWatchEventsNow(): void {
+  if (watchDebounceTimer) {
+    clearTimeout(watchDebounceTimer);
+    watchDebounceTimer = null;
+  }
+  flushWatchEvents();
 }
 
 function isWatchablePath(absolutePath: string): boolean {
@@ -692,7 +720,7 @@ function startFileSearchWatcher(): void {
   if (!configuredHomeDir) return;
 
   try {
-    activeWatcher = fs.watch(
+    const watcher = fs.watch(
       configuredHomeDir,
       { recursive: true, persistent: false },
       (_eventType, filename) => {
@@ -705,13 +733,27 @@ function startFileSearchWatcher(): void {
         }
       }
     );
+    activeWatcher = watcher;
     watchedHomeDir = configuredHomeDir;
-    activeWatcher.on('error', (error) => {
+    lastWatcherError = null;
+    watcher.on('error', (error) => {
       console.warn('[FileIndex] watcher error:', error);
+      lastWatcherError = error instanceof Error ? error.message : String(error || 'Unknown watcher error');
+      try {
+        watcher.close();
+      } catch {
+        // ignore
+      }
+      if (activeWatcher === watcher) {
+        activeWatcher = null;
+        watchedHomeDir = '';
+      }
+      requestFileSearchIndexRefresh('watcher-error');
     });
     console.log(`[FileIndex] watcher started on ${configuredHomeDir}`);
   } catch (error) {
     console.warn('[FileIndex] failed to start watcher:', error);
+    lastWatcherError = error instanceof Error ? error.message : String(error || 'Unknown watcher error');
     activeWatcher = null;
     watchedHomeDir = '';
   }
