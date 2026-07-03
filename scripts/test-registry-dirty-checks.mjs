@@ -83,6 +83,9 @@ function makeListItem(index, overrides = {}) {
 }
 
 function makeGridItem(index, overrides = {}) {
+  const defaultSection = index < ITEM_COUNT / 2
+    ? { id: 'section-a', title: 'Section A' }
+    : { id: 'section-b', title: 'Section B' };
   const props = {
     id: `grid-visible-${index}`,
     title: `Grid ${index}`,
@@ -105,7 +108,7 @@ function makeGridItem(index, overrides = {}) {
   return {
     id: overrides.id || `grid-${index}`,
     order: overrides.order ?? index,
-    sectionTitle: overrides.sectionTitle ?? (index < ITEM_COUNT / 2 ? 'Section A' : 'Section B'),
+    section: overrides.section ?? defaultSection,
     props,
   };
 }
@@ -177,7 +180,8 @@ function legacyGridSnapshot(items) {
     fullSnapshotItemWalks += 1;
     const actionType = entry.props.actions?.type;
     const actionName = actionType?.name || actionType?.displayName || typeof actionType || '';
-    return `${entry.id}:${entry.props.title || ''}:${entry.sectionTitle || ''}:${actionName}`;
+    const section = entry.section;
+    return `${entry.id}:${entry.props.title || ''}:${section?.id || ''}:${section?.title || ''}:${actionName}`;
   }).join('|');
   return { snapshot, fullSnapshotItemWalks };
 }
@@ -306,7 +310,7 @@ if (process.argv.includes('--report')) {
     expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { props: { keywords: ['changed'] } }), 'keywords');
     expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { props: { quickLook: { path: '/tmp/changed.png' } } }), 'quickLook');
     expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { props: { actions: makeElement('DifferentActionPanel') } }), 'action type');
-    expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { sectionTitle: 'Changed section' }), 'section');
+    expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { section: { id: 'changed-section', title: 'Changed section' } }), 'section');
     expectSignatureChange(gridHooks.buildGridItemVisibleSignature, base, makeGridItem(9, { order: 999 }), 'order');
   });
 
