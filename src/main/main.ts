@@ -194,6 +194,8 @@ import {
   exportNoteToFile,
   exportNotesToFile,
   importNotesFromFile,
+  flushNotesToDisk,
+  hasPendingNotesSave,
 } from './notes-store';
 import {
   initCanvasStore,
@@ -19389,8 +19391,21 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+let notesFlushBeforeQuitInProgress = false;
+
+app.on('before-quit', (event: any) => {
   prepareWindowsForAppQuit();
+  if (notesFlushBeforeQuitInProgress || !hasPendingNotesSave()) return;
+
+  notesFlushBeforeQuitInProgress = true;
+  event.preventDefault();
+  flushNotesToDisk()
+    .catch((error) => {
+      console.error('[Notes] Failed to flush pending saves before quit:', error);
+    })
+    .finally(() => {
+      app.quit();
+    });
 });
 
 app.on('will-quit', () => {
