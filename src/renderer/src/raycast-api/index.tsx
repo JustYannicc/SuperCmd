@@ -1646,8 +1646,29 @@ class StreamingPromise implements PromiseLike<string> {
 }
 
 // Global IPC listener registry — routes chunks to the right StreamingPromise
-const _activeStreams = new Map<string, { sp: StreamingPromise; fullText: string }>();
+type ActiveAIStream = {
+  sp: StreamingPromise;
+  fullText: string;
+  abortSignal?: AbortSignal;
+  abortHandler?: () => void;
+};
+
+const _activeStreams = new Map<string, ActiveAIStream>();
 let _aiListenersRegistered = false;
+
+function finalizeAIStream(requestId: string): ActiveAIStream | undefined {
+  const entry = _activeStreams.get(requestId);
+  if (!entry) return undefined;
+
+  if (entry.abortSignal && entry.abortHandler) {
+    entry.abortSignal.removeEventListener('abort', entry.abortHandler);
+    entry.abortSignal = undefined;
+    entry.abortHandler = undefined;
+  }
+
+  _activeStreams.delete(requestId);
+  return entry;
+}
 
 function ensureAIListeners(): void {
   if (_aiListenersRegistered) return;
@@ -1665,18 +1686,16 @@ function ensureAIListeners(): void {
   });
 
   electron.onAIStreamDone?.((data: { requestId: string }) => {
-    const entry = _activeStreams.get(data.requestId);
+    const entry = finalizeAIStream(data.requestId);
     if (entry) {
       entry.sp._complete(entry.fullText);
-      _activeStreams.delete(data.requestId);
     }
   });
 
   electron.onAIStreamError?.((data: { requestId: string; error: string }) => {
-    const entry = _activeStreams.get(data.requestId);
+    const entry = finalizeAIStream(data.requestId);
     if (entry) {
       entry.sp._error(new Error(data.error));
-      _activeStreams.delete(data.requestId);
     }
   });
 }
@@ -1729,10 +1748,9 @@ export const AI = {
       model: options?.model,
       creativity,
     }).catch((err: any) => {
-      const entry = _activeStreams.get(requestId);
+      const entry = finalizeAIStream(requestId);
       if (entry) {
         entry.sp._error(err);
-        _activeStreams.delete(requestId);
       }
     });
 
@@ -1740,17 +1758,22 @@ export const AI = {
     if (options?.signal) {
       if (options.signal.aborted) {
         electron.aiCancel?.(requestId);
-        setTimeout(() => sp._error(new Error('Request aborted')), 0);
-        _activeStreams.delete(requestId);
+        const entry = finalizeAIStream(requestId);
+        setTimeout(() => entry?.sp._error(new Error('Request aborted')), 0);
       } else {
-        options.signal.addEventListener('abort', () => {
+        const abortHandler = () => {
           electron.aiCancel?.(requestId);
-          const entry = _activeStreams.get(requestId);
+          const entry = finalizeAIStream(requestId);
           if (entry) {
             entry.sp._error(new Error('Request aborted'));
-            _activeStreams.delete(requestId);
           }
-        }, { once: true });
+        };
+        const entry = _activeStreams.get(requestId);
+        if (entry) {
+          entry.abortSignal = options.signal;
+          entry.abortHandler = abortHandler;
+          options.signal.addEventListener('abort', abortHandler, { once: true });
+        }
       }
     }
 
