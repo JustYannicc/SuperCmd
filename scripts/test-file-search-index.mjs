@@ -29,7 +29,7 @@ function createFakeDate(clock) {
   };
 }
 
-function loadFileSearchIndexModule({ clock, logs }) {
+function loadFileSearchIndexModule({ clock = { now: Date.now() }, logs = [] } = {}) {
   const source = `${fs.readFileSync(SOURCE_PATH, 'utf8')}
 
 export const __fileSearchIndexTestInternals = {
@@ -89,13 +89,26 @@ export const __fileSearchIndexTestInternals = {
     require: localRequire,
     console: quietConsole,
     Date: createFakeDate(clock),
+    Math,
+    String,
+    Number,
+    Boolean,
+    Set,
+    Map,
+    WeakMap,
+    Object,
+    Array,
+    RegExp,
+    Promise,
+    process: sandboxProcess,
+    Buffer,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
-    Promise,
-    process: sandboxProcess,
   };
+  sandbox.global = sandbox;
+  sandbox.globalThis = sandbox;
 
   vm.runInNewContext(transpiled.outputText, sandbox, { filename: SOURCE_PATH });
   return module.exports;
@@ -147,7 +160,7 @@ async function runRequestedRefresh(indexModule, reason, logs) {
   };
 }
 
-async function runScenario() {
+async function runIncrementalScenario() {
   const tempParent = await fs.promises.realpath(os.tmpdir());
   const tempHome = await fs.promises.mkdtemp(path.join(tempParent, 'supercmd-file-index-'));
   const clock = { now: 1_800_000_000_000 };
@@ -231,8 +244,122 @@ async function runScenario() {
   }
 }
 
+function writeFixtureFile(filePath, contents = '') {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents);
+}
+
+function makeTempHome(label) {
+  const tmpRoot = fs.realpathSync(os.tmpdir());
+  return fs.mkdtempSync(path.join(tmpRoot, `supercmd-file-search-${label}-`));
+}
+
+function removeTempHome(homeDir) {
+  try {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup for temp fixtures.
+  }
+}
+
+async function withIndexedHome(label, fn) {
+  const homeDir = makeTempHome(label);
+  const indexModule = loadFileSearchIndexModule();
+  try {
+    indexModule.startFileSearchIndexing({
+      homeDir,
+      refreshIntervalMs: 30_000,
+      includeProtectedHomeRoots: true,
+    });
+    await indexModule.rebuildFileSearchIndex('test');
+    await fn({ fileSearch: indexModule, homeDir });
+  } finally {
+    indexModule.stopFileSearchIndexing();
+    removeTempHome(homeDir);
+  }
+}
+
+function resultPaths(results) {
+  return results.map((result) => result.path);
+}
+
+function populateSyntheticTree(homeDir, targetEntries) {
+  const projectsDir = path.join(homeDir, 'Projects');
+  const filesPerApp = 48;
+  const appCount = Math.max(1, Math.ceil(targetEntries / (filesPerApp + 2)));
+
+  for (let appIndex = 0; appIndex < appCount; appIndex += 1) {
+    const appName = `app-${String(appIndex).padStart(4, '0')}`;
+    const srcDir = path.join(projectsDir, appName, 'src');
+    const docsDir = path.join(projectsDir, appName, 'docs');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.mkdirSync(docsDir, { recursive: true });
+    for (let fileIndex = 0; fileIndex < filesPerApp; fileIndex += 1) {
+      const bucket = fileIndex % 2 === 0 ? srcDir : docsDir;
+      const name = `module-${String(fileIndex).padStart(3, '0')}-${appName}.ts`;
+      fs.writeFileSync(path.join(bucket, name), '');
+    }
+  }
+
+  return {
+    appCount,
+    filesPerApp,
+    indexedEntryEstimate: appCount * (filesPerApp + 3) + 1,
+  };
+}
+
+async function runPathQueryPerformanceHarness() {
+  const targetEntries = Number(process.env.FILE_SEARCH_PERF_ENTRIES || 60000);
+  const iterations = Number(process.env.FILE_SEARCH_PERF_ITERATIONS || 24);
+  const homeDir = makeTempHome('perf');
+  const indexModule = loadFileSearchIndexModule();
+
+  try {
+    const fixture = populateSyntheticTree(homeDir, targetEntries);
+    indexModule.startFileSearchIndexing({
+      homeDir,
+      refreshIntervalMs: 30_000,
+      includeProtectedHomeRoots: true,
+    });
+    await indexModule.rebuildFileSearchIndex('test');
+
+    const status = indexModule.getFileSearchIndexStatus();
+    const queryAppIds = [7, 42, 137, Math.floor(fixture.appCount / 2), fixture.appCount - 3]
+      .filter((value, index, values) => value >= 0 && value < fixture.appCount && values.indexOf(value) === index)
+      .map((value) => String(value).padStart(4, '0'));
+    const queries = queryAppIds.flatMap((id) => [
+      path.join(homeDir, 'Projects', `app-${id}`, 'src'),
+      `~/Projects/app-${id}/src`,
+      `Projects/app-${id}/src`,
+    ]);
+
+    const startedAt = performance.now();
+    let totalResults = 0;
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      for (const query of queries) {
+        const results = await indexModule.searchIndexedFiles(query, { limit: 1 });
+        totalResults += results.length;
+      }
+    }
+    const elapsedMs = performance.now() - startedAt;
+    const queryCount = iterations * queries.length;
+    const metric = {
+      entries: status.indexedEntryCount,
+      estimatedEntries: fixture.indexedEntryEstimate,
+      queries: queryCount,
+      elapsedMs: Number(elapsedMs.toFixed(2)),
+      avgMsPerQuery: Number((elapsedMs / queryCount).toFixed(3)),
+      totalResults,
+    };
+    console.log(`FILE_SEARCH_PERF ${JSON.stringify(metric)}`);
+  } finally {
+    indexModule.stopFileSearchIndexing();
+    removeTempHome(homeDir);
+  }
+}
+
 test('file search index uses watcher batches and avoids healthy interval rebuilds', async () => {
-  const metrics = await runScenario();
+  const metrics = await runIncrementalScenario();
   console.log(`[FileIndexTest] ${JSON.stringify({ mode: BASELINE_MODE ? 'baseline' : 'assert', ...metrics })}`);
 
   assert.equal(metrics.watcherBatchRebuilds, 0, 'watcher-style updates should not trigger full rebuilds');
@@ -243,3 +370,53 @@ test('file search index uses watcher batches and avoids healthy interval rebuild
     assert.equal(metrics.healthyIntervalRebuilds, 0, 'healthy watcher interval ticks should use incremental state');
   }
 });
+
+test('path-like queries match absolute, tilde, and relative paths', async () => {
+  await withIndexedHome('correctness', async ({ fileSearch, homeDir }) => {
+    const srcDir = path.join(homeDir, 'Projects', 'app-042', 'src');
+    const exactFile = path.join(srcDir, 'Report Final.txt');
+    writeFixtureFile(exactFile, 'report');
+    writeFixtureFile(path.join(srcDir, 'Report Notes.md'), 'notes');
+    writeFixtureFile(path.join(homeDir, 'Projects', 'app-042', 'README.md'), 'readme');
+    writeFixtureFile(path.join(homeDir, 'Archive', 'Reports', 'src', 'Q2 Plan.txt'), 'plan');
+    await fileSearch.rebuildFileSearchIndex('test-after-fixtures');
+
+    const absolute = await fileSearch.searchIndexedFiles(srcDir, { limit: 8 });
+    assert.equal(absolute[0]?.path, srcDir);
+    assert.ok(resultPaths(absolute).includes(exactFile));
+
+    const tilde = await fileSearch.searchIndexedFiles('~/Projects/app-042/src', { limit: 8 });
+    assert.equal(tilde[0]?.path, srcDir);
+    assert.ok(resultPaths(tilde).includes(exactFile));
+
+    const relative = await fileSearch.searchIndexedFiles('Projects/app-042/src', { limit: 8 });
+    assert.equal(relative[0]?.path, srcDir);
+    assert.ok(resultPaths(relative).includes(exactFile));
+
+    const exact = await fileSearch.searchIndexedFiles('~/Projects/app-042/src/Report Final.txt', { limit: 4 });
+    assert.equal(exact[0]?.path, exactFile);
+    assert.equal(exact[0]?.matchKind, 'path');
+  });
+});
+
+test('path-like fallback preserves mid-token slash matches', async () => {
+  await withIndexedHome('fallback', async ({ fileSearch, homeDir }) => {
+    const fallbackFile = path.join(homeDir, 'Archive', 'Reports', 'src', 'Q2 Plan.txt');
+    writeFixtureFile(fallbackFile, 'plan');
+    writeFixtureFile(path.join(homeDir, 'Archive', 'Exports', 'src', 'Other.txt'), 'other');
+    await fileSearch.rebuildFileSearchIndex('test-after-fixtures');
+
+    const midToken = await fileSearch.searchIndexedFiles('ports/src', { limit: 8 });
+    assert.ok(resultPaths(midToken).includes(fallbackFile));
+
+    const trailingSlash = await fileSearch.searchIndexedFiles('ports/', { limit: 8 });
+    assert.ok(resultPaths(trailingSlash).includes(fallbackFile));
+
+    const noMatch = await fileSearch.searchIndexedFiles('~/Archive/Missing/src', { limit: 8 });
+    assert.equal(noMatch.length, 0);
+  });
+});
+
+if (process.env.SUPERCMD_FILE_SEARCH_PERF === '1') {
+  test('path-like query performance harness', runPathQueryPerformanceHarness);
+}
