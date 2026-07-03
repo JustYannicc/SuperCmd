@@ -45,6 +45,11 @@ import {
 import type { AppSettings, BrowserProfileSetting, BrowserProfileFilters, BrowserProfileFilterKind, RelocateMode } from './settings-store';
 import { recordRootSearchLaunchInState, type RootSearchRankingState } from '../shared/root-search-ranking-state';
 import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
+import {
+  createAIStreamIpcCoalescer,
+  forwardAIStreamChunksToIpc,
+  type AIStreamIpcCoalescer,
+} from './ai-stream-ipc';
 import { scanAppRemnants } from './app-uninstaller';
 import * as soulverCalculator from './soulver-calculator';
 import { addMemory, buildMemoryContextSystemPrompt } from './memory';
@@ -3080,7 +3085,12 @@ function resolveAppIconDataUrl(appPath: string, size = 32): string | null {
 }
 let launcherEntryFrontmostApp: FrontmostAppContext | null = null;
 const registeredHotkeys = new Map<string, string>(); // shortcut → commandId
-const activeAIRequests = new Map<string, AbortController>(); // requestId → controller
+type ActiveAIRequest = {
+  controller: AbortController;
+  stream: AIStreamIpcCoalescer;
+};
+const activeAIRequests = new Map<string, ActiveAIRequest>(); // requestId → active request
+const activeOllamaPullRequests = new Map<string, AbortController>(); // requestId → controller
 const pendingOAuthCallbackUrls: string[] = [];
 let snippetExpanderProcess: any = null;
 let snippetExpanderStdoutBuffer = '';
@@ -3103,6 +3113,24 @@ let emojiPickerCurrentQuery = '';
 let emojiPickerCurrentPrefixLen = 1;
 let emojiPickerSelectedIdx = 0;
 let nativeSpeechProcess: any = null;
+
+function startActiveAIRequest(requestId: string, sender: { send: (channel: 'ai-stream-chunk', payload: { requestId: string; chunk: string }) => void }): ActiveAIRequest {
+  activeAIRequests.get(requestId)?.stream.flush();
+  const controller = new AbortController();
+  const request = {
+    controller,
+    stream: createAIStreamIpcCoalescer({ requestId, sender }),
+  };
+  activeAIRequests.set(requestId, request);
+  return request;
+}
+
+function finishActiveAIRequest(requestId: string, request: ActiveAIRequest): void {
+  request.stream.flush();
+  if (activeAIRequests.get(requestId) === request) {
+    activeAIRequests.delete(requestId);
+  }
+}
 let nativeSpeechStdoutBuffer = '';
 let nativeColorPickerPromise: Promise<any> | null = null;
 let keyboardLockProcess: any = null;
@@ -17537,8 +17565,8 @@ if let tiff = image?.tiffRepresentation {
         return;
       }
 
-      const controller = new AbortController();
-      activeAIRequests.set(requestId, controller);
+      const activeRequest = startActiveAIRequest(requestId, event.sender);
+      const { controller, stream } = activeRequest;
 
       try {
         const memoryContextSystemPrompt = await buildMemoryContextSystemPrompt(
@@ -17558,29 +17586,34 @@ if let tiff = image?.tiffRepresentation {
           signal: controller.signal,
         });
 
-        for await (const chunk of gen) {
-          if (controller.signal.aborted) break;
-          event.sender.send('ai-stream-chunk', { requestId, chunk });
-        }
+        await forwardAIStreamChunksToIpc(gen, stream, controller.signal);
 
         if (!controller.signal.aborted) {
+          stream.flush();
           event.sender.send('ai-stream-done', { requestId });
         }
       } catch (e: any) {
         if (!controller.signal.aborted) {
+          stream.flush();
           event.sender.send('ai-stream-error', { requestId, error: e?.message || 'AI request failed' });
         }
       } finally {
-        activeAIRequests.delete(requestId);
+        finishActiveAIRequest(requestId, activeRequest);
       }
     }
   );
 
   ipcMain.handle('ai-cancel', (_event: any, requestId: string) => {
-    const controller = activeAIRequests.get(requestId);
-    if (controller) {
-      controller.abort();
+    const activeRequest = activeAIRequests.get(requestId);
+    if (activeRequest) {
+      activeRequest.stream.flush();
+      activeRequest.controller.abort();
       activeAIRequests.delete(requestId);
+    }
+    const ollamaPullController = activeOllamaPullRequests.get(requestId);
+    if (ollamaPullController) {
+      ollamaPullController.abort();
+      activeOllamaPullRequests.delete(requestId);
     }
   });
 
@@ -17602,8 +17635,8 @@ if let tiff = image?.tiffRepresentation {
         return;
       }
 
-      const controller = new AbortController();
-      activeAIRequests.set(requestId, controller);
+      const activeRequest = startActiveAIRequest(requestId, event.sender);
+      const { controller, stream } = activeRequest;
 
       try {
         const latestUser = [...(messages || [])].reverse().find((m) => m.role === 'user');
@@ -17624,20 +17657,19 @@ if let tiff = image?.tiffRepresentation {
           signal: controller.signal,
         });
 
-        for await (const chunk of gen) {
-          if (controller.signal.aborted) break;
-          event.sender.send('ai-stream-chunk', { requestId, chunk });
-        }
+        await forwardAIStreamChunksToIpc(gen, stream, controller.signal);
 
         if (!controller.signal.aborted) {
+          stream.flush();
           event.sender.send('ai-stream-done', { requestId });
         }
       } catch (e: any) {
         if (!controller.signal.aborted) {
+          stream.flush();
           event.sender.send('ai-stream-error', { requestId, error: e?.message || 'AI request failed' });
         }
       } finally {
-        activeAIRequests.delete(requestId);
+        finishActiveAIRequest(requestId, activeRequest);
       }
     }
   );
@@ -18163,7 +18195,7 @@ if let tiff = image?.tiffRepresentation {
       const mod = url.protocol === 'https:' ? require('https') : require('http');
 
       const controller = new AbortController();
-      activeAIRequests.set(requestId, controller);
+      activeOllamaPullRequests.set(requestId, controller);
 
       const body = JSON.stringify({ name: modelName, stream: true });
 
@@ -18184,7 +18216,7 @@ if let tiff = image?.tiffRepresentation {
                 requestId,
                 error: `HTTP ${res.statusCode}: ${errBody.slice(0, 200)}`,
               });
-              activeAIRequests.delete(requestId);
+              activeOllamaPullRequests.delete(requestId);
             });
             return;
           }
@@ -18228,7 +18260,7 @@ if let tiff = image?.tiffRepresentation {
             if (!controller.signal.aborted) {
               event.sender.send('ollama-pull-done', { requestId });
             }
-            activeAIRequests.delete(requestId);
+            activeOllamaPullRequests.delete(requestId);
           });
         }
       );
@@ -18240,7 +18272,7 @@ if let tiff = image?.tiffRepresentation {
             error: err.message || 'Failed to pull model',
           });
         }
-        activeAIRequests.delete(requestId);
+        activeOllamaPullRequests.delete(requestId);
       });
 
       if (controller.signal.aborted) {
