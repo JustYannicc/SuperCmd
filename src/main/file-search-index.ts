@@ -796,13 +796,75 @@ async function applyWatchEventBatch(paths: string[]): Promise<void> {
   }
 }
 
+function hasDeletedPathAncestor(candidatePath: string, deletedPathSet: Set<string>): boolean {
+  let currentPath = path.dirname(candidatePath);
+  while (currentPath && currentPath !== candidatePath) {
+    if (deletedPathSet.has(currentPath)) return true;
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) break;
+    currentPath = parentPath;
+  }
+  return false;
+}
+
+function normalizeDeletedPath(candidatePath: string): string | null {
+  const rawPath = String(candidatePath || '');
+  if (!rawPath) return null;
+  return path.resolve(rawPath);
+}
+
+function collapseNestedDeletedPaths(deletePaths: string[]): string[] {
+  const uniquePaths = new Set<string>();
+  for (const deletePath of deletePaths) {
+    const normalizedPath = normalizeDeletedPath(deletePath);
+    if (normalizedPath) uniquePaths.add(normalizedPath);
+  }
+
+  const sortedPaths = [...uniquePaths].sort((a, b) => {
+    if (a.length !== b.length) return a.length - b.length;
+    return a.localeCompare(b);
+  });
+  const collapsedPaths: string[] = [];
+  const collapsedPathSet = new Set<string>();
+
+  for (const deletePath of sortedPaths) {
+    if (hasDeletedPathAncestor(deletePath, collapsedPathSet)) {
+      continue;
+    }
+    collapsedPaths.push(deletePath);
+    collapsedPathSet.add(deletePath);
+  }
+
+  return collapsedPaths;
+}
+
+function getDescendantPathPrefix(rootPath: string): string {
+  return rootPath.endsWith(path.sep) ? rootPath : `${rootPath}${path.sep}`;
+}
+
 function tombstoneDeletedPaths(snapshot: IndexSnapshot, deletePaths: string[]): void {
+  const collapsedDeletePaths = collapseNestedDeletedPaths(deletePaths);
+  if (collapsedDeletePaths.length === 0) return;
+
   const directIds = new Set<number>();
-  for (const deletedPath of deletePaths) {
+  for (const deletedPath of collapsedDeletePaths) {
     const id = snapshot.pathToEntryId.get(deletedPath);
     if (id !== undefined) directIds.add(id);
   }
-  const prefixes = deletePaths.map((p) => p + path.sep);
+
+  if (collapsedDeletePaths.length === 1) {
+    const descendantPrefix = getDescendantPathPrefix(collapsedDeletePaths[0]);
+    for (let i = 0; i < snapshot.entries.length; i += 1) {
+      const entry = snapshot.entries[i];
+      if (entry.deleted) continue;
+      if (directIds.has(i) || entry.path.startsWith(descendantPrefix)) {
+        entry.deleted = true;
+      }
+    }
+    return;
+  }
+
+  const deletedPathSet = new Set(collapsedDeletePaths);
 
   for (let i = 0; i < snapshot.entries.length; i += 1) {
     const entry = snapshot.entries[i];
@@ -811,11 +873,8 @@ function tombstoneDeletedPaths(snapshot: IndexSnapshot, deletePaths: string[]): 
       entry.deleted = true;
       continue;
     }
-    for (const prefix of prefixes) {
-      if (entry.path.startsWith(prefix)) {
-        entry.deleted = true;
-        break;
-      }
+    if (hasDeletedPathAncestor(entry.path, deletedPathSet)) {
+      entry.deleted = true;
     }
   }
 }
