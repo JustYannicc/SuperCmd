@@ -105,7 +105,7 @@ function loadTsModule(filePath) {
 const commandHelpers = loadTsModule('src/renderer/src/utils/command-helpers.tsx');
 const ranking = loadTsModule('src/renderer/src/utils/root-search-ranking.ts');
 
-const { filterCommands, rankCommands } = commandHelpers;
+const { createRootCommandScoreIndex, filterCommands, rankCommands, rankCommandsWithIndex } = commandHelpers;
 const { scoreRootSearchFields } = ranking;
 
 const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 6000);
@@ -256,6 +256,15 @@ function optimizedRootCommandMatches(commands, query, aliases) {
     });
 }
 
+function indexedRootCommandMatches(index, query) {
+  return rankCommandsWithIndex(index, query)
+    .map((entry) => ({
+      id: entry.command.id,
+      matchKind: entry.matchKind,
+      matchScore: entry.matchScore,
+    }));
+}
+
 function signature(matches) {
   return matches
     .map((match) => `${match.id}:${match.matchKind}:${match.matchScore}`)
@@ -263,11 +272,18 @@ function signature(matches) {
 }
 
 function assertSameRootCommandMatches(commands, aliases) {
+  const index = createRootCommandScoreIndex(commands, aliases);
   for (const query of QUERIES) {
+    const legacySignature = signature(legacyRootCommandMatches(commands, query, aliases));
     assert.deepEqual(
       signature(optimizedRootCommandMatches(commands, query, aliases)),
-      signature(legacyRootCommandMatches(commands, query, aliases)),
+      legacySignature,
       `root command matches changed for query "${query}"`
+    );
+    assert.deepEqual(
+      signature(indexedRootCommandMatches(index, query)),
+      legacySignature,
+      `indexed root command matches changed for query "${query}"`
     );
   }
 }
@@ -300,9 +316,29 @@ function measure(label, fn) {
   return { label, median, min, max, total };
 }
 
+function measureSingle(label, fn) {
+  for (let i = 0; i < WARMUP_ITERATIONS; i += 1) fn();
+
+  const samples = [];
+  let total = 0;
+  for (let i = 0; i < ITERATIONS; i += 1) {
+    const start = performance.now();
+    total = fn();
+    samples.push(performance.now() - start);
+  }
+
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+  const min = samples[0];
+  const max = samples[samples.length - 1];
+
+  return { label, median, min, max, total };
+}
+
 const { commands, aliases } = makeCommands(COMMAND_COUNT);
 
 assertSameRootCommandMatches(commands, aliases);
+const commandScoreIndex = createRootCommandScoreIndex(commands, aliases);
 
 const legacy = measure('legacy filter + two-pass command scoring', (query) => {
   const filtered = filterCommands(commands, query, aliases);
@@ -315,10 +351,25 @@ const optimized = measure('optimized command scoring path', (query) => {
   return matches.length;
 });
 
-const speedup = legacy.median > 0 ? legacy.median / optimized.median : 0;
+const indexed = measure('indexed command scoring path', (query) => {
+  const matches = indexedRootCommandMatches(commandScoreIndex, query);
+  return matches.length;
+});
+
+const compile = measureSingle('command scoring index compile', () => {
+  return createRootCommandScoreIndex(commands, aliases).entries.length;
+});
+
+const optimizedSpeedup = legacy.median > 0 ? legacy.median / optimized.median : 0;
+const indexedSpeedup = legacy.median > 0 ? legacy.median / indexed.median : 0;
+const indexedVsOptimizedSpeedup = optimized.median > 0 ? optimized.median / indexed.median : 0;
 
 console.log('Root search perf harness');
 console.log(`commands=${COMMAND_COUNT} queries=${QUERIES.length} iterations=${ITERATIONS} warmups=${WARMUP_ITERATIONS}`);
 console.log(`${legacy.label}: median=${legacy.median.toFixed(2)}ms min=${legacy.min.toFixed(2)}ms max=${legacy.max.toFixed(2)}ms total=${legacy.total}`);
 console.log(`${optimized.label}: median=${optimized.median.toFixed(2)}ms min=${optimized.min.toFixed(2)}ms max=${optimized.max.toFixed(2)}ms total=${optimized.total}`);
-console.log(`speedup=${speedup.toFixed(2)}x`);
+console.log(`${indexed.label}: median=${indexed.median.toFixed(2)}ms min=${indexed.min.toFixed(2)}ms max=${indexed.max.toFixed(2)}ms total=${indexed.total}`);
+console.log(`${compile.label}: median=${compile.median.toFixed(2)}ms min=${compile.min.toFixed(2)}ms max=${compile.max.toFixed(2)}ms total=${compile.total}`);
+console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
+console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
+console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);
