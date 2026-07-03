@@ -101,6 +101,8 @@ import {
   togglePinClipboardItem,
   moveClipboardPinnedItem,
   pruneClipboardHistoryOlderThan,
+  flushClipboardHistoryWrites,
+  hasPendingClipboardHistoryWrites,
 } from './clipboard-manager';
 import {
   initSnippetStore,
@@ -13283,19 +13285,22 @@ async function restartAndInstallAppUpdate(): Promise<boolean> {
       });
 
       triggerTimer = setTimeout(() => {
-        try {
-          if (process.platform === 'darwin') {
-            try {
-              appUpdater.autoInstallOnAppQuit = true;
-              appUpdater.autoRunAppAfterInstall = true;
-            } catch {}
-            appUpdater.quitAndInstall();
-          } else {
-            appUpdater.quitAndInstall(false, true);
+        void (async () => {
+          try {
+            await flushClipboardHistoryWrites();
+            if (process.platform === 'darwin') {
+              try {
+                appUpdater.autoInstallOnAppQuit = true;
+                appUpdater.autoRunAppAfterInstall = true;
+              } catch {}
+              appUpdater.quitAndInstall();
+            } else {
+              appUpdater.quitAndInstall(false, true);
+            }
+          } catch (error: any) {
+            finish(false, error);
           }
-        } catch (error: any) {
-          finish(false, error);
-        }
+        })();
       }, 40);
 
       timeoutTimer = setTimeout(() => {
@@ -16499,12 +16504,12 @@ return appURL's |path|() as text`,
     return searchClipboardHistory(query);
   });
 
-  ipcMain.handle('clipboard-clear-history', () => {
-    clearClipboardHistory();
+  ipcMain.handle('clipboard-clear-history', async () => {
+    await clearClipboardHistory();
   });
 
-  ipcMain.handle('clipboard-delete-item', (_event: any, id: string) => {
-    return deleteClipboardItem(id);
+  ipcMain.handle('clipboard-delete-item', async (_event: any, id: string) => {
+    return await deleteClipboardItem(id);
   });
 
   ipcMain.handle('clipboard-copy-item', (_event: any, id: string) => {
@@ -19393,18 +19398,48 @@ app.on('window-all-closed', () => {
 });
 
 let notesFlushBeforeQuitInProgress = false;
+let quitFlushBeforeQuitInProgress = false;
+let clipboardHistoryQuitFlushComplete = false;
 
 app.on('before-quit', (event: any) => {
   prepareWindowsForAppQuit();
-  if (notesFlushBeforeQuitInProgress || !hasPendingNotesSave()) return;
 
-  notesFlushBeforeQuitInProgress = true;
+  const updateRestartInProgress = Boolean(appUpdaterRestartPromise) || appUpdaterStatusSnapshot.state === 'restarting';
+  const shouldFlushNotes = !notesFlushBeforeQuitInProgress && hasPendingNotesSave();
+  const shouldFlushClipboard = (
+    !updateRestartInProgress &&
+    !clipboardHistoryQuitFlushComplete &&
+    hasPendingClipboardHistoryWrites()
+  );
+
+  if (!shouldFlushNotes && !shouldFlushClipboard) return;
+
   event.preventDefault();
-  flushNotesToDisk()
-    .catch((error) => {
-      console.error('[Notes] Failed to flush pending saves before quit:', error);
-    })
+  if (quitFlushBeforeQuitInProgress) return;
+
+  quitFlushBeforeQuitInProgress = true;
+
+  const flushes: Promise<void>[] = [];
+  if (shouldFlushNotes) {
+    notesFlushBeforeQuitInProgress = true;
+    flushes.push(flushNotesToDisk()
+      .catch((error) => {
+        console.error('[Notes] Failed to flush pending saves before quit:', error);
+      }));
+  }
+  if (shouldFlushClipboard) {
+    flushes.push(flushClipboardHistoryWrites()
+      .catch((error) => {
+        console.error('Failed to flush clipboard history before quit:', error);
+      })
+      .finally(() => {
+        clipboardHistoryQuitFlushComplete = true;
+      }));
+  }
+
+  Promise.allSettled(flushes)
     .finally(() => {
+      quitFlushBeforeQuitInProgress = false;
       app.quit();
     });
 });
@@ -19432,7 +19467,7 @@ app.on('will-quit', () => {
   killParakeetServer();
   killQwen3Server();
   killAudioCapturer();
-  stopClipboardMonitor();
+  void stopClipboardMonitor();
   stopSnippetExpander();
   stopEmojiTriggerMonitor();
   stopFileSearchIndexing();
