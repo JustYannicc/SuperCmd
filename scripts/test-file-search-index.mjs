@@ -379,7 +379,7 @@ test('path-like queries match absolute, tilde, and relative paths', async () => 
     writeFixtureFile(path.join(srcDir, 'Report Notes.md'), 'notes');
     writeFixtureFile(path.join(homeDir, 'Projects', 'app-042', 'README.md'), 'readme');
     writeFixtureFile(path.join(homeDir, 'Archive', 'Reports', 'src', 'Q2 Plan.txt'), 'plan');
-    await fileSearch.rebuildFileSearchIndex('test-after-fixtures');
+    await fileSearch.rebuildFileSearchIndex('startup');
 
     const absolute = await fileSearch.searchIndexedFiles(srcDir, { limit: 8 });
     assert.equal(absolute[0]?.path, srcDir);
@@ -404,7 +404,7 @@ test('path-like fallback preserves mid-token slash matches', async () => {
     const fallbackFile = path.join(homeDir, 'Archive', 'Reports', 'src', 'Q2 Plan.txt');
     writeFixtureFile(fallbackFile, 'plan');
     writeFixtureFile(path.join(homeDir, 'Archive', 'Exports', 'src', 'Other.txt'), 'other');
-    await fileSearch.rebuildFileSearchIndex('test-after-fixtures');
+    await fileSearch.rebuildFileSearchIndex('startup');
 
     const midToken = await fileSearch.searchIndexedFiles('ports/src', { limit: 8 });
     assert.ok(resultPaths(midToken).includes(fallbackFile));
