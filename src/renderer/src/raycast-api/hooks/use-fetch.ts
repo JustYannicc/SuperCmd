@@ -46,10 +46,13 @@ export function useFetch<T = any, U = undefined>(
   const [error, setError] = useState<Error | undefined>(undefined);
 
   const mountedRef = useRef(true);
+  const runIdRef = useRef(0);
+  const lastInitialRequestKeyRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      runIdRef.current += 1;
     };
   }, []);
 
@@ -58,17 +61,26 @@ export function useFetch<T = any, U = undefined>(
   urlRef.current = url;
   optionsRef.current = options;
 
-  const fetchData = useCallback(async (pageNum: number, currentCursor?: string) => {
+  const resolveUrl = useCallback((
+    requestUrl: typeof url,
+    pageNum: number,
+    currentCursor?: string,
+  ) => typeof requestUrl === 'function'
+    ? requestUrl({ page: pageNum, cursor: currentCursor, lastItem: undefined })
+    : requestUrl, []);
+
+  const fetchData = useCallback(async (pageNum: number, currentCursor?: string, resolvedUrlOverride?: string) => {
     const opts = optionsRef.current;
     if (opts?.execute === false || !mountedRef.current) return;
+
+    const runId = ++runIdRef.current;
+    const isCurrentRun = () => mountedRef.current && runIdRef.current === runId;
 
     setIsLoading(true);
     setError(undefined);
 
     try {
-      const resolvedUrl = typeof urlRef.current === 'function'
-        ? urlRef.current({ page: pageNum, cursor: currentCursor, lastItem: undefined })
-        : urlRef.current;
+      const resolvedUrl = resolvedUrlOverride ?? resolveUrl(urlRef.current, pageNum, currentCursor);
 
       const ipcRes = await window.electron.httpRequest({
         url: resolvedUrl,
@@ -76,6 +88,7 @@ export function useFetch<T = any, U = undefined>(
         headers: opts?.headers,
         body: normalizeRequestBody(opts?.body) as string | undefined,
       });
+      if (!isCurrentRun()) return;
 
       const res = {
         ok: ipcRes.status >= 200 && ipcRes.status < 300,
@@ -90,9 +103,10 @@ export function useFetch<T = any, U = undefined>(
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       const parsed = opts?.parseResponse ? await opts.parseResponse(res) : await res.json();
-      if (!mountedRef.current) return;
+      if (!isCurrentRun()) return;
 
       const mapped = opts?.mapResult ? opts.mapResult(parsed) : parsed;
+      if (!isCurrentRun()) return;
       if (mapped && typeof mapped === 'object' && 'data' in mapped) {
         const paginatedResult = mapped as { data: T; hasMore?: boolean; cursor?: string };
         setHasMore(paginatedResult.hasMore ?? false);
@@ -112,16 +126,15 @@ export function useFetch<T = any, U = undefined>(
         opts?.onData?.(mapped as T);
       }
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!isCurrentRun()) return;
       const e = err instanceof Error ? err : new Error(String(err));
       setError(e);
       opts?.onError?.(e);
     } finally {
-      if (mountedRef.current) setIsLoading(false);
+      if (isCurrentRun()) setIsLoading(false);
     }
-  }, []);
+  }, [resolveUrl]);
 
-  const urlString = typeof url === 'string' ? url : 'function';
   const optionsKey = useMemo(() => {
     try {
       return JSON.stringify({
@@ -137,16 +150,32 @@ export function useFetch<T = any, U = undefined>(
 
   useEffect(() => {
     if (options?.execute === false) {
+      runIdRef.current += 1;
+      lastInitialRequestKeyRef.current = undefined;
       setIsLoading(false);
       setError(undefined);
       setAllData(options?.initialData);
       return;
     }
+
+    let initialResolvedUrl: string | undefined;
+    let initialUrlKey: string;
+    try {
+      initialResolvedUrl = resolveUrl(url, 0, undefined);
+      initialUrlKey = initialResolvedUrl;
+    } catch (err) {
+      initialUrlKey = `error:${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    const initialRequestKey = `${optionsKey}\n${initialUrlKey}`;
+    if (lastInitialRequestKeyRef.current === initialRequestKey) return;
+    lastInitialRequestKeyRef.current = initialRequestKey;
+
     setPage(0);
     setCursor(undefined);
     setAllData(options?.initialData);
-    fetchData(0, undefined);
-  }, [fetchData, urlString, optionsKey]);
+    fetchData(0, undefined, initialResolvedUrl);
+  }, [fetchData, url, optionsKey]);
 
   const revalidate = useCallback(() => {
     setPage(0);
