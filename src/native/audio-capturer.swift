@@ -127,10 +127,15 @@ func writeWaveFile(samples: [Float], sampleRate: Double, toPath path: String) th
   data.append(contentsOf: withUnsafeBytes(of: UInt32(littleEndian: dataSize)) { Array($0) })
 
   // PCM samples (float32 → int16)
+  var pcmSamples = [Int16]()
+  pcmSamples.reserveCapacity(samples.count)
   for sample in samples {
     let clamped = max(-1.0, min(1.0, sample))
     let intVal = Int16(clamped * Float(Int16.max))
-    data.append(contentsOf: withUnsafeBytes(of: Int16(littleEndian: intVal)) { Array($0) })
+    pcmSamples.append(Int16(littleEndian: intVal))
+  }
+  pcmSamples.withUnsafeBytes { rawBuffer in
+    data.append(rawBuffer.bindMemory(to: UInt8.self))
   }
 
   try data.write(to: URL(fileURLWithPath: path), options: .atomic)
