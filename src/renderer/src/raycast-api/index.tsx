@@ -326,28 +326,51 @@ export enum LaunchType {
 }
 
 // Forward-declared AI availability cache (set asynchronously in the AI section below)
+const AI_AVAILABILITY_CACHE_TTL_MS = 2_000;
 let _aiAvailableCache: boolean | null = null;
+let _aiAvailabilityCacheUpdatedAt = 0;
 let _aiAvailabilityRefreshPromise: Promise<boolean> | null = null;
+let _aiAvailabilityRefreshId = 0;
 
 async function refreshAIAvailabilityCache(force = false): Promise<boolean> {
-  if (!force && _aiAvailabilityRefreshPromise) {
-    return _aiAvailabilityRefreshPromise;
+  if (!force) {
+    if (_aiAvailabilityRefreshPromise) {
+      return _aiAvailabilityRefreshPromise;
+    }
+
+    const cachedAvailability = _aiAvailableCache;
+    // Extensions sometimes probe environment.canAccess(AI) very frequently.
+    // Keep a short stale window to avoid repeated IPC while focus/visibility
+    // refreshes still force a quick settings re-check.
+    if (
+      cachedAvailability !== null &&
+      Date.now() - _aiAvailabilityCacheUpdatedAt < AI_AVAILABILITY_CACHE_TTL_MS
+    ) {
+      return cachedAvailability;
+    }
   }
 
-  _aiAvailabilityRefreshPromise = (async () => {
+  const refreshId = ++_aiAvailabilityRefreshId;
+  let refreshPromise!: Promise<boolean>;
+  refreshPromise = (async () => {
     try {
-      const available = await (window as any).electron?.aiIsAvailable?.() ?? false;
-      _aiAvailableCache = available;
+      const available = (await (window as any).electron?.aiIsAvailable?.()) ?? false;
+      if (refreshId === _aiAvailabilityRefreshId) {
+        _aiAvailableCache = available;
+        _aiAvailabilityCacheUpdatedAt = Date.now();
+      }
       return available;
     } catch {
-      _aiAvailableCache = false;
-      return false;
+      return _aiAvailableCache ?? false;
     } finally {
-      _aiAvailabilityRefreshPromise = null;
+      if (_aiAvailabilityRefreshPromise === refreshPromise) {
+        _aiAvailabilityRefreshPromise = null;
+      }
     }
   })();
 
-  return _aiAvailabilityRefreshPromise;
+  _aiAvailabilityRefreshPromise = refreshPromise;
+  return refreshPromise;
 }
 
 // =====================================================================
