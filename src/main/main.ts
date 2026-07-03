@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
+import { createLocalAsrHelperStatusProbeCache } from './local-model-status-probe';
 import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow } from './commands';
 import {
   loadSettings,
@@ -255,6 +256,7 @@ type ParakeetModelStatus = {
 };
 let parakeetModelStatus: ParakeetModelStatus | null = null;
 let parakeetModelEnsurePromise: Promise<string> | null = null;
+let parakeetModelStatusProbeCache: ReturnType<typeof createLocalAsrHelperStatusProbeCache<ParakeetModelStatus>> | null = null;
 
 // Persistent serve-mode process for fast transcription (models stay loaded in memory)
 let parakeetServerProcess: any = null; // ChildProcess
@@ -393,15 +395,7 @@ function getParakeetTranscriberBinaryPath(): string {
   return getNativeBinaryPath('parakeet-transcriber');
 }
 
-function getParakeetModelStatus(): ParakeetModelStatus {
-  if (parakeetModelStatus?.state === 'downloading') {
-    return { ...parakeetModelStatus };
-  }
-  if (parakeetModelStatus?.state === 'error') {
-    return { ...parakeetModelStatus };
-  }
-
-  // Ask the binary for the real status
+function readParakeetModelStatusFromHelper(): ParakeetModelStatus {
   const binaryPath = getParakeetTranscriberBinaryPath();
   try {
     if (!fs.existsSync(binaryPath)) {
@@ -446,9 +440,36 @@ function getParakeetModelStatus(): ParakeetModelStatus {
   return parakeetModelStatus;
 }
 
+function getParakeetModelStatusProbeCache(): ReturnType<typeof createLocalAsrHelperStatusProbeCache<ParakeetModelStatus>> {
+  if (!parakeetModelStatusProbeCache) {
+    parakeetModelStatusProbeCache = createLocalAsrHelperStatusProbeCache<ParakeetModelStatus>({
+      readStatus: readParakeetModelStatusFromHelper,
+    });
+  }
+  return parakeetModelStatusProbeCache;
+}
+
+function rememberParakeetModelStatus(status: ParakeetModelStatus): ParakeetModelStatus {
+  parakeetModelStatus = status;
+  getParakeetModelStatusProbeCache().rememberStatus(status);
+  return status;
+}
+
+function getParakeetModelStatus(options: { forceRefresh?: boolean } = {}): ParakeetModelStatus {
+  if (parakeetModelStatus?.state === 'downloading') {
+    return { ...parakeetModelStatus };
+  }
+  if (parakeetModelStatus?.state === 'error') {
+    return { ...parakeetModelStatus };
+  }
+
+  parakeetModelStatus = getParakeetModelStatusProbeCache().getStatus(options);
+  return parakeetModelStatus;
+}
+
 async function ensureParakeetModelDownloaded(): Promise<string> {
   // Check if already downloaded
-  const status = getParakeetModelStatus();
+  const status = getParakeetModelStatus({ forceRefresh: true });
   if (status.state === 'downloaded' && status.path) {
     return status.path;
   }
@@ -522,12 +543,12 @@ async function ensureParakeetModelDownloaded(): Promise<string> {
         });
       });
 
-      parakeetModelStatus = {
+      rememberParakeetModelStatus({
         state: 'downloaded',
         modelName: 'parakeet-tdt-0.6b-v3',
         path: modelPath,
         progress: 1,
-      };
+      });
       console.log(`[Parakeet] Models ready at ${modelPath}`);
       return modelPath;
     } catch (error) {
@@ -573,7 +594,7 @@ async function transcribeAudioWithParakeet(opts: {
   language?: string;
   mimeType?: string;
 }): Promise<string> {
-  const status = getParakeetModelStatus();
+  const status = getParakeetModelStatus({ forceRefresh: true });
   if (status.state === 'downloading') {
     throw new Error('Parakeet models are still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
   }
@@ -611,6 +632,7 @@ type Qwen3ModelStatus = {
 };
 let qwen3ModelStatus: Qwen3ModelStatus | null = null;
 let qwen3ModelEnsurePromise: Promise<string> | null = null;
+let qwen3ModelStatusProbeCache: ReturnType<typeof createLocalAsrHelperStatusProbeCache<Qwen3ModelStatus>> | null = null;
 
 let qwen3ServerProcess: any = null;
 let qwen3ServerReady = false;
@@ -743,10 +765,7 @@ function sendQwen3Request(request: Record<string, any>): Promise<any> {
   });
 }
 
-function getQwen3ModelStatus(): Qwen3ModelStatus {
-  if (qwen3ModelStatus?.state === 'downloading') return { ...qwen3ModelStatus };
-  if (qwen3ModelStatus?.state === 'error') return { ...qwen3ModelStatus };
-
+function readQwen3ModelStatusFromHelper(): Qwen3ModelStatus {
   const binaryPath = getParakeetTranscriberBinaryPath();
   try {
     if (!fs.existsSync(binaryPath)) {
@@ -771,8 +790,31 @@ function getQwen3ModelStatus(): Qwen3ModelStatus {
   return qwen3ModelStatus;
 }
 
+function getQwen3ModelStatusProbeCache(): ReturnType<typeof createLocalAsrHelperStatusProbeCache<Qwen3ModelStatus>> {
+  if (!qwen3ModelStatusProbeCache) {
+    qwen3ModelStatusProbeCache = createLocalAsrHelperStatusProbeCache<Qwen3ModelStatus>({
+      readStatus: readQwen3ModelStatusFromHelper,
+    });
+  }
+  return qwen3ModelStatusProbeCache;
+}
+
+function rememberQwen3ModelStatus(status: Qwen3ModelStatus): Qwen3ModelStatus {
+  qwen3ModelStatus = status;
+  getQwen3ModelStatusProbeCache().rememberStatus(status);
+  return status;
+}
+
+function getQwen3ModelStatus(options: { forceRefresh?: boolean } = {}): Qwen3ModelStatus {
+  if (qwen3ModelStatus?.state === 'downloading') return { ...qwen3ModelStatus };
+  if (qwen3ModelStatus?.state === 'error') return { ...qwen3ModelStatus };
+
+  qwen3ModelStatus = getQwen3ModelStatusProbeCache().getStatus(options);
+  return qwen3ModelStatus;
+}
+
 async function ensureQwen3ModelDownloaded(): Promise<string> {
-  const status = getQwen3ModelStatus();
+  const status = getQwen3ModelStatus({ forceRefresh: true });
   if (status.state === 'downloaded' && status.path) return status.path;
   if (qwen3ModelEnsurePromise) return await qwen3ModelEnsurePromise;
 
@@ -816,7 +858,7 @@ async function ensureQwen3ModelDownloaded(): Promise<string> {
         });
       });
 
-      qwen3ModelStatus = { state: 'downloaded', modelName: 'qwen3-asr-0.6b', path: modelPath, progress: 1 };
+      rememberQwen3ModelStatus({ state: 'downloaded', modelName: 'qwen3-asr-0.6b', path: modelPath, progress: 1 });
       console.log(`[Qwen3] Models ready at ${modelPath}`);
       return modelPath;
     } catch (error) {
@@ -835,7 +877,7 @@ async function transcribeAudioWithQwen3(opts: {
   language?: string;
   mimeType?: string;
 }): Promise<string> {
-  const status = getQwen3ModelStatus();
+  const status = getQwen3ModelStatus({ forceRefresh: true });
   if (status.state === 'downloading') throw new Error('Qwen3 models are still downloading.');
   if (status.state !== 'downloaded') throw new Error('Qwen3 models have not been downloaded yet. Download them from Settings -> AI -> SuperCmd Whisper.');
 
@@ -17778,11 +17820,11 @@ if let tiff = image?.tiffRepresentation {
 
   ipcMain.handle('parakeet-download-model', async () => {
     await ensureParakeetModelDownloaded();
-    return getParakeetModelStatus();
+    return getParakeetModelStatus({ forceRefresh: true });
   });
 
   ipcMain.handle('parakeet-warmup', async () => {
-    const status = getParakeetModelStatus();
+    const status = getParakeetModelStatus({ forceRefresh: true });
     if (status.state !== 'downloaded') {
       return { ready: false, error: 'Models not downloaded' };
     }
@@ -17803,11 +17845,11 @@ if let tiff = image?.tiffRepresentation {
 
   ipcMain.handle('qwen3-download-model', async () => {
     await ensureQwen3ModelDownloaded();
-    return getQwen3ModelStatus();
+    return getQwen3ModelStatus({ forceRefresh: true });
   });
 
   ipcMain.handle('qwen3-warmup', async () => {
-    const status = getQwen3ModelStatus();
+    const status = getQwen3ModelStatus({ forceRefresh: true });
     if (status.state !== 'downloaded') {
       return { ready: false, error: 'Models not downloaded' };
     }
