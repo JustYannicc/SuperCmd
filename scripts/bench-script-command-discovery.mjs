@@ -99,4 +99,3 @@ try {
   delete process.env.SUPERCMD_SCRIPT_COMMAND_PATHS;
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }
-
