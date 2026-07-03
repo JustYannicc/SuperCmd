@@ -96,7 +96,7 @@ export function useCachedPromise<T>(
           if (pageNum === 0) {
             setAccumulatedData(Array.isArray(pageData) ? pageData : []);
           } else {
-            setAccumulatedData((prev) => {
+            setAccumulatedData((prev: unknown) => {
               const prevArr = Array.isArray(prev) ? prev : [];
               const newArr = Array.isArray(pageData) ? pageData : [];
               return [...prevArr, ...newArr];
@@ -123,7 +123,7 @@ export function useCachedPromise<T>(
           if (pageNum === 0) {
             setAccumulatedData(Array.isArray(pageData) ? pageData : []);
           } else {
-            setAccumulatedData((prev) => {
+            setAccumulatedData((prev: unknown) => {
               const prevArr = Array.isArray(prev) ? prev : [];
               const newArr = Array.isArray(pageData) ? pageData : [];
               return [...prevArr, ...newArr];
