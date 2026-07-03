@@ -882,6 +882,60 @@ export function stopFileSearchIndexing(): void {
   stopFileSearchWatcher();
 }
 
+function resetFileSearchIndexForPerfHarness(options?: {
+  homeDir?: string;
+  includeProtectedHomeRoots?: boolean;
+}): void {
+  stopFileSearchIndexing();
+  activeIndex = null;
+  rebuildPromise = null;
+  configuredHomeDir = '';
+  includeRoots = [];
+  refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS;
+  includeProtectedHomeRoots = Boolean(options?.includeProtectedHomeRoots);
+  indexing = false;
+  lastIndexError = null;
+  lastBuildStartedAt = 0;
+  pendingWatchEvents.clear();
+  if (options?.homeDir) {
+    ensureConfigured(options.homeDir);
+  }
+}
+
+async function rebuildFileSearchIndexForPerfHarness(options: {
+  homeDir: string;
+  includeProtectedHomeRoots?: boolean;
+}): Promise<void> {
+  resetFileSearchIndexForPerfHarness(options);
+  if (includeRoots.length === 0) return;
+
+  indexing = true;
+  try {
+    activeIndex = await buildIndexSnapshot(configuredHomeDir);
+    lastIndexError = null;
+  } catch (error) {
+    lastIndexError = error instanceof Error ? error.message : String(error || 'Unknown indexing error');
+    throw error;
+  } finally {
+    indexing = false;
+    rebuildPromise = null;
+    lastBuildStartedAt = 0;
+  }
+}
+
+async function applyFileSearchWatchEventBatchForPerfHarness(paths: string[]): Promise<void> {
+  if (!activeIndex) {
+    throw new Error('File search perf harness requires an active index before applying watch events.');
+  }
+  await applyWatchEventBatch(paths.map((candidatePath) => path.resolve(candidatePath)));
+}
+
+export const __fileSearchIndexPerfHarness = {
+  reset: resetFileSearchIndexForPerfHarness,
+  rebuild: rebuildFileSearchIndexForPerfHarness,
+  applyWatchEventBatch: applyFileSearchWatchEventBatchForPerfHarness,
+};
+
 export async function searchIndexedFiles(
   rawQuery: string,
   options?: { limit?: number }
