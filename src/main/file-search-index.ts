@@ -41,6 +41,7 @@ type IndexedEntry = {
   parentPath: string;
   normalizedName: string;
   normalizedPath: string;
+  normalizedTildePath: string;
   compactName: string;
   tokens: string[];
   pathTokens: string[];
@@ -133,6 +134,7 @@ const PROTECTED_TOP_LEVEL_SET = new Set(
   FILE_SEARCH_INDEX_PROTECTED_HOME_TOP_LEVEL_DIRECTORIES.map((name) => name.toLowerCase())
 );
 const EXCLUDED_FILE_EXTENSIONS = new Set(['.tmp', '.temp', '.log', '.cache', '.crdownload', '.download']);
+const PATH_CANDIDATE_TERM_REGEX = /[a-z0-9]/;
 
 let activeIndex: IndexSnapshot | null = null;
 let rebuildPromise: Promise<void> | null = null;
@@ -266,12 +268,13 @@ function addPrefixIndexValue(prefixToEntryIds: Map<string, number[]>, key: strin
 
 function indexEntry(
   snapshot: IndexSnapshot,
-  entry: Omit<IndexedEntry, 'normalizedName' | 'normalizedPath' | 'compactName' | 'tokens' | 'pathTokens' | 'deleted'>
+  entry: Omit<IndexedEntry, 'normalizedName' | 'normalizedPath' | 'normalizedTildePath' | 'compactName' | 'tokens' | 'pathTokens' | 'deleted'>
 ): void {
   const normalizedName = normalizeSearchText(entry.name);
   if (!normalizedName) return;
   const normalizedPath = normalizePathSearchText(entry.path);
   if (!normalizedPath) return;
+  const normalizedTildePath = normalizePathSearchText(asTildePath(entry.path, configuredHomeDir));
 
   const existingId = snapshot.pathToEntryId.get(entry.path);
   if (existingId !== undefined) {
@@ -295,6 +298,7 @@ function indexEntry(
     ...entry,
     normalizedName,
     normalizedPath,
+    normalizedTildePath,
     compactName,
     tokens,
     pathTokens,
@@ -590,6 +594,62 @@ function resolveCandidateIds(snapshot: IndexSnapshot, terms: string[]): number[]
     indexedLists.push(matches);
   }
   return intersectCandidates(indexedLists);
+}
+
+function getPathLikeBoundaryTerms(needle: string): string[] {
+  const normalizedNeedle = normalizePathSearchText(needle);
+  if (!normalizedNeedle) return [];
+
+  const terms: string[] = [];
+  let termStart = -1;
+
+  const addTerm = (endIndex: number) => {
+    if (termStart <= 0) return;
+    const previousChar = normalizedNeedle[termStart - 1] || '';
+    if (PATH_CANDIDATE_TERM_REGEX.test(previousChar)) return;
+    const term = normalizedNeedle.slice(termStart, endIndex);
+    if (term.length >= 2) terms.push(term);
+  };
+
+  for (let index = 0; index <= normalizedNeedle.length; index += 1) {
+    const char = normalizedNeedle[index] || '';
+    if (PATH_CANDIDATE_TERM_REGEX.test(char)) {
+      if (termStart < 0) termStart = index;
+      continue;
+    }
+
+    if (termStart >= 0) {
+      addTerm(index);
+      termStart = -1;
+    }
+  }
+
+  return [...new Set(terms)];
+}
+
+function resolvePathLikeCandidateIds(
+  snapshot: IndexSnapshot,
+  rawNeedle: string,
+  expandedNeedle: string,
+  trimmedQuery: string
+): number[] | null {
+  const isHomeTildeQuery = trimmedQuery === '~' || trimmedQuery.startsWith('~/') || trimmedQuery.startsWith('~\\');
+  const terms = getPathLikeBoundaryTerms(rawNeedle);
+  if (terms.length === 0 && isHomeTildeQuery) {
+    terms.push(...getPathLikeBoundaryTerms(expandedNeedle));
+  }
+  if (terms.length === 0) return null;
+
+  let smallestBucket: number[] | null = null;
+  for (const term of terms) {
+    const key = term.slice(0, Math.min(MAX_PREFIX_LENGTH, term.length));
+    const matches = snapshot.prefixToEntryIds.get(key);
+    if (!matches || matches.length === 0) return [];
+    if (!smallestBucket || matches.length < smallestBucket.length) {
+      smallestBucket = matches;
+    }
+  }
+  return smallestBucket ? [...smallestBucket] : null;
 }
 
 function resolveHomeDir(inputHomeDir?: string): string {
@@ -1008,13 +1068,16 @@ export async function searchIndexedFiles(
         const expandedNeedle = trimmedQuery.startsWith('~') && configuredHomeDir
           ? normalizePathSearchText(`${configuredHomeDir}${trimmedQuery.slice(1)}`)
           : rawNeedle;
+        const candidateIds = resolvePathLikeCandidateIds(snapshot, rawNeedle, expandedNeedle, trimmedQuery);
+        const candidateEntries = candidateIds === null
+          ? snapshot.entries
+          : candidateIds.map((entryId) => snapshot.entries[entryId]).filter(Boolean);
 
         const scored: Array<{ entry: IndexedEntry; score: number }> = [];
-        for (const entry of snapshot.entries) {
+        for (const entry of candidateEntries) {
           if (entry.deleted) continue;
           const pathIndex = entry.normalizedPath.indexOf(expandedNeedle);
-          const tildePath = normalizePathSearchText(asTildePath(entry.path, configuredHomeDir));
-          const tildeIndex = tildePath.indexOf(rawNeedle);
+          const tildeIndex = entry.normalizedTildePath.indexOf(rawNeedle);
           const matchIndex = pathIndex >= 0 ? pathIndex : tildeIndex;
           if (matchIndex < 0) continue;
 
@@ -1160,6 +1223,7 @@ export async function searchIndexedFiles(
         parentPath: path.dirname(candidatePath),
         normalizedName,
         normalizedPath: normalizePathSearchText(candidatePath),
+        normalizedTildePath: normalizePathSearchText(asTildePath(candidatePath, configuredHomeDir)),
         compactName: normalizedName.replace(/\s+/g, ''),
         tokens: tokenizeSearchText(candidateName),
         pathTokens: tokenizeSearchText(candidatePath),
