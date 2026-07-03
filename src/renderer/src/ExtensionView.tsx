@@ -21,6 +21,18 @@ import { getCompiledExtensionWrapper } from './utils/extension-wrapper-cache';
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
 
+const EXTENSION_RUNTIME_DEBUG_GLOBAL = '__SUPERCMD_EXTENSION_RUNTIME_DEBUG';
+
+function isExtensionRuntimeDebugLoggingEnabled(): boolean {
+  return (globalThis as any)[EXTENSION_RUNTIME_DEBUG_GLOBAL] === true;
+}
+
+function logExtensionRuntimeDebug(...args: unknown[]): void {
+  if (isExtensionRuntimeDebugLoggingEnabled()) {
+    console.debug(...args);
+  }
+}
+
 // ─── React Module for Extensions ────────────────────────────────────
 // Extensions MUST use the exact same React instance as the host app.
 //
@@ -31,9 +43,9 @@ import * as RaycastUtils from './raycast-api';
 // Create React module for extensions
 // We simply return the actual React import - no copying, no wrapping
 // This ensures extensions get the exact same React that the host uses
-console.log('[React] Setting up React for extensions');
-console.log('[React] React.version:', React.version);
-console.log('[React] React.useState:', typeof React.useState);
+logExtensionRuntimeDebug('[React] Setting up React for extensions');
+logExtensionRuntimeDebug('[React] React.version:', React.version);
+logExtensionRuntimeDebug('[React] React.useState:', typeof React.useState);
 
 // ─── JSX Runtime for Extensions ─────────────────────────────────────
 // We use the actual jsx-runtime import to ensure full compatibility.
@@ -3819,14 +3831,11 @@ function loadExtensionExport(
     // This is the critical bridge between extension code and the
     // SuperCmd renderer environment. Every module an extension
     // might `require()` must be handled here.
-    //
-    // IMPORTANT: We track React requires to verify the same instance is always returned.
     let reactRequireCount = 0;
     const fakeRequire: any = (name: string): any => {
-      // Track all requires for debugging
       if (name === 'react' || name.startsWith('react/') || name === 'react-dom') {
         reactRequireCount++;
-        console.log(`[fakeRequire] #${reactRequireCount} require("${name}")`);
+        logExtensionRuntimeDebug(`[fakeRequire] #${reactRequireCount} require("${name}")`);
       }
       // ── React & friends ─────────────────────────────────────
       // CRITICAL: Extensions MUST use the same React instance as the host.
@@ -3838,14 +3847,14 @@ function loadExtensionExport(
       switch (name) {
         case 'react': {
           // Return React directly - the exact same module the host uses
-          console.log('[fakeRequire] Providing React directly');
+          logExtensionRuntimeDebug('[fakeRequire] Providing React directly');
           (globalThis as any).__SUPERCMD_REACT = React;
           return React;
         }
         case 'react-dom':
         case 'react-dom/client':
-          console.log('[fakeRequire] Providing ReactDOM');
-          console.log('[fakeRequire] ReactDOM.createRoot:', (ReactDOM as any).createRoot);
+          logExtensionRuntimeDebug('[fakeRequire] Providing ReactDOM');
+          logExtensionRuntimeDebug('[fakeRequire] ReactDOM.createRoot:', (ReactDOM as any).createRoot);
           return ReactDOM;
         case 'react-dom/server':
           return reactDomServerStub;
@@ -3853,9 +3862,9 @@ function loadExtensionExport(
         case 'react/jsx-dev-runtime': {
           // Return the actual jsx-runtime to ensure JSX creates elements
           // using the same React.createElement
-          console.log('[fakeRequire] Providing jsx-runtime');
-          console.log('[fakeRequire] JsxRuntime.Fragment === React.Fragment:', JsxRuntime.Fragment === React.Fragment);
-          console.log('[fakeRequire] JsxRuntime.Fragment === React.Fragment:', JsxRuntime.Fragment === React.Fragment);
+          logExtensionRuntimeDebug('[fakeRequire] Providing jsx-runtime');
+          logExtensionRuntimeDebug('[fakeRequire] JsxRuntime.Fragment === React.Fragment:', JsxRuntime.Fragment === React.Fragment);
+          logExtensionRuntimeDebug('[fakeRequire] JsxRuntime.Fragment === React.Fragment:', JsxRuntime.Fragment === React.Fragment);
           return JsxRuntime;
         }
 
@@ -4211,10 +4220,12 @@ function loadExtensionExport(
     const exported =
       fakeModule.exports.default || fakeModule.exports;
 
-    console.log('[loadExtensionExport] Extension loaded successfully');
-    console.log('[loadExtensionExport] Exported type:', typeof exported);
-    console.log('[loadExtensionExport] Exported name:', exported?.name);
-    console.log('[loadExtensionExport] Exported function:', exported?.toString?.().slice(0, 200));
+    if (isExtensionRuntimeDebugLoggingEnabled()) {
+      console.debug('[loadExtensionExport] Extension loaded successfully');
+      console.debug('[loadExtensionExport] Exported type:', typeof exported);
+      console.debug('[loadExtensionExport] Exported name:', exported?.name);
+      console.debug('[loadExtensionExport] Exported function:', exported?.toString?.().slice(0, 200));
+    }
 
     if (typeof exported === 'function') {
       return exported;
@@ -4365,9 +4376,8 @@ const ViewRenderer: React.FC<{
   fallbackText,
   launchType = 'userInitiated',
 }) => {
-  // Simple test that hooks work here
   const [test] = useState('ok');
-  console.log('[ViewRenderer] Hooks work here, rendering extension...');
+  logExtensionRuntimeDebug('[ViewRenderer] Hooks work here, rendering extension...');
   // Pass standard Raycast props: arguments (command arguments) and launchType
   return React.createElement(Component, {
     arguments: launchArguments,
