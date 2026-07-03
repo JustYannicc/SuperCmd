@@ -87,6 +87,10 @@ import {
   RENDERER_RECOVERY_DELAY_MS,
 } from './renderer-recovery';
 import {
+  createAppIconDataUrlCache,
+  createFileIconDataUrlCache,
+} from './icon-ipc-cache';
+import {
   startClipboardMonitor,
   stopClipboardMonitor,
   getClipboardHistory,
@@ -3072,6 +3076,10 @@ function resolveAppIconDataUrl(appPath: string, size = 32): string | null {
     return null;
   }
 }
+const appIconDataUrlCache = createAppIconDataUrlCache({ resolveAppIconDataUrl });
+const fileIconDataUrlCache = createFileIconDataUrlCache({
+  getFileIcon: (filePath, options) => app.getFileIcon(filePath, options),
+});
 let launcherEntryFrontmostApp: FrontmostAppContext | null = null;
 const registeredHotkeys = new Map<string, string>(); // shortcut → commandId
 const activeAIRequests = new Map<string, AbortController>(); // requestId → controller
@@ -15988,7 +15996,7 @@ return appURL's |path|() as text`,
               // actually targeted (bundlePath), so it does not depend on
               // lastFrontmostApp.path being populated.
               const iconPath = String(result?.appPath || targetAppPath || '').trim();
-              const appIconDataUrl = iconPath ? resolveAppIconDataUrl(iconPath, 32) : null;
+              const appIconDataUrl = iconPath ? appIconDataUrlCache.resolveSync(iconPath, 32) : null;
               resolve({ ...result, appIconDataUrl });
             } catch {
               resolve({ ok: false, error: stderr || 'Failed to parse menu item search output' });
@@ -16331,20 +16339,12 @@ return appURL's |path|() as text`,
   });
 
   ipcMain.handle('get-file-icon-data-url', async (_event: any, filePath: string, size = 20) => {
-    try {
-      const icon = await app.getFileIcon(filePath, { size: size <= 16 ? 'small' : size >= 64 ? 'large' : 'normal' });
-      if (icon && !icon.isEmpty()) {
-        return icon.resize({ width: size, height: size }).toDataURL();
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return fileIconDataUrlCache.resolve(filePath, size);
   });
 
   // Get .app bundle icon by reading its .icns file directly (avoids template-image transparency issues)
   ipcMain.handle('get-app-icon-data-url', async (_event: any, appPath: string, size = 32) => {
-    return resolveAppIconDataUrl(appPath, size);
+    return appIconDataUrlCache.resolve(appPath, size);
   });
 
   ipcMain.handle('file-search-query', async (_event: any, query: string, options?: { limit?: number }) => {
