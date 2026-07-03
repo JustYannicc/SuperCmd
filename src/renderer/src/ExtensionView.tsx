@@ -16,6 +16,7 @@ import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import * as RaycastAPI from './raycast-api';
 import { NavigationContext, setExtensionContext, setGlobalNavigation, ExtensionContextType, ExtensionInfoReactContext } from './raycast-api';
 import { withExtensionContext } from './raycast-api/context-scope-runtime';
+import { getCompiledExtensionWrapper } from './utils/extension-wrapper-cache';
 
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
@@ -3571,7 +3572,8 @@ end tell`.trim();
 function loadExtensionExport(
   code: string,
   extensionPath?: string,
-  timerRegistry?: TimerRegistry
+  timerRegistry?: TimerRegistry,
+  extensionIdentity = extensionPath || 'unknown-extension'
 ): Function | null {
   const patchSchemeDynamicImports = (sourceCode: string): string => {
     // Extension bundles may emit dynamic imports for native Raycast bridges
@@ -3962,28 +3964,12 @@ function loadExtensionExport(
     // anyway because requests are routed through the main process). Code
     // that genuinely needs navigator can still reach it via
     // `globalThis.navigator` or `window.navigator`.
-    const fn = new Function(
-      'exports',
-      'require',
-      'module',
-      '__filename',
-      '__dirname',
-      'process',
-      'Buffer',
-      'global',
-      'globalThis',
-      'setImmediate',
-      'clearImmediate',
-      'setInterval',
-      'clearInterval',
-      'setTimeout',
-      'clearTimeout',
-      'requestAnimationFrame',
-      'cancelAnimationFrame',
-      'navigator',
-      '__scDynamicImport',
-      executableCode
-    );
+    const { wrapper: fn, cacheHit } = getCompiledExtensionWrapper({
+      extensionIdentity,
+      code,
+      executableCode,
+    });
+    console.debug(`[loadExtensionExport] Wrapper cache ${cacheHit ? 'hit' : 'miss'} for ${extensionIdentity}`);
 
     fn(
       moduleExports,
@@ -4239,6 +4225,11 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     mode,
   ]);
 
+  const extensionWrapperIdentity = useMemo(
+    () => [owner, extensionName, commandName, extensionPath].map((part) => String(part || '')).join('\0'),
+    [owner, extensionName, commandName, extensionPath]
+  );
+
   // Set extension context before loading (so getPreferenceValues etc. work)
   useEffect(() => {
     setExtensionContext(extensionCtx);
@@ -4266,9 +4257,9 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     // Load under the extension's scoped context so other async extension work
     // cannot leak a different context into this bundle.
     return withExtensionContext(extensionCtx, () =>
-      loadExtensionExport(code, extensionPath, timerRegistryRef.current)
+      loadExtensionExport(code, extensionPath, timerRegistryRef.current, extensionWrapperIdentity)
     );
-  }, [code, buildError, extensionCtx, extensionPath]);
+  }, [code, buildError, extensionCtx, extensionPath, extensionWrapperIdentity]);
 
   // Is this a no-view command? Trust the mode from package.json.
   // NOTE: 'menu-bar' commands ARE React components (they use hooks),
