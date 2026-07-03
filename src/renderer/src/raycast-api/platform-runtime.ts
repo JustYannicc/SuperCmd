@@ -144,18 +144,34 @@ export function withCache<Fn extends (...args: any[]) => Promise<any>>(
   const wrapped = (async (...args: any[]) => {
     const key = JSON.stringify(args);
     const cached = cacheStore.get(key);
+    const maxAge = options?.maxAge;
 
     if (cached) {
-      const isExpired = options?.maxAge != null && (Date.now() - cached.timestamp) > options.maxAge;
-      const isValid = options?.validate ? options.validate(cached.data) : true;
+      const isExpired = maxAge != null && (Date.now() - cached.timestamp) > maxAge;
 
-      if (!isExpired && isValid) {
-        return cached.data;
+      if (isExpired) {
+        cacheStore.delete(key);
+      } else {
+        const isValid = options?.validate ? options.validate(cached.data) : true;
+
+        if (isValid) {
+          return cached.data;
+        }
       }
     }
 
     const result = await fn(...args);
-    cacheStore.set(key, { data: result, timestamp: Date.now() });
+    const timestamp = Date.now();
+
+    if (maxAge != null) {
+      for (const [cacheKey, entry] of cacheStore) {
+        if ((timestamp - entry.timestamp) > maxAge) {
+          cacheStore.delete(cacheKey);
+        }
+      }
+    }
+
+    cacheStore.set(key, { data: result, timestamp });
     return result;
   }) as Fn & { clearCache: () => void };
 
@@ -165,4 +181,3 @@ export function withCache<Fn extends (...args: any[]) => Promise<any>>(
 
   return wrapped;
 }
-
