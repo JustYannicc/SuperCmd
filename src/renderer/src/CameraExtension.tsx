@@ -22,6 +22,18 @@ type CaptureStatus = {
   text: string;
 };
 
+interface CapturePreviewUrlApi {
+  createObjectURL: (blob: Blob) => string;
+  revokeObjectURL: (objectUrl: string) => void;
+}
+
+interface CapturePreviewUrlManager {
+  getCurrentUrl: () => string | null;
+  show: (blob: Blob) => string | null;
+  clear: () => void;
+  dispose: () => void;
+}
+
 function stopMediaStream(stream?: MediaStream | null): void {
   if (!stream) return;
   for (const track of stream.getTracks()) {
@@ -69,6 +81,68 @@ function getCameraErrorMessage(error: unknown): { state: CameraPermissionState; 
   };
 }
 
+function getCapturePreviewUrlApi(): CapturePreviewUrlApi | null {
+  if (
+    typeof URL === 'undefined' ||
+    typeof URL.createObjectURL !== 'function' ||
+    typeof URL.revokeObjectURL !== 'function'
+  ) {
+    return null;
+  }
+  return URL;
+}
+
+function createCapturePreviewUrlManager(
+  urlApi: CapturePreviewUrlApi | null = getCapturePreviewUrlApi()
+): CapturePreviewUrlManager {
+  let currentUrl: string | null = null;
+
+  const clear = () => {
+    const urlToRevoke = currentUrl;
+    currentUrl = null;
+    if (!urlToRevoke || !urlApi) return;
+    try {
+      urlApi.revokeObjectURL(urlToRevoke);
+    } catch {}
+  };
+
+  return {
+    getCurrentUrl: () => currentUrl,
+    show: (blob: Blob) => {
+      let nextUrl: string | null = null;
+      if (urlApi) {
+        try {
+          nextUrl = urlApi.createObjectURL(blob);
+        } catch {
+          nextUrl = null;
+        }
+      }
+      clear();
+      currentUrl = nextUrl;
+      return currentUrl;
+    },
+    clear,
+    dispose: clear,
+  };
+}
+
+function createCapturePreview(
+  blob: Blob,
+  previewUrlManager: CapturePreviewUrlManager
+): { url: string | null; visible: boolean } {
+  const url = previewUrlManager.show(blob);
+  return {
+    url,
+    visible: Boolean(url),
+  };
+}
+
+function encodeCanvasAsPngBlob(canvas: Pick<HTMLCanvasElement, 'toBlob'>): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/png');
+  });
+}
+
 const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
   const [permissionState, setPermissionState] = useState<CameraPermissionState>('checking');
   const [errorText, setErrorText] = useState('');
@@ -78,7 +152,7 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [showActions, setShowActions] = useState(false);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
-  const [capturePreviewDataUrl, setCapturePreviewDataUrl] = useState<string | null>(null);
+  const [capturePreviewUrl, setCapturePreviewUrl] = useState<string | null>(null);
   const [capturePreviewVisible, setCapturePreviewVisible] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus | null>(null);
   const [flashVisible, setFlashVisible] = useState(false);
@@ -95,6 +169,11 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
   const startRequestIdRef = useRef(0);
   const unmountedRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
+  const capturePreviewUrlManagerRef = useRef<CapturePreviewUrlManager | null>(null);
+
+  if (capturePreviewUrlManagerRef.current === null) {
+    capturePreviewUrlManagerRef.current = createCapturePreviewUrlManager();
+  }
 
   const clearTransientUi = useCallback(() => {
     if (captureNoticeTimerRef.current != null) {
@@ -114,6 +193,45 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
       capturePreviewClearTimerRef.current = null;
     }
   }, []);
+
+  const clearCapturePreview = useCallback(() => {
+    capturePreviewUrlManagerRef.current?.clear();
+    setCapturePreviewUrl(null);
+    setCapturePreviewVisible(false);
+  }, []);
+
+  const showCapturePreview = useCallback(
+    (blob: Blob) => {
+      const previewUrlManager = capturePreviewUrlManagerRef.current;
+      if (!previewUrlManager) return;
+
+      if (capturePreviewFadeTimerRef.current != null) {
+        window.clearTimeout(capturePreviewFadeTimerRef.current);
+      }
+      if (capturePreviewClearTimerRef.current != null) {
+        window.clearTimeout(capturePreviewClearTimerRef.current);
+      }
+
+      const preview = createCapturePreview(blob, previewUrlManager);
+      if (!preview.url) {
+        setCapturePreviewUrl(null);
+        setCapturePreviewVisible(false);
+        return;
+      }
+
+      setCapturePreviewUrl(preview.url);
+      setCapturePreviewVisible(preview.visible);
+      capturePreviewFadeTimerRef.current = window.setTimeout(() => {
+        setCapturePreviewVisible(false);
+        capturePreviewFadeTimerRef.current = null;
+      }, 5000);
+      capturePreviewClearTimerRef.current = window.setTimeout(() => {
+        clearCapturePreview();
+        capturePreviewClearTimerRef.current = null;
+      }, 5300);
+    },
+    [clearCapturePreview]
+  );
 
   const refocusCameraRoot = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -284,22 +402,6 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
       context.drawImage(video, 0, 0, width, height);
     }
 
-    setCapturePreviewDataUrl(canvas.toDataURL('image/png'));
-    setCapturePreviewVisible(true);
-    if (capturePreviewFadeTimerRef.current != null) {
-      window.clearTimeout(capturePreviewFadeTimerRef.current);
-    }
-    if (capturePreviewClearTimerRef.current != null) {
-      window.clearTimeout(capturePreviewClearTimerRef.current);
-    }
-    capturePreviewFadeTimerRef.current = window.setTimeout(() => {
-      setCapturePreviewVisible(false);
-      capturePreviewFadeTimerRef.current = null;
-    }, 5000);
-    capturePreviewClearTimerRef.current = window.setTimeout(() => {
-      setCapturePreviewDataUrl(null);
-      capturePreviewClearTimerRef.current = null;
-    }, 5300);
     setFlashVisible(true);
     if (flashTimerRef.current != null) {
       window.clearTimeout(flashTimerRef.current);
@@ -316,9 +418,10 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
     const timestamp = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}_${two(now.getHours())}-${two(now.getMinutes())}-${two(now.getSeconds())}`;
     const savePath = `${saveDir}/supercmd-capture-${timestamp}.png`;
 
-    let captureBlob: Blob | null = await new Promise((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), 'image/png');
-    });
+    const captureBlob = await encodeCanvasAsPngBlob(canvas);
+    if (captureBlob && !unmountedRef.current) {
+      showCapturePreview(captureBlob);
+    }
 
     let savedToDisk = false;
     if (captureBlob) {
@@ -349,7 +452,7 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
       showCaptureStatus({ kind: 'neutral', text: 'Failed to copy picture to clipboard.' }, 3000);
     }
     refocusCameraRoot();
-  }, [isHorizontallyFlipped, refocusCameraRoot, showCaptureStatus, stream]);
+  }, [isHorizontallyFlipped, refocusCameraRoot, showCapturePreview, showCaptureStatus, stream]);
 
   const openSystemCameraSettings = useCallback(async () => {
     try {
@@ -363,6 +466,7 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
       unmountedRef.current = true;
       startRequestIdRef.current += 1;
       clearTransientUi();
+      capturePreviewUrlManagerRef.current?.dispose();
       const currentStream = streamRef.current;
       streamRef.current = null;
       stopMediaStream(currentStream);
@@ -586,14 +690,14 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
               <span className="truncate max-w-[240px]">{selectedCameraLabel}</span>
             </div>
 
-            {capturePreviewDataUrl ? (
+            {capturePreviewUrl ? (
               <div
                 className={`absolute right-3 bottom-3 w-28 h-20 rounded-lg border border-white/20 overflow-hidden bg-black/80 shadow-xl transition-opacity duration-300 ${
                   capturePreviewVisible ? 'opacity-100' : 'opacity-0'
                 }`}
               >
                 <img
-                  src={capturePreviewDataUrl}
+                  src={capturePreviewUrl}
                   alt="Latest capture"
                   className="w-full h-full object-cover"
                   draggable={false}
@@ -774,3 +878,9 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
 };
 
 export default CameraExtension;
+
+export const __cameraCaptureTestAccess = {
+  createCapturePreview,
+  createCapturePreviewUrlManager,
+  encodeCanvasAsPngBlob,
+};
