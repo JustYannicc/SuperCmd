@@ -272,7 +272,11 @@ export function useLauncherInlineArguments({
           [argumentName]: value,
         };
         if (extensionIdentity && command.mode === 'no-view') {
-          writeJsonObject(getCmdArgsKey(extensionIdentity.extName, extensionIdentity.cmdName), nextCommandValues);
+          writeJsonObject(
+            getCmdArgsKey(extensionIdentity.extName, extensionIdentity.cmdName),
+            nextCommandValues,
+            { commandArgumentSettingsSync: 'debounced' }
+          );
         }
         return {
           ...prev,
