@@ -11,7 +11,7 @@ function getReactTypeName(type: any): string {
   return String(type?.displayName || type?.name || type || '');
 }
 
-function buildSnapshotSignature(value: unknown, seen = new WeakSet<object>()): string {
+function buildValueSignature(value: unknown, seen = new WeakSet<object>()): string {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (typeof value === 'string') return JSON.stringify(value);
@@ -20,21 +20,22 @@ function buildSnapshotSignature(value: unknown, seen = new WeakSet<object>()): s
   if (typeof value === 'symbol') return value.toString();
 
   if (Array.isArray(value)) {
-    return `[${value.map((item) => buildSnapshotSignature(item, seen)).join(',')}]`;
+    return `[${value.map((item) => buildValueSignature(item, seen)).join(',')}]`;
   }
 
   if (React.isValidElement(value)) {
-    return `element:${getReactTypeName(value.type)}:${buildSnapshotSignature((value as any).props, seen)}`;
+    return `element:${getReactTypeName(value.type)}:${buildValueSignature((value as any).props, seen)}`;
   }
 
   if (typeof value === 'object') {
+    if (value instanceof Date) return `date:${value.getTime()}`;
     if (seen.has(value as object)) return '[circular]';
     seen.add(value as object);
 
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([key]) => key !== '_owner' && key !== '_store' && key !== 'ref' && key !== 'key')
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entryValue]) => `${key}:${buildSnapshotSignature(entryValue, seen)}`);
+      .map(([key, entryValue]) => `${key}:${buildValueSignature(entryValue, seen)}`);
 
     return `{${entries.join(',')}}`;
   }
@@ -42,37 +43,51 @@ function buildSnapshotSignature(value: unknown, seen = new WeakSet<object>()): s
   return String(value);
 }
 
+function buildActionTypeSignature(actions: unknown): string {
+  if (!React.isValidElement(actions)) return buildValueSignature(actions);
+  return getReactTypeName((actions as React.ReactElement).type);
+}
+
+function buildListAccessorySignature(accessory: NonNullable<ItemRegistration['props']['accessories']>[number]): string {
+  return [
+    buildValueSignature(accessory?.text),
+    buildValueSignature(accessory?.icon),
+    buildValueSignature(accessory?.tag),
+    buildValueSignature(accessory?.date),
+    buildValueSignature(accessory?.tooltip),
+  ].join('\u001e');
+}
+
+export function buildListItemVisibleSignature(item: ItemRegistration): string {
+  const props = item.props;
+  return [
+    item.id,
+    String(item.order),
+    item.sectionTitle || '',
+    buildValueSignature(props.id),
+    buildValueSignature(props.title),
+    buildValueSignature(props.subtitle),
+    buildValueSignature(props.icon),
+    props.accessories?.map(buildListAccessorySignature).join('\u001d') || '',
+    props.keywords?.map((keyword) => JSON.stringify(keyword)).join('\u001d') || '',
+    buildValueSignature(props.detail),
+    buildValueSignature(props.quickLook),
+    buildActionTypeSignature(props.actions),
+  ].join('\u001f');
+}
+
 export function useListRegistry() {
   const registryRef = useRef(new Map<string, ItemRegistration>());
+  const visibleSignatureRef = useRef(new Map<string, string>());
   const [registryVersion, setRegistryVersion] = useState(0);
   const pendingRef = useRef(false);
-  const lastSnapshotRef = useRef('');
 
   const scheduleRegistryUpdate = useCallback(() => {
     if (pendingRef.current) return;
     pendingRef.current = true;
     queueMicrotask(() => {
       pendingRef.current = false;
-      const snapshot = Array.from(registryRef.current.values()).map((item) => {
-        const actionType = item.props.actions?.type as any;
-        const actionName = actionType?.name || actionType?.displayName || typeof actionType || '';
-        return buildSnapshotSignature({
-          actionName,
-          accessories: item.props.accessories,
-          detail: item.props.detail,
-          icon: item.props.icon,
-          id: item.id,
-          keywords: item.props.keywords,
-          order: item.order,
-          sectionTitle: item.sectionTitle || '',
-          subtitle: item.props.subtitle,
-          title: item.props.title,
-        });
-      }).join('|');
-      if (snapshot !== lastSnapshotRef.current) {
-        lastSnapshotRef.current = snapshot;
-        setRegistryVersion((value) => value + 1);
-      }
+      setRegistryVersion((value) => value + 1);
     });
   }, []);
 
@@ -84,22 +99,30 @@ export function useListRegistry() {
         // re-runs every <List.Item> render even though no content actually
         // changed. The renderOrder counter shifts uniformly so relative
         // order is preserved; just write it through and skip the costly
-        // snapshot recompute. Only schedule an update when props identity
-        // or section actually changed.
+        // visible-signature work. Only publish when the id's visible
+        // signature, section, or order actually changed.
         const propsChanged = existing.props !== data.props;
         const sectionChanged = existing.sectionTitle !== data.sectionTitle;
+        const orderChanged = existing.order !== data.order;
         existing.props = data.props;
         existing.sectionTitle = data.sectionTitle;
         existing.order = data.order;
-        if (!propsChanged && !sectionChanged) return;
+        if (!propsChanged && !sectionChanged && !orderChanged) return;
+
+        const nextSignature = buildListItemVisibleSignature(existing);
+        if (visibleSignatureRef.current.get(id) === nextSignature) return;
+        visibleSignatureRef.current.set(id, nextSignature);
       } else {
-        registryRef.current.set(id, { id, ...data });
+        const item = { id, ...data };
+        registryRef.current.set(id, item);
+        visibleSignatureRef.current.set(id, buildListItemVisibleSignature(item));
       }
       scheduleRegistryUpdate();
     },
     delete(id) {
       if (!registryRef.current.has(id)) return;
       registryRef.current.delete(id);
+      visibleSignatureRef.current.delete(id);
       scheduleRegistryUpdate();
     },
   }), [scheduleRegistryUpdate]);
