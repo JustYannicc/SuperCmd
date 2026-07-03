@@ -8,6 +8,9 @@ import { getIconRuntimeContext } from './icon-runtime-config';
 
 const LOCAL_PATH_EXISTS_CACHE_MAX = 4096;
 const positiveLocalPathExistsCache = new Set<string>();
+const LOCAL_PATH_MISS_CACHE_MAX = 4096;
+const LOCAL_PATH_MISS_CACHE_TTL_MS = 250;
+const negativeLocalPathExistsCache = new Map<string, number>();
 
 const CSS_COLOR_CACHE_MAX = 1024;
 const normalizedCssColorCache = new Map<string, string>();
@@ -65,6 +68,13 @@ function localPathExists(filePath: string): boolean {
   if (!filePath) return false;
   if (positiveLocalPathExistsCache.has(filePath)) return true;
 
+  const nowMs = getLocalPathCacheNowMs();
+  const missExpiresAt = negativeLocalPathExistsCache.get(filePath);
+  if (typeof missExpiresAt === 'number') {
+    if (missExpiresAt > nowMs) return false;
+    negativeLocalPathExistsCache.delete(filePath);
+  }
+
   try {
     const stat = (window as any).electron?.statSync?.(filePath);
     const exists = Boolean(stat?.exists);
@@ -73,11 +83,28 @@ function localPathExists(filePath: string): boolean {
         positiveLocalPathExistsCache.clear();
       }
       positiveLocalPathExistsCache.add(filePath);
+      negativeLocalPathExistsCache.delete(filePath);
+    } else {
+      cacheLocalPathMiss(filePath, nowMs);
     }
     return exists;
   } catch {
+    cacheLocalPathMiss(filePath, nowMs);
     return false;
   }
+}
+
+function getLocalPathCacheNowMs(): number {
+  const performanceNow = (globalThis as any).performance?.now;
+  if (typeof performanceNow === 'function') return performanceNow.call((globalThis as any).performance);
+  return Date.now();
+}
+
+function cacheLocalPathMiss(filePath: string, nowMs: number): void {
+  if (negativeLocalPathExistsCache.size >= LOCAL_PATH_MISS_CACHE_MAX) {
+    negativeLocalPathExistsCache.clear();
+  }
+  negativeLocalPathExistsCache.set(filePath, nowMs + LOCAL_PATH_MISS_CACHE_TTL_MS);
 }
 
 function localPathFromScAssetUrl(src: string): string | null {
