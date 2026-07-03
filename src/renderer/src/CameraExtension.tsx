@@ -323,7 +323,6 @@ const CameraExtension: React.FC<CameraExtensionProps> = ({ onClose }) => {
     let savedToDisk = false;
     if (captureBlob) {
       try {
-        await window.electron.execCommand('/bin/mkdir', ['-p', saveDir], {});
         const bytes = new Uint8Array(await captureBlob.arrayBuffer());
         await window.electron.fsWriteBinaryFile(savePath, bytes);
         savedToDisk = true;
