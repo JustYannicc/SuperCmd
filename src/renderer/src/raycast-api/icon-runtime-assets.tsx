@@ -6,6 +6,10 @@
 import React from 'react';
 import { getIconRuntimeContext } from './icon-runtime-config';
 
+const LOCAL_PATH_MISS_CACHE_MAX = 4096;
+const LOCAL_PATH_MISS_CACHE_TTL_MS = 250;
+const negativeLocalPathExistsCache = new Map<string, number>();
+
 type RgbColor = {
   r: number;
   g: number;
@@ -41,12 +45,40 @@ export function toScAssetUrl(filePath: string): string {
 
 function localPathExists(filePath: string): boolean {
   if (!filePath) return false;
+
+  const nowMs = getLocalPathCacheNowMs();
+  const missExpiresAt = negativeLocalPathExistsCache.get(filePath);
+  if (typeof missExpiresAt === 'number') {
+    if (missExpiresAt > nowMs) return false;
+    negativeLocalPathExistsCache.delete(filePath);
+  }
+
   try {
     const stat = (window as any).electron?.statSync?.(filePath);
-    return Boolean(stat?.exists);
+    const exists = Boolean(stat?.exists);
+    if (exists) {
+      negativeLocalPathExistsCache.delete(filePath);
+    } else {
+      cacheLocalPathMiss(filePath, nowMs);
+    }
+    return exists;
   } catch {
+    cacheLocalPathMiss(filePath, nowMs);
     return false;
   }
+}
+
+function getLocalPathCacheNowMs(): number {
+  const performanceNow = (globalThis as any).performance?.now;
+  if (typeof performanceNow === 'function') return performanceNow.call((globalThis as any).performance);
+  return Date.now();
+}
+
+function cacheLocalPathMiss(filePath: string, nowMs: number): void {
+  if (negativeLocalPathExistsCache.size >= LOCAL_PATH_MISS_CACHE_MAX) {
+    negativeLocalPathExistsCache.clear();
+  }
+  negativeLocalPathExistsCache.set(filePath, nowMs + LOCAL_PATH_MISS_CACHE_TTL_MS);
 }
 
 function localPathFromScAssetUrl(src: string): string | null {
