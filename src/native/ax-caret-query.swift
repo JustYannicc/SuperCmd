@@ -207,9 +207,11 @@ public enum AXCaretQuery {
     }
     // BFS up to a small depth to avoid walking huge trees.
     var queue: [(el: AXUIElement, depth: Int)] = [(root, 0)]
+    var queueIndex = 0
     let maxDepth = 6
-    while let (el, depth) = queue.first {
-      queue.removeFirst()
+    while queueIndex < queue.count {
+      let (el, depth) = queue[queueIndex]
+      queueIndex += 1
       if depth > 0 {
         let role = copyString(el, kAXRoleAttribute as CFString) ?? ""
         if TEXT_LEAF_ROLES.contains(role) && hasSelectedTextRange(el) {
