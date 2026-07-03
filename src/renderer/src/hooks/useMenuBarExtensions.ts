@@ -19,6 +19,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ExtensionBundle } from '../../types/electron';
+import type { ExtensionStorageChangedDetail } from '../raycast-api/storage-events';
 
 export interface MenuBarEntry {
   key: string;
@@ -46,7 +47,13 @@ export interface UseMenuBarExtensionsReturn {
   hideMenuBarExtension: (bundle: Partial<ExtensionBundle>) => void;
   hideMenuBarExtensionsForExtension: (extensionName: string) => void;
   upsertMenuBarExtension: (bundle: ExtensionBundle, options?: { remount?: boolean }) => void;
-  remountMenuBarExtensionsForExtension: (extensionName: string) => void;
+  remountMenuBarExtensionsForExtension: (
+    extensionName: string,
+    options?: {
+      sourceCommandName?: string;
+      sourceCommandMode?: string;
+    }
+  ) => void;
 }
 
 export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
@@ -133,25 +140,35 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     });
   }, [getMenuBarIdentity]);
 
-  const remountMenuBarExtensionsForExtension = useCallback((extensionName: string) => {
+  const remountMenuBarExtensionsForExtension = useCallback((
+    extensionName: string,
+    options?: {
+      sourceCommandName?: string;
+      sourceCommandMode?: string;
+    }
+  ) => {
     const normalized = (extensionName || '').trim();
     if (!normalized) return;
     const now = Date.now();
     const lastTs = menuBarRemountTimestampsRef.current[normalized] || 0;
     if (now - lastTs < 200) return;
-    menuBarRemountTimestampsRef.current[normalized] = now;
+    const sourceCommandName = (options?.sourceCommandName || '').trim();
+    const sourceCommandMode = (options?.sourceCommandMode || '').trim();
+    const skipSourceCommand = sourceCommandMode === 'menu-bar' && Boolean(sourceCommandName);
     setMenuBarExtensions((prev) => {
       let changed = false;
       const next = prev.map((entry) => {
         const entryExt = (entry.bundle.extName || entry.bundle.extensionName || '').trim();
         if (!entryExt || entryExt !== normalized) return entry;
+        const cmdName = (entry.bundle.cmdName || entry.bundle.commandName || '').trim();
+        if (skipSourceCommand && cmdName === sourceCommandName) return entry;
         changed = true;
-        const cmdName = entry.bundle.cmdName || entry.bundle.commandName || '';
         return {
           key: `${normalized}:${cmdName}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
           bundle: entry.bundle,
         };
       });
+      if (changed) menuBarRemountTimestampsRef.current[normalized] = now;
       return changed ? next : prev;
     });
   }, []);
@@ -163,10 +180,13 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
   // This matches Raycast behavior where menu-bar commands observe state changes quickly.
   useEffect(() => {
     const onStorageChanged = (event: Event) => {
-      const custom = event as CustomEvent<{ extensionName?: string }>;
+      const custom = event as CustomEvent<Partial<ExtensionStorageChangedDetail>>;
       const extensionName = (custom.detail?.extensionName || '').trim();
       if (!extensionName) return;
-      remountMenuBarExtensionsForExtension(extensionName);
+      remountMenuBarExtensionsForExtension(extensionName, {
+        sourceCommandName: custom.detail?.commandName,
+        sourceCommandMode: custom.detail?.commandMode,
+      });
     };
     window.addEventListener('sc-extension-storage-changed', onStorageChanged as EventListener);
     return () => {
