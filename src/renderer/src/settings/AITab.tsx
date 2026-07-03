@@ -38,6 +38,7 @@ import {
   getCachedElevenLabsVoices,
   setCachedElevenLabsVoices,
 } from '../utils/voice-cache';
+import { registerOllamaPullListeners } from './ollamaPullProgress';
 
 const getProviderOptions = (t: (key: string) => string) => [
   { id: 'openai' as const, label: t('settings.ai.llm.provider.openai'), description: t('settings.ai.llm.providerDescriptions.openai') },
@@ -282,6 +283,7 @@ const AITab: React.FC = () => {
 
   const settingsRef = useRef<AppSettings | null>(null);
   const pullingModelRef = useRef<string | null>(null);
+  const pullRequestIdRef = useRef<string | null>(null);
   const selectingOllamaDefaultRef = useRef(false);
 
   useEffect(() => {
@@ -584,27 +586,27 @@ const AITab: React.FC = () => {
   }, [settings?.ai?.ollamaBaseUrl, settings?.ai?.provider, refreshOllamaStatus]);
 
   useEffect(() => {
-    window.electron.onOllamaPullProgress((data) => {
-      const percent = data.total > 0 ? Math.round((data.completed / data.total) * 100) : 0;
-      setPullProgress({ status: data.status, percent });
-    });
-    window.electron.onOllamaPullDone(() => {
-      const preferredModel = pullingModelRef.current || undefined;
-      pullingModelRef.current = null;
-      setPullingModel(null);
-      setPullProgress({ status: '', percent: 0 });
-      refreshOllamaStatus(preferredModel);
-    });
-    window.electron.onOllamaPullError((data) => {
-      setPullingModel(null);
-      setPullProgress({ status: '', percent: 0 });
-      setOllamaError(data.error);
-      setTimeout(() => setOllamaError(null), 5000);
+    return registerOllamaPullListeners({
+      bridge: window.electron,
+      getActiveRequestId: () => pullRequestIdRef.current,
+      getPreferredModel: () => pullingModelRef.current || undefined,
+      clearActivePull: () => {
+        pullRequestIdRef.current = null;
+        pullingModelRef.current = null;
+      },
+      setPullingModel,
+      setPullProgress,
+      setOllamaError,
+      scheduleErrorClear: () => {
+        setTimeout(() => setOllamaError(null), 5000);
+      },
+      refreshOllamaStatus,
     });
   }, [refreshOllamaStatus]);
 
   const handlePull = (modelName: string) => {
     const requestId = `ollama-pull-${Date.now()}`;
+    pullRequestIdRef.current = requestId;
     pullingModelRef.current = modelName;
     setPullingModel(modelName);
     setPullProgress({ status: t('settings.ai.llm.ollama.startingDownload'), percent: 0 });
