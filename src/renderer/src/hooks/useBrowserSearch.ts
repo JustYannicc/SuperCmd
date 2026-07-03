@@ -1064,7 +1064,7 @@ function getBrowserEntryCandidates(
   const nicknameEntryIds = indexedEntryIds !== null
     ? getBookmarkNicknameCandidateIds(kind, trimmed, options.nicknames || [], options.entryIndex || null)
     : null;
-  const candidateEntryIds = nicknameEntryIds
+  const candidateEntryIds = indexedEntryIds && nicknameEntryIds
     ? unionSortedEntryIds(indexedEntryIds, nicknameEntryIds)
     : indexedEntryIds;
   const scanEntryIds = candidateEntryIds || null;
