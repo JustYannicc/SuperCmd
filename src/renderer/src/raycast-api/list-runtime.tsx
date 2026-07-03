@@ -46,7 +46,7 @@ interface ListRuntimeDeps {
   renderIcon: (icon: any, className?: string, assetsPath?: string) => React.ReactNode;
   resolveTintColor: (value?: string) => string | undefined;
   resolveReadableTintColor: (value?: string, options?: { minContrast?: number }) => string | undefined;
-  addHexAlpha: (hex: string, alphaHex?: string) => string | null;
+  addHexAlpha: (hex: string, alphaHex: string) => string | undefined;
   getExtensionContext: () => {
     assetsPath: string;
     extensionDisplayName?: string;
@@ -354,8 +354,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     const detailElement = useMemo(() => {
       if (!rawDetail || !React.isValidElement(rawDetail)) return rawDetail;
       if (rawDetail.type !== React.Fragment) return rawDetail;
-      const rawDetailElement = rawDetail as React.ReactElement<{ children?: React.ReactNode }>;
-      const children = React.Children.toArray(rawDetailElement.props.children);
+      const children = React.Children.toArray((rawDetail.props as { children?: React.ReactNode }).children);
       let mergedMarkdown: string | undefined;
       let mergedMetadata: React.ReactElement | undefined;
       let mergedIsLoading: boolean | undefined;
