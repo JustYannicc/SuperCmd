@@ -339,9 +339,13 @@ export function useLauncherCommandModel({
   const calcResult = syncCalcResult ?? asyncCalcResult;
   const calcOffset = calcResult ? 1 : 0;
   const contextualCommands = commands;
+  const hasSearchQuery = searchQuery.trim().length > 0;
+  const shouldComputeLegacyCommandList = !hasSearchQuery || Boolean(calcResult);
   const filteredCommands = useMemo(
-    () => filterCommands(contextualCommands, searchQuery, commandAliases),
-    [contextualCommands, searchQuery, commandAliases]
+    () => shouldComputeLegacyCommandList
+      ? filterCommands(contextualCommands, searchQuery, commandAliases)
+      : contextualCommands,
+    [contextualCommands, searchQuery, commandAliases, shouldComputeLegacyCommandList]
   );
 
   // When calculator is showing but no commands match, show unfiltered list below.
@@ -355,7 +359,6 @@ export function useLauncherCommandModel({
     () => new Set(['system-add-to-memory', 'system-cursor-prompt', 'system-emoji-picker']),
     []
   );
-  const hasSearchQuery = searchQuery.trim().length > 0;
   const visibleSourceCommands = useMemo(
     () => sourceCommands
       .filter((cmd) => !hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery)
@@ -527,15 +530,7 @@ export function useLauncherCommandModel({
       (!hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery)
     );
     return rankCommands(searchableCommands, searchQuery, commandAliases)
-      .map(({ command }) => {
-        const alias = commandAliases[command.id] || '';
-        const scored = scoreRootSearchFields(searchQuery, [
-          { value: command.title, kind: 'label', weight: 1 },
-          { value: alias, kind: 'alias', weight: 1.08 },
-          { value: command.subtitle, kind: 'description', weight: 0.74 },
-          ...(command.keywords || []).map((keyword) => ({ value: keyword, kind: 'description' as const, weight: 0.68 })),
-        ]);
-        if (!scored.matched) return null;
+      .map(({ command, matchKind, matchScore }) => {
         const subtype = inferCommandSubtype(command);
         const stableKey = `command:${command.id}`;
         return scoreRootSearchCandidate({
@@ -551,8 +546,8 @@ export function useLauncherCommandModel({
           label: command.title,
           description: command.subtitle,
           pathOrUrl: command.path,
-          matchKind: scored.matchKind,
-          matchScore: scored.matchScore,
+          matchKind,
+          matchScore,
           sourceQualityBoost: command.alwaysOnTop ? 80 : 0,
           freshnessBoost: 0,
           pathLocationBoost: 0,
