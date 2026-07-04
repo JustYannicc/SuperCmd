@@ -21,12 +21,15 @@ const { transcribeAudio } = await importTs(path.resolve('src/main/ai-provider.ts
 test('transcribeAudio streams Whisper multipart upload bytes without a full body concat', async (t) => {
   const audioBuffer = Buffer.alloc(8 * 1024 * 1024, 0x61);
   const https = createFakeHttps({ responseBody: '  hello from whisper  \n' });
+  const controller = new AbortController();
+  const counts = trackAbortSignal(controller.signal);
   const { result, concatCalls } = await instrumentBufferConcat(() => transcribeAudio({
     audioBuffer,
     apiKey: 'test-api-key',
     model: 'whisper-1',
     language: 'en',
     mimeType: 'audio/wav',
+    signal: controller.signal,
   }));
 
   assert.equal(result, 'hello from whisper');
@@ -66,10 +69,12 @@ test('transcribeAudio streams Whisper multipart upload bytes without a full body
   assert.equal(Math.max(...req.writes.map((chunk) => chunk.length)), audioBuffer.length);
   assert.equal(concatCalls.length, 0, 'production upload path should not call Buffer.concat');
   assertMultipartOrder(actualBody, ['name="file"', 'name="model"', 'name="response_format"', 'name="language"']);
+  assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
 
   const framingBytes = expectedBody.length - audioBuffer.length;
   t.diagnostic(`before: legacy Buffer.concat would allocate a ${expectedBody.length} byte multipart body copy`);
   t.diagnostic(`after: streamed upload wrote ${req.writes.length} buffers, reusing the ${audioBuffer.length} byte audio Buffer and allocating ${framingBytes} framing bytes`);
+  t.diagnostic('after: Whisper success abort listener counts balanced at adds=1 removes=1 active=0');
 });
 
 test('transcribeAudio preserves no-language multipart ordering and default upload metadata', async () => {
@@ -103,6 +108,8 @@ test('transcribeAudio preserves no-language multipart ordering and default uploa
 
 test('transcribeAudio preserves Whisper HTTP and request error handling', async () => {
   {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
     createFakeHttps({ statusCode: 429, responseBody: 'rate limited by test' });
 
     await assert.rejects(
@@ -110,12 +117,16 @@ test('transcribeAudio preserves Whisper HTTP and request error handling', async 
         audioBuffer: Buffer.from('audio'),
         apiKey: 'test-api-key',
         model: 'whisper-1',
+        signal: controller.signal,
       }),
       /Whisper API HTTP 429: rate limited by test/,
     );
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
   }
 
   {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
     createFakeHttps({ requestError: new Error('socket failed') });
 
     await assert.rejects(
@@ -123,14 +134,36 @@ test('transcribeAudio preserves Whisper HTTP and request error handling', async 
         audioBuffer: Buffer.from('audio'),
         apiKey: 'test-api-key',
         model: 'whisper-1',
+        signal: controller.signal,
       }),
       /socket failed/,
     );
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
   }
+});
+
+test('transcribeAudio removes abort listener on mid-flight abort', async () => {
+  const controller = new AbortController();
+  const counts = trackAbortSignal(controller.signal);
+  const https = createFakeHttps();
+  const pending = transcribeAudio({
+    audioBuffer: Buffer.from('audio'),
+    apiKey: 'test-api-key',
+    model: 'whisper-1',
+    signal: controller.signal,
+  });
+
+  assert.equal(https.requests.length, 1);
+  controller.abort();
+
+  await assert.rejects(pending, /Transcription aborted/);
+  assert.equal(https.requests[0].destroyed, true);
+  assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
 });
 
 test('transcribeAudio preserves pre-aborted request behavior', async () => {
   const controller = new AbortController();
+  const counts = trackAbortSignal(controller.signal);
   controller.abort();
   const https = createFakeHttps();
 
@@ -148,6 +181,7 @@ test('transcribeAudio preserves pre-aborted request behavior', async () => {
   assert.equal(https.requests[0].destroyed, true);
   assert.equal(https.requests[0].ended, false);
   assert.equal(https.requests[0].writes.length, 0);
+  assert.deepEqual(counts.snapshot(), { adds: 0, removes: 0, active: 0 });
 });
 
 async function instrumentBufferConcat(fn) {
@@ -183,6 +217,39 @@ function createFakeHttps(options = {}) {
 
   globalThis.__supercmdWhisperHttps = fakeHttps;
   return fakeHttps;
+}
+
+function trackAbortSignal(signal) {
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  const active = new Set();
+  const counts = { adds: 0, removes: 0 };
+
+  Object.defineProperty(signal, 'addEventListener', {
+    configurable: true,
+    value(type, listener, options) {
+      if (type === 'abort') {
+        counts.adds += 1;
+        active.add(listener);
+      }
+      return originalAdd(type, listener, options);
+    },
+  });
+  Object.defineProperty(signal, 'removeEventListener', {
+    configurable: true,
+    value(type, listener, options) {
+      if (type === 'abort' && active.delete(listener)) {
+        counts.removes += 1;
+      }
+      return originalRemove(type, listener, options);
+    },
+  });
+
+  return {
+    snapshot() {
+      return { adds: counts.adds, removes: counts.removes, active: active.size };
+    },
+  };
 }
 
 class FakeClientRequest extends EventEmitter {

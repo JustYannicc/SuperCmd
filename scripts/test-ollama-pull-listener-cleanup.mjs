@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import path from 'node:path';
 import { importTs } from './lib/ts-import.mjs';
 
@@ -275,4 +276,22 @@ test('Ollama pull listeners ignore stale request ids and dedupe identical progre
   assert.equal(state.metrics.progressWrites, 2);
   cleanup();
   assert.deepEqual(bridge.listenerCounts(), { progress: 0, done: 0, error: 0 });
+});
+
+test('main-process Ollama pull abort listener is removable and finalized', () => {
+  const mainSource = fs.readFileSync(path.resolve('src/main/main.ts'), 'utf8');
+  const start = mainSource.indexOf("ipcMain.handle(\n    'ollama-pull'");
+  const end = mainSource.indexOf("ipcMain.handle('ollama-delete'", start);
+  assert.notEqual(start, -1, 'expected ollama-pull handler registration');
+  assert.notEqual(end, -1, 'expected ollama-delete handler after ollama-pull');
+
+  const block = mainSource.slice(start, end);
+  const directDeleteCount = (block.match(/activeOllamaPullRequests\.delete\(requestId\)/g) || []).length;
+
+  assert.match(block, /const onAbort = \(\) => \{/);
+  assert.match(block, /controller\.signal\.addEventListener\('abort', onAbort, \{ once: true \}\)/);
+  assert.match(block, /controller\.signal\.removeEventListener\('abort', onAbort\)/);
+  assert.match(block, /const finishPullRequest = \(\) => \{/);
+  assert.equal(directDeleteCount, 1, 'active pull request deletion should be centralized in the finalizer');
+  assert.doesNotMatch(block, /addEventListener\('abort',\s*\(\)\s*=>/);
 });

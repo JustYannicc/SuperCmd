@@ -27,7 +27,7 @@ const GEMINI_CONFIG = {
   geminiApiKey: 'test-gemini-key',
 };
 
-function createGeminiHttpsHarness() {
+function createGeminiHttpsHarness(harnessOptions = {}) {
   const requests = [];
 
   return {
@@ -47,10 +47,18 @@ function createGeminiHttpsHarness() {
         return true;
       };
       req.end = () => {
+        if (harnessOptions.requestError) {
+          queueMicrotask(() => req.emit('error', harnessOptions.requestError));
+          return;
+        }
+        if (harnessOptions.autoRespond === false) return;
         const response = new PassThrough();
-        response.statusCode = 200;
+        response.statusCode = harnessOptions.statusCode ?? 200;
         record.response = response;
         callback(response);
+        if (harnessOptions.responseBody !== undefined) {
+          response.end(harnessOptions.responseBody);
+        }
       };
       req.destroy = () => {
         record.destroyed = true;
@@ -63,10 +71,19 @@ function createGeminiHttpsHarness() {
   };
 }
 
-function installGeminiHarness() {
-  const harness = createGeminiHttpsHarness();
+function installGeminiHarness(options = {}) {
+  const harness = createGeminiHttpsHarness(options);
   globalThis.__geminiHttpsHarness = harness;
   return harness;
+}
+
+async function waitForRequest(harness) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const request = harness.requests[0];
+    if (request) return request;
+    await waitImmediate();
+  }
+  assert.fail('timed out waiting for Gemini HTTPS request');
 }
 
 async function waitForRequestResponse(harness) {
@@ -129,6 +146,39 @@ function legacyGeminiResponseText(parsed) {
   return parts.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('');
 }
 
+function trackAbortSignal(signal) {
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  const active = new Set();
+  const counts = { adds: 0, removes: 0 };
+
+  Object.defineProperty(signal, 'addEventListener', {
+    configurable: true,
+    value(type, listener, options) {
+      if (type === 'abort') {
+        counts.adds += 1;
+        active.add(listener);
+      }
+      return originalAdd(type, listener, options);
+    },
+  });
+  Object.defineProperty(signal, 'removeEventListener', {
+    configurable: true,
+    value(type, listener, options) {
+      if (type === 'abort' && active.delete(listener)) {
+        counts.removes += 1;
+      }
+      return originalRemove(type, listener, options);
+    },
+  });
+
+  return {
+    snapshot() {
+      return { adds: counts.adds, removes: counts.removes, active: active.size };
+    },
+  };
+}
+
 test('Gemini prompt streaming uses SSE and yields before the response ends', async (t) => {
   const harness = installGeminiHarness();
   const stream = streamAI(GEMINI_CONFIG, {
@@ -182,6 +232,78 @@ test('Gemini prompt streaming uses SSE and yields before the response ends', asy
   t.diagnostic(`legacy generateContent buffered bytes before first yield: ${Buffer.byteLength(legacyGenerateContentBody)}`);
   t.diagnostic(`streamGenerateContent bytes before first yield: ${bytesBeforeFirstYield} of ${totalSseBytes}`);
   t.diagnostic('streamGenerateContent first yield occurred before response end: true');
+});
+
+test('Gemini HTTP helper removes abort listeners on success, HTTP error, request error, and abort', async (t) => {
+  {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
+    const harness = installGeminiHarness();
+    const stream = streamAI(GEMINI_CONFIG, {
+      prompt: 'listener cleanup success',
+      model: 'gemini-gemini-2.5-flash',
+      signal: controller.signal,
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+    const firstRead = iterator.next();
+    const request = await waitForRequestResponse(harness);
+
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 0, active: 1 });
+    endResponse(request, geminiTextFrame([{ text: 'ok' }]));
+    assert.deepEqual(await firstRead, { done: false, value: 'ok' });
+    assert.deepEqual(await iterator.next(), { done: true, value: undefined });
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
+  }
+
+  {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
+    installGeminiHarness({ statusCode: 429, responseBody: 'rate limited by test' });
+    const stream = streamAI(GEMINI_CONFIG, {
+      prompt: 'listener cleanup http error',
+      model: 'gemini-gemini-2.5-flash',
+      signal: controller.signal,
+    });
+
+    await assert.rejects(stream[Symbol.asyncIterator]().next(), /HTTP 429: rate limited by test/);
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
+  }
+
+  {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
+    installGeminiHarness({ requestError: new Error('socket failed by test') });
+    const stream = streamAI(GEMINI_CONFIG, {
+      prompt: 'listener cleanup request error',
+      model: 'gemini-gemini-2.5-flash',
+      signal: controller.signal,
+    });
+
+    await assert.rejects(stream[Symbol.asyncIterator]().next(), /socket failed by test/);
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
+  }
+
+  {
+    const controller = new AbortController();
+    const counts = trackAbortSignal(controller.signal);
+    const harness = installGeminiHarness({ autoRespond: false });
+    const stream = streamAI(GEMINI_CONFIG, {
+      prompt: 'listener cleanup abort',
+      model: 'gemini-gemini-2.5-flash',
+      signal: controller.signal,
+    });
+    const pendingRead = stream[Symbol.asyncIterator]().next();
+    const request = await waitForRequest(harness);
+
+    controller.abort();
+
+    await assert.rejects(pendingRead, /Request aborted/);
+    assert.equal(request.destroyed, true);
+    assert.deepEqual(counts.snapshot(), { adds: 1, removes: 1, active: 0 });
+  }
+
+  t.diagnostic('before: HTTP helper retained one abort listener on successful, HTTP-error, and request-error requests');
+  t.diagnostic('after: tracked AbortSignal counts balanced at adds=1 removes=1 active=0 for success, HTTP error, request error, and abort');
 });
 
 test('Gemini prompt SSE extraction preserves final joined text', async () => {
