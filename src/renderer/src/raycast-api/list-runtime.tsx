@@ -270,14 +270,14 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     // ─── Viewport virtualization for list rows and emoji grid rows ─────
     // Emoji-heavy extensions can ship thousands of cells. Both layouts render
     // only the rows in view plus a buffer and use spacers to preserve scroll.
-    const listRows = useMemo(
-      () => shouldUseEmojiGridValue ? [] : buildListVirtualRows(groupedItems),
-      [groupedItems, shouldUseEmojiGridValue]
-    );
-    const emojiGridRows = useMemo(
-      () => shouldUseEmojiGridValue ? buildEmojiGridVirtualRows(groupedItems) : [],
-      [groupedItems, shouldUseEmojiGridValue]
-    );
+    const listRows = useMemo(() => {
+      if (shouldUseEmojiGridValue) return [];
+      return buildListVirtualRows(groupedItems);
+    }, [groupedItems, shouldUseEmojiGridValue]);
+    const emojiGridRows = useMemo(() => {
+      if (!shouldUseEmojiGridValue) return [];
+      return buildEmojiGridVirtualRows(groupedItems);
+    }, [groupedItems, shouldUseEmojiGridValue]);
     const virtualRows = shouldUseEmojiGridValue ? emojiGridRows : listRows;
     const rowMetrics = useMemo(() => measureVirtualRows(virtualRows), [virtualRows]);
 
@@ -351,7 +351,10 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       } else if (top + rowH > visBottom) {
         el.scrollTo({ top: top + rowH - el.clientHeight, behavior: 'auto' });
       }
-    }, [selectedIdx]);
+      if (shouldUseEmojiGridValue) {
+        el.querySelector<HTMLElement>(`[data-idx="${selectedIdx}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      }
+    }, [selectedIdx, shouldUseEmojiGridValue]);
 
     const extensionContext = getExtensionContext();
     const footerTitle = navigationTitle || extInfo.extensionDisplayName || extensionContext.extensionDisplayName || extensionContext.extensionName || 'Extension';
