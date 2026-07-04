@@ -11,6 +11,7 @@ import { useI18n } from '../i18n';
 import { transliterateForSearch } from '../utils/transliterate';
 import { createListDetailRuntime } from './list-runtime-detail';
 import {
+  type EmojiGridVirtualRow,
   buildEmojiGridVirtualRows,
   buildItemToVirtualRowMap,
   buildListVirtualRows,
@@ -19,9 +20,11 @@ import {
   EMOJI_GRID_ROW_GAP,
   getVisibleVirtualRange,
   groupListItems,
+  type ListVirtualRow,
   measureVirtualRows,
   shouldUseEmojiGrid,
   useListRegistry,
+  type VirtualRow,
 } from './list-runtime-hooks';
 import { createListRenderers } from './list-runtime-renderers';
 import {
@@ -81,6 +84,10 @@ export function createListRuntime(deps: ListRuntimeDeps) {
   const renderers = createListRenderers({ renderIcon, resolveTintColor, resolveReadableTintColor, addHexAlpha });
   const { ListItemComponent, ListItemRenderer, ListEmojiGridItemRenderer, ListSectionComponent, ListEmptyView, ListDropdown } = renderers;
   const { ListItemDetail } = createListDetailRuntime({ getExtensionContext, normalizeScAssetUrl, toScAssetUrl });
+
+  type VirtualRowLayout =
+    | { mode: 'list'; virtualRows: VirtualRow[]; listRows: ListVirtualRow[] }
+    | { mode: 'emoji-grid'; virtualRows: VirtualRow[]; emojiGridRows: EmojiGridVirtualRow[] };
 
   function ListComponent({
     children,
@@ -270,9 +277,16 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     // ─── Viewport virtualization for list rows and emoji grid rows ─────
     // Emoji-heavy extensions can ship thousands of cells. Both layouts render
     // only the rows in view plus a buffer and use spacers to preserve scroll.
-    const listRows = useMemo(() => buildListVirtualRows(groupedItems), [groupedItems]);
-    const emojiGridRows = useMemo(() => buildEmojiGridVirtualRows(groupedItems), [groupedItems]);
-    const virtualRows = shouldUseEmojiGridValue ? emojiGridRows : listRows;
+    const virtualRowLayout = useMemo<VirtualRowLayout>(() => {
+      if (shouldUseEmojiGridValue) {
+        const emojiGridRows = buildEmojiGridVirtualRows(groupedItems);
+        return { mode: 'emoji-grid', virtualRows: emojiGridRows, emojiGridRows };
+      }
+
+      const listRows = buildListVirtualRows(groupedItems);
+      return { mode: 'list', virtualRows: listRows, listRows };
+    }, [groupedItems, shouldUseEmojiGridValue]);
+    const virtualRows = virtualRowLayout.virtualRows;
     const rowMetrics = useMemo(() => measureVirtualRows(virtualRows), [virtualRows]);
 
     const [scrollTop, setScrollTop] = useState(0);
@@ -385,8 +399,9 @@ export function createListRuntime(deps: ListRuntimeDeps) {
           <div className="flex items-center justify-center h-full text-[var(--text-muted)]"><p className="text-sm">{t('common.loading')}</p></div>
         ) : filteredItems.length === 0 ? (
           emptyViewProps ? <ListEmptyView title={emptyViewProps.title} description={emptyViewProps.description} icon={emptyViewProps.icon} actions={emptyViewProps.actions} /> : <div className="flex items-center justify-center h-full text-[var(--text-subtle)]"><p className="text-sm">{t('common.noResults')}</p></div>
-        ) : shouldUseEmojiGridValue ? (
+        ) : virtualRowLayout.mode === 'emoji-grid' ? (
           (() => {
+            const { emojiGridRows } = virtualRowLayout;
             const startOffset = rowMetrics.offsets[visibleStart] || 0;
             const endOffset = visibleEnd < rowMetrics.offsets.length
               ? rowMetrics.offsets[visibleEnd]
@@ -454,6 +469,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
           })()
         ) : (
           (() => {
+            const { listRows } = virtualRowLayout;
             const startOffset = rowMetrics.offsets[visibleStart] || 0;
             const endOffset = visibleEnd < rowMetrics.offsets.length
               ? rowMetrics.offsets[visibleEnd]
