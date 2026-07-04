@@ -18,6 +18,8 @@ interface DetachedPortalWindowOptions {
 }
 
 const PORTAL_ROOT_ID = '__sc_detached_portal_root__';
+const DETACHED_STYLE_ATTR = 'data-sc-detached-style';
+const DETACHED_STYLE_SIGNATURE_ATTR = 'data-sc-detached-style-signature';
 
 function computeWindowPosition(anchor: DetachedWindowAnchor, width: number, height: number): { left: number; top: number } {
   const screenObj = window.screen as (Screen & { availLeft?: number; availTop?: number; left?: number; top?: number }) | undefined;
@@ -109,15 +111,34 @@ function buildWindowFeatures(width: number, height: number, anchor: DetachedWind
   ].join(',');
 }
 
-function cloneStylesIntoDocument(sourceDoc: Document, targetDoc: Document): void {
-  const stale = targetDoc.head.querySelectorAll('[data-sc-detached-style="1"]');
+function computeDetachedStyleSignature(sourceDoc: Document): string {
+  const styleNodes = sourceDoc.head.querySelectorAll('style, link[rel="stylesheet"]');
+  const parts: string[] = [];
+  styleNodes.forEach((node) => {
+    if (node.tagName.toLowerCase() === 'style') {
+      parts.push(`style:${(node as HTMLStyleElement).textContent || ''}`);
+      return;
+    }
+    const linkNode = node as HTMLLinkElement;
+    parts.push(`link:${linkNode.href || ''}`);
+  });
+  return parts.join('\n');
+}
+
+export function cloneStylesIntoDocument(sourceDoc: Document, targetDoc: Document): boolean {
+  const signature = computeDetachedStyleSignature(sourceDoc);
+  if (targetDoc.head.getAttribute(DETACHED_STYLE_SIGNATURE_ATTR) === signature) {
+    return false;
+  }
+
+  const stale = targetDoc.head.querySelectorAll(`[${DETACHED_STYLE_ATTR}="1"]`);
   stale.forEach((node) => node.remove());
 
   const styleNodes = sourceDoc.head.querySelectorAll('style, link[rel="stylesheet"]');
   styleNodes.forEach((node) => {
     if (node.tagName.toLowerCase() === 'style') {
       const style = targetDoc.createElement('style');
-      style.setAttribute('data-sc-detached-style', '1');
+      style.setAttribute(DETACHED_STYLE_ATTR, '1');
       style.textContent = (node as HTMLStyleElement).textContent || '';
       targetDoc.head.appendChild(style);
       return;
@@ -126,14 +147,14 @@ function cloneStylesIntoDocument(sourceDoc: Document, targetDoc: Document): void
     const href = linkNode.href;
     if (!href) return;
     const link = targetDoc.createElement('link');
-    link.setAttribute('data-sc-detached-style', '1');
+    link.setAttribute(DETACHED_STYLE_ATTR, '1');
     link.rel = 'stylesheet';
     link.href = href;
     targetDoc.head.appendChild(link);
   });
 
   const baseStyle = targetDoc.createElement('style');
-  baseStyle.setAttribute('data-sc-detached-style', '1');
+  baseStyle.setAttribute(DETACHED_STYLE_ATTR, '1');
   baseStyle.textContent = `
     html, body, #${PORTAL_ROOT_ID} {
       width: 100%;
@@ -148,6 +169,8 @@ function cloneStylesIntoDocument(sourceDoc: Document, targetDoc: Document): void
     }
   `;
   targetDoc.head.appendChild(baseStyle);
+  targetDoc.head.setAttribute(DETACHED_STYLE_SIGNATURE_ATTR, signature);
+  return true;
 }
 
 function ensurePortalRoot(targetDoc: Document): HTMLElement {

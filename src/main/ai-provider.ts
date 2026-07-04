@@ -8,6 +8,9 @@ import * as https from 'https';
 import * as http from 'http';
 import type { AISettings } from './settings-store';
 
+const MAX_STREAM_CARRY_CHARS = 1_000_000;
+const MAX_ERROR_BODY_CHARS = 8_192;
+
 export interface AIRequestOptions {
   prompt: string;
   model?: string;
@@ -721,7 +724,13 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
     const req = mod.request(reqOpts, (res) => {
       if (res.statusCode && res.statusCode >= 400) {
         let body = '';
-        res.on('data', (chunk) => { body += chunk; });
+        res.on('data', (chunk) => {
+          if (body.length >= MAX_ERROR_BODY_CHARS) return;
+          body += chunk.toString();
+          if (body.length > MAX_ERROR_BODY_CHARS) {
+            body = body.slice(0, MAX_ERROR_BODY_CHARS);
+          }
+        });
         res.on('end', () => {
           reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 500)}`));
         });
@@ -749,61 +758,83 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
   });
 }
 
-async function* parseSSE(
+function appendStreamCarry(buffer: string, rawChunk: unknown): string {
+  const next = buffer + Buffer.from(rawChunk as any).toString();
+  if (next.length <= MAX_STREAM_CARRY_CHARS) return next;
+  return next.slice(next.length - MAX_STREAM_CARRY_CHARS);
+}
+
+function consumeCompleteLines(
+  buffer: string,
+  consumeLine: (line: string) => void
+): string {
+  let start = 0;
+  for (;;) {
+    const newline = buffer.indexOf('\n', start);
+    if (newline < 0) break;
+    const lineEnd = newline > start && buffer.charCodeAt(newline - 1) === 13 ? newline - 1 : newline;
+    consumeLine(buffer.slice(start, lineEnd));
+    start = newline + 1;
+  }
+  return start === 0 ? buffer : buffer.slice(start);
+}
+
+function extractSSEDataLine(line: string): string | null {
+  if (!line || line.charCodeAt(0) === 58) return null;
+  if (line.startsWith('data: ')) return line.slice(6).trim();
+  if (line.startsWith('data:')) return line.slice(5).trim();
+  return null;
+}
+
+export async function* parseSSE(
   response: http.IncomingMessage,
   extractChunk: (data: string) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
 
   for await (const rawChunk of response) {
-    buffer += rawChunk.toString();
+    buffer = appendStreamCarry(buffer, rawChunk);
 
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // keep incomplete line
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-      const data = trimmed.slice(6);
+    const chunks: string[] = [];
+    buffer = consumeCompleteLines(buffer, (line) => {
+      const data = extractSSEDataLine(line.trim());
+      if (data === null) return;
       const text = extractChunk(data);
-      if (text) yield text;
-    }
+      if (text) chunks.push(text);
+    });
+    for (const text of chunks) yield text;
   }
 
   // Process remaining buffer
-  if (buffer.trim()) {
-    const trimmed = buffer.trim();
-    if (trimmed.startsWith('data: ')) {
-      const data = trimmed.slice(6);
-      const text = extractChunk(data);
-      if (text) yield text;
-    }
+  const data = extractSSEDataLine(buffer.trim());
+  if (data !== null) {
+    const text = extractChunk(data);
+    if (text) yield text;
   }
 }
 
-async function* parseNDJSON(
+export async function* parseNDJSON(
   response: http.IncomingMessage,
   extractChunk: (obj: any) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
 
   for await (const rawChunk of response) {
-    buffer += rawChunk.toString();
+    buffer = appendStreamCarry(buffer, rawChunk);
 
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
+    const chunks: string[] = [];
+    buffer = consumeCompleteLines(buffer, (line) => {
       const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (!trimmed) return;
       try {
         const obj = JSON.parse(trimmed);
         const text = extractChunk(obj);
-        if (text) yield text;
+        if (text) chunks.push(text);
       } catch {
         // skip malformed lines
       }
-    }
+    });
+    for (const text of chunks) yield text;
   }
 
   if (buffer.trim()) {
