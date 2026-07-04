@@ -822,10 +822,17 @@ function resolveUploadMeta(mimeType?: string): { filename: string; contentType: 
   return { filename: 'audio.webm', contentType: 'audio/webm' };
 }
 
-export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
-  const boundary = `----SuperCmdBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-  const uploadMeta = resolveUploadMeta(opts.mimeType);
+interface MultipartUpload {
+  parts: Buffer[];
+  contentLength: number;
+}
 
+function getMultipartContentLength(parts: readonly Buffer[]): number {
+  return parts.reduce((total, part) => total + part.length, 0);
+}
+
+function buildTranscriptionMultipartUpload(opts: TranscribeOptions, boundary: string): MultipartUpload {
+  const uploadMeta = resolveUploadMeta(opts.mimeType);
   const parts: Buffer[] = [];
 
   // file field
@@ -854,7 +861,22 @@ export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
 
-  const body = Buffer.concat(parts);
+  return {
+    parts,
+    contentLength: getMultipartContentLength(parts),
+  };
+}
+
+function writeBufferedRequestParts(req: http.ClientRequest, parts: readonly Buffer[]): void {
+  for (const part of parts) {
+    req.write(part);
+  }
+  req.end();
+}
+
+export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
+  const boundary = `----SuperCmdBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
+  const upload = buildTranscriptionMultipartUpload(opts, boundary);
 
   return new Promise<string>((resolve, reject) => {
     const req = https.request(
@@ -865,7 +887,7 @@ export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
         headers: {
           'Authorization': `Bearer ${opts.apiKey}`,
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
+          'Content-Length': upload.contentLength,
         },
       },
       (res) => {
@@ -895,7 +917,6 @@ export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
       }, { once: true });
     }
 
-    req.write(body);
-    req.end();
+    writeBufferedRequestParts(req, upload.parts);
   });
 }
