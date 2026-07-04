@@ -51,5 +51,8 @@ jobs:
       - name: Build main process
         run: npm run build:main
 
+      - name: Typecheck renderer
+        run: npm run typecheck:renderer
+
       - name: Build renderer
         run: npm run build:renderer
