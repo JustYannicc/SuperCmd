@@ -18,7 +18,7 @@
     "test": "node --test 'scripts/test-*.mjs'",
     "build:native": "node scripts/build-native.mjs",
     "ensure:cross-arch-esbuild": "node scripts/ensure-cross-arch-esbuild.mjs",
-    "postinstall": "node scripts/ensure-cross-arch-esbuild.mjs && electron-builder install-app-deps",
+    "postinstall": "node scripts/ensure-macos-runtime-deps.mjs && node scripts/ensure-cross-arch-esbuild.mjs && electron-builder install-app-deps",
     "start": "electron .",
     "package": "cross-env NODE_ENV=production npm run build && electron-builder",
     "package:unsigned": "cross-env NODE_ENV=production CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --mac dmg -c.mac.identity=null -c.mac.notarize=false"
@@ -45,7 +45,6 @@
     "@phosphor-icons/react": "^2.1.10",
     "@raycast/api": "^1.104.5",
     "electron-builder-notarize": "^1.5.2",
-    "electron-liquid-glass": "^1.1.1",
     "electron-updater": "^6.7.3",
     "esbuild": "^0.19.12",
     "lucide-react": "^0.312.0",
@@ -54,6 +53,9 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "transliteration": "^2.6.1"
+  },
+  "optionalDependencies": {
+    "electron-liquid-glass": "^1.1.1"
   },
   "build": {
     "appId": "com.supercmd.app",
