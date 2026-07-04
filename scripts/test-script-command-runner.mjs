@@ -164,4 +164,54 @@ ${body}
       `expected a bounded prefix read, got ${metrics.readSyncBytes} bytes`,
     );
   });
+
+  await t.test('caches file icon data across invalidated discoveries and refreshes changed icons', async (t) => {
+    const { module: runner, scriptsDir, metrics, resetMetrics } = await withScriptCommandRunner(t, {}, {
+      instrumentFs: true,
+    });
+    const iconsDir = path.join(scriptsDir, '.icons');
+    const iconPath = path.join(iconsDir, 'icon.png');
+    const scriptPath = path.join(scriptsDir, 'with-file-icon.sh');
+    const firstIcon = Buffer.alloc(4096, 1);
+    const secondIcon = Buffer.alloc(8192, 2);
+
+    fs.mkdirSync(iconsDir, { recursive: true });
+    fs.writeFileSync(iconPath, firstIcon);
+    fs.writeFileSync(scriptPath, `#!/bin/bash
+${scriptHeader({
+  title: 'File Icon Command',
+  extra: '# @raycast.icon .icons/icon.png\n',
+})}
+echo ok
+`, { mode: 0o755 });
+
+    resetMetrics();
+    const [initialCommand] = runner.discoverScriptCommands();
+    assert.equal(initialCommand.title, 'File Icon Command');
+    assert.ok(initialCommand.iconDataUrl?.startsWith('data:image/png;base64,'));
+    const initialReadBytes = metrics.readFileSyncBytes;
+    assert.ok(
+      initialReadBytes >= firstIcon.byteLength,
+      `expected first discovery to read the icon, got ${initialReadBytes} bytes`,
+    );
+
+    resetMetrics();
+    runner.invalidateScriptCommandsCache();
+    const [cachedCommand] = runner.discoverScriptCommands();
+    assert.equal(cachedCommand.iconDataUrl, initialCommand.iconDataUrl);
+    assert.ok(
+      metrics.readFileSyncBytes < firstIcon.byteLength,
+      `expected cached discovery to skip unchanged icon bytes, got ${metrics.readFileSyncBytes} bytes`,
+    );
+
+    fs.writeFileSync(iconPath, secondIcon);
+    resetMetrics();
+    runner.invalidateScriptCommandsCache();
+    const [changedCommand] = runner.discoverScriptCommands();
+    assert.notEqual(changedCommand.iconDataUrl, initialCommand.iconDataUrl);
+    assert.ok(
+      metrics.readFileSyncBytes >= secondIcon.byteLength,
+      `expected changed icon to be read again, got ${metrics.readFileSyncBytes} bytes`,
+    );
+  });
 });

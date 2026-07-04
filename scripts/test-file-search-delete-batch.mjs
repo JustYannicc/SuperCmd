@@ -116,6 +116,40 @@ test('file delete tombstones only the exact indexed file', () => {
   assert.equal(isDeleted(snapshot, deletedFile), false);
 });
 
+test('batched indexed file deletes do not scan unrelated entries', () => {
+  const snapshot = api.makeSnapshot();
+  const deletedFiles = [];
+  const bulkDir = path.join(homeDir, 'bulk-files');
+
+  addEntry(snapshot, bulkDir, true);
+  for (let index = 0; index < 64; index += 1) {
+    const filePath = path.join(bulkDir, `deleted-${index}.txt`);
+    deletedFiles.push(filePath);
+    addEntry(snapshot, filePath);
+  }
+
+  snapshot.entries.push({
+    get path() {
+      throw new Error('direct indexed file deletes should not scan unrelated entry paths');
+    },
+    name: 'sentinel.txt',
+    parentPath: bulkDir,
+    normalizedName: 'sentinel txt',
+    normalizedPath: 'sentinel',
+    normalizedTildePath: 'sentinel',
+    compactName: 'sentineltxt',
+    tokens: ['sentinel', 'txt'],
+    pathTokens: ['sentinel'],
+    isDirectory: false,
+  });
+
+  api.tombstoneDeletedPaths(snapshot, deletedFiles);
+
+  for (const filePath of deletedFiles) {
+    assert.equal(isDeleted(snapshot, filePath), true);
+  }
+});
+
 test('directory delete tombstones the directory and all indexed descendants', () => {
   const snapshot = api.makeSnapshot();
   const deletedDir = path.join(homeDir, 'project');
@@ -135,6 +169,22 @@ test('directory delete tombstones the directory and all indexed descendants', ()
   assert.equal(isDeleted(snapshot, childDir), true);
   assert.equal(isDeleted(snapshot, childFile), true);
   assert.equal(isDeleted(snapshot, survivor), false);
+});
+
+test('unknown deleted paths still tombstone indexed descendants', () => {
+  const snapshot = api.makeSnapshot();
+  const deletedRoot = path.join(homeDir, 'unknown-root');
+  const childFile = path.join(deletedRoot, 'child.txt');
+  const siblingFile = path.join(homeDir, 'unknown-root-copy', 'child.txt');
+
+  addEntry(snapshot, childFile);
+  addEntry(snapshot, path.dirname(siblingFile), true);
+  addEntry(snapshot, siblingFile);
+
+  api.tombstoneDeletedPaths(snapshot, [deletedRoot]);
+
+  assert.equal(isDeleted(snapshot, childFile), true);
+  assert.equal(isDeleted(snapshot, siblingFile), false);
 });
 
 test('nested directory deletes collapse to the outermost deleted root', () => {
