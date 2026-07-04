@@ -16,6 +16,12 @@ process.env.SUPERCMD_TEST_USER_DATA = tempRoot;
 const commandsModule = await importTs(path.join(root, 'src/main/commands.ts'), {
   root,
   stubs: {
+    electron: `
+      export const app = {
+        getPath() { return ${JSON.stringify(tempRoot)}; },
+        quit() {},
+      };
+    `,
     './extension-runner': `
       export function discoverInstalledExtensionCommands() { return []; }
     `,
