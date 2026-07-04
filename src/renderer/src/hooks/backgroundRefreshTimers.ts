@@ -27,6 +27,39 @@ export interface BackgroundRefreshTimerReconcileOptions<TTimerId> {
   clearTimer: (timerId: TTimerId) => void;
 }
 
+export interface BackgroundRefreshTickRunnerOptions {
+  onSkipped?: () => void;
+}
+
+export type BackgroundRefreshTickRunner = (() => Promise<boolean>) & {
+  isRunning: () => boolean;
+};
+
+export function createNonOverlappingBackgroundRefreshTick(
+  runTick: () => Promise<void> | void,
+  options: BackgroundRefreshTickRunnerOptions = {}
+): BackgroundRefreshTickRunner {
+  let running = false;
+
+  const tick = (async () => {
+    if (running) {
+      options.onSkipped?.();
+      return false;
+    }
+
+    running = true;
+    try {
+      await runTick();
+      return true;
+    } finally {
+      running = false;
+    }
+  }) as BackgroundRefreshTickRunner;
+
+  tick.isRunning = () => running;
+  return tick;
+}
+
 export function parseExtensionCommandPath(pathValue: string): { extName: string; cmdName: string } | null {
   const rawPath = String(pathValue || '').trim();
   const separatorIndex = rawPath.indexOf('/');

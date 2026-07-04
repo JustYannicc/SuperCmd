@@ -7,6 +7,8 @@
 
 export type MenuBarNativeUpdatePayload = {
   iconPath?: unknown;
+  iconPathMtimeMs?: unknown;
+  iconPathSize?: unknown;
   iconDataUrl?: unknown;
   iconEmoji?: unknown;
   iconTemplate?: unknown;
@@ -15,6 +17,14 @@ export type MenuBarNativeUpdatePayload = {
   title?: unknown;
   tooltip?: unknown;
   items?: unknown;
+};
+
+export type MenuBarNativeUpdateFsLike = {
+  statSync: (pathValue: string) => {
+    size?: number;
+    mtimeMs?: number;
+    isFile?: () => boolean;
+  };
 };
 
 export type MenuBarNativeUpdateState = {
@@ -38,6 +48,8 @@ export function createMenuBarNativeUpdateState(): MenuBarNativeUpdateState {
 export function getMenuBarNativeIconKey(payload: MenuBarNativeUpdatePayload): string {
   return safeJsonStringify([
     payload.iconPath ?? null,
+    payload.iconPathMtimeMs ?? null,
+    payload.iconPathSize ?? null,
     payload.iconDataUrl ?? null,
     payload.iconEmoji ?? null,
     typeof payload.iconTemplate === 'boolean' ? payload.iconTemplate : null,
@@ -50,12 +62,36 @@ export function hasFileBackedMenuBarNativeIcon(payload: MenuBarNativeUpdatePaylo
   return typeof payload.iconPath === 'string' && payload.iconPath.trim().length > 0;
 }
 
+export function withMenuBarNativeIconFileIdentity(
+  fs: MenuBarNativeUpdateFsLike,
+  payload: MenuBarNativeUpdatePayload,
+): MenuBarNativeUpdatePayload {
+  if (!hasFileBackedMenuBarNativeIcon(payload)) return payload;
+
+  const iconPath = String(payload.iconPath || '').trim();
+  try {
+    const stat = fs.statSync(iconPath);
+    if (typeof stat?.isFile === 'function' && !stat.isFile()) return payload;
+    return {
+      ...payload,
+      iconPathMtimeMs: Number.isFinite(Number(stat?.mtimeMs)) ? Number(stat.mtimeMs) : 0,
+      iconPathSize: Number.isFinite(Number(stat?.size)) ? Number(stat.size) : 0,
+    };
+  } catch {
+    return {
+      ...payload,
+      iconPathMtimeMs: null,
+      iconPathSize: null,
+    };
+  }
+}
+
 export function isMenuBarNativeIconRefreshNeeded(
   state: MenuBarNativeUpdateState,
   payload: MenuBarNativeUpdatePayload,
 ): boolean {
   const nextIconKey = getMenuBarNativeIconKey(payload);
-  return state.iconKey !== nextIconKey || hasFileBackedMenuBarNativeIcon(payload);
+  return state.iconKey !== nextIconKey;
 }
 
 export function rememberMenuBarNativeIcon(

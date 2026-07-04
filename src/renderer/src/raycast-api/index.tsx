@@ -54,6 +54,7 @@ import { useAI } from './hooks/use-ai';
 import { useFrecencySorting } from './hooks/use-frecency-sorting';
 import { useLocalStorage } from './hooks/use-local-storage';
 import { configureStorageEvents, emitExtensionStorageChanged } from './storage-events';
+import { reportNoViewStatusIfChanged } from './no-view-status-reporting';
 import {
   configureContextScopeRuntime,
   snapshotExtensionContext,
@@ -674,8 +675,7 @@ export class Toast {
         this._style === ToastStyle.Failure ? 'error' as const :
         this._style === ToastStyle.Animated ? 'processing' as const :
         'success' as const;
-      void (window as any).electron?.reportNoViewStatus?.(variant, String(this._title || ''));
-      (window as any).__scNoViewStatusReported = true;
+      reportNoViewStatusIfChanged(variant, String(this._title || ''));
     }
 
     this.updateActions();
@@ -699,8 +699,7 @@ export class Toast {
         this._style === ToastStyle.Failure ? 'error' as const :
         this._style === ToastStyle.Animated ? 'processing' as const :
         'success' as const;
-      void (window as any).electron?.reportNoViewStatus?.(variant, String(this._title || ''));
-      (window as any).__scNoViewStatusReported = true;
+      reportNoViewStatusIfChanged(variant, String(this._title || ''));
     }
 
     this.hide(); // clear any existing instance of this toast

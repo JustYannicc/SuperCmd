@@ -39,6 +39,7 @@ function loadHelperModule() {
 }
 
 const {
+  createNonOverlappingBackgroundRefreshTick,
   getBackgroundRefreshTimerDescriptors,
   reconcileBackgroundRefreshTimers,
   clearBackgroundRefreshTimers,
@@ -226,5 +227,45 @@ test('Background refresh timer diff', async (t) => {
     assert.equal(harness.clearAll(), 2);
     assert.deepEqual(activeTimerIds(harness), []);
     assert.deepEqual(harness.cleared, [1, 2]);
+  });
+
+  await t.test('slow background ticks do not overlap before launch-level dedupe', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let completed = 0;
+    let skipped = 0;
+    let releaseFirstTick;
+    const firstTickDone = new Promise((resolve) => {
+      releaseFirstTick = resolve;
+    });
+
+    const tick = createNonOverlappingBackgroundRefreshTick(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await firstTickDone;
+      completed += 1;
+      active -= 1;
+    }, {
+      onSkipped: () => {
+        skipped += 1;
+      },
+    });
+
+    const first = tick();
+    const overlapping = await Promise.all([tick(), tick(), tick()]);
+    releaseFirstTick();
+    assert.equal(await first, true);
+
+    const afterSlowTick = await tick();
+
+    console.log(
+      `[background-refresh non-overlap] slow overlapping ticks maxConcurrency=${maxActive} ` +
+      `completed=${completed} skipped=${skipped} overlappingResults=${overlapping.join(',')}`
+    );
+    assert.equal(maxActive, 1);
+    assert.equal(completed, 2, 'the initial slow tick and the later post-completion tick both run');
+    assert.equal(skipped, 3, 'overlapping timer firings are skipped before no-view enqueue dedupe');
+    assert.deepEqual(overlapping, [false, false, false]);
+    assert.equal(afterSlowTick, true);
   });
 });

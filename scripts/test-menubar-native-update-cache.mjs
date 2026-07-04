@@ -20,6 +20,7 @@ const {
   rememberMenuBarNativeMenu,
   rememberMenuBarNativeTitle,
   rememberMenuBarNativeTooltip,
+  withMenuBarNativeIconFileIdentity,
 } = await importTs(path.join(root, 'src/main/menubar-native-update-cache.ts'));
 
 function makeItems(overrides = {}) {
@@ -88,6 +89,20 @@ function makeCounters() {
   };
 }
 
+function makeFs(files = new Map()) {
+  return {
+    statSync(pathValue) {
+      const file = files.get(pathValue);
+      if (!file) throw new Error(`ENOENT: ${pathValue}`);
+      return {
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        isFile: () => true,
+      };
+    },
+  };
+}
+
 function runUncachedNativeWork(payloads) {
   const counters = makeCounters();
   let trayExists = false;
@@ -111,21 +126,22 @@ function runUncachedNativeWork(payloads) {
   return counters;
 }
 
-function runCachedNativeWork(payloads, { iconResolvesOk = true } = {}) {
+function runCachedNativeWork(payloads, { iconResolvesOk = true, fs = makeFs() } = {}) {
   const counters = makeCounters();
   const state = createMenuBarNativeUpdateState();
   let trayExists = false;
 
   for (const payload of payloads) {
+    const iconPayload = withMenuBarNativeIconFileIdentity(fs, payload);
     if (!trayExists) {
       counters.resolveTrayIcon += 1;
       counters.createTray += 1;
       trayExists = true;
-      rememberMenuBarNativeIcon(state, payload, iconResolvesOk);
-    } else if (isMenuBarNativeIconRefreshNeeded(state, payload)) {
+      rememberMenuBarNativeIcon(state, iconPayload, iconResolvesOk);
+    } else if (isMenuBarNativeIconRefreshNeeded(state, iconPayload)) {
       counters.resolveTrayIcon += 1;
       counters.setImage += 1;
-      rememberMenuBarNativeIcon(state, payload, iconResolvesOk);
+      rememberMenuBarNativeIcon(state, iconPayload, iconResolvesOk);
     }
 
     const nextTitle = getMenuBarNativeTitle(payload, state.lastResolvedTrayIconOk);
@@ -207,17 +223,69 @@ test('MenuBarExtra native update cache', async (t) => {
     assert.equal(after.setContextMenu, 2);
   });
 
-  await t.test('keeps file-backed tray icons refreshing on accepted updates', () => {
+  await t.test('skips stable file-backed tray icon refreshes on accepted updates', () => {
+    const iconFiles = new Map([
+      ['/tmp/supercmd-timer.png', { size: 128, mtimeMs: 1000 }],
+    ]);
     const payloads = Array.from({ length: 3 }, (_, index) => makePayload({
       iconEmoji: undefined,
       iconPath: '/tmp/supercmd-timer.png',
       title: `Timer ${index}`,
     }));
-    const after = runCachedNativeWork(payloads);
+    const after = runCachedNativeWork(payloads, { fs: makeFs(iconFiles) });
 
-    assert.equal(after.resolveTrayIcon, 3, 'file-backed icons are re-resolved so file identity can refresh');
-    assert.equal(after.setImage, 2, 'existing trays keep setImage behavior for file-backed icons');
+    assert.equal(after.resolveTrayIcon, 1, 'unchanged file identity resolves only on tray creation');
+    assert.equal(after.setImage, 0, 'stable file-backed icons do not call setImage after tray creation');
     assert.equal(after.buildFromTemplate, 1);
+  });
+
+  await t.test('refreshes file-backed tray icons when file identity or icon options change', () => {
+    const iconFiles = new Map([
+      ['/tmp/supercmd-timer.png', { size: 128, mtimeMs: 1000 }],
+      ['/tmp/supercmd-timer-alt.png', { size: 128, mtimeMs: 1000 }],
+    ]);
+    const fs = makeFs(iconFiles);
+    const stable = makePayload({ iconEmoji: undefined, iconPath: '/tmp/supercmd-timer.png' });
+    const payloads = [
+      stable,
+      stable,
+      makePayload({ iconEmoji: undefined, iconPath: '/tmp/supercmd-timer-alt.png' }),
+      makePayload({ iconEmoji: undefined, iconPath: '/tmp/supercmd-timer-alt.png', iconTemplate: true }),
+      makePayload({ iconEmoji: undefined, iconPath: '/tmp/supercmd-timer-alt.png', iconTemplate: true, iconBitmapScale: 2 }),
+    ];
+
+    const after = runCachedNativeWork(payloads, { fs });
+
+    assert.equal(after.resolveTrayIcon, 4, 'path, template, and scale changes refresh the tray icon');
+    assert.equal(after.setImage, 3);
+  });
+
+  await t.test('refreshes file-backed tray icons when mtime or size changes', () => {
+    const identities = [
+      { size: 128, mtimeMs: 1000 },
+      { size: 128, mtimeMs: 1000 },
+      { size: 129, mtimeMs: 1001 },
+    ];
+    let statCalls = 0;
+    const fs = {
+      statSync() {
+        const identity = identities[Math.min(statCalls, identities.length - 1)];
+        statCalls += 1;
+        return {
+          ...identity,
+          isFile: () => true,
+        };
+      },
+    };
+    const payloads = Array.from({ length: 3 }, (_, index) => makePayload({
+      iconEmoji: undefined,
+      iconPath: '/tmp/supercmd-timer.png',
+      title: `Timer ${index}`,
+    }));
+    const after = runCachedNativeWork(payloads, { fs });
+
+    assert.equal(after.resolveTrayIcon, 2, 'unchanged file identity skips once, changed mtime/size refreshes once');
+    assert.equal(after.setImage, 1);
   });
 
   await t.test('preserves fallback title decisions', () => {

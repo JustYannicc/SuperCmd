@@ -252,6 +252,7 @@ import {
   rememberMenuBarNativeMenu,
   rememberMenuBarNativeTitle,
   rememberMenuBarNativeTooltip,
+  withMenuBarNativeIconFileIdentity,
   type MenuBarNativeUpdateState,
 } from './menubar-native-update-cache';
 
@@ -2613,6 +2614,8 @@ let memoryStatusHideTimer: NodeJS.Timeout | null = null;
 let memoryStatusFadeFinalizeTimer: NodeJS.Timeout | null = null;
 let memoryStatusRenderSeq = 0;
 let memoryStatusHideTimerSeq = 0;
+let lastNoViewStatusReportKey = '';
+let lastNoViewStatusReportAt = 0;
 let confettiWindow: InstanceType<typeof BrowserWindow> | null = null;
 let confettiCloseTimer: NodeJS.Timeout | null = null;
 let settingsWindow: InstanceType<typeof BrowserWindow> | null = null;
@@ -2945,6 +2948,20 @@ async function showMemoryStatusBar(
       hideMemoryStatusBar();
     }, MEMORY_STATUS_AUTOHIDE_MS);
   }
+}
+
+function shouldAcceptNoViewStatusReport(
+  variant: 'processing' | 'success' | 'error',
+  text: string,
+  now = Date.now(),
+): boolean {
+  const key = `${variant}\u0000${String(text || '')}`;
+  if (lastNoViewStatusReportKey === key && now - lastNoViewStatusReportAt < 100) {
+    return false;
+  }
+  lastNoViewStatusReportKey = key;
+  lastNoViewStatusReportAt = now;
+  return true;
 }
 
 function getConfettiWindowHtml(): string {
@@ -14044,7 +14061,9 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('no-view-status', (_event: Electron.IpcMainInvokeEvent, variant: 'processing' | 'success' | 'error', text: string) => {
-    void showMemoryStatusBar(variant, String(text || ''));
+    const normalizedText = String(text || '');
+    if (!shouldAcceptNoViewStatusReport(variant, normalizedText)) return;
+    void showMemoryStatusBar(variant, normalizedText);
   });
 
   ipcMain.handle('show-confetti', () => {
@@ -19073,6 +19092,7 @@ if let tiff = image?.tiffRepresentation {
   // Update / create a menu-bar Tray when the renderer sends menu structure
   ipcMain.on('menubar-update', (_event: any, data: any) => {
     const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, iconBitmapScale, fallbackIconDataUrl, items } = data;
+    const iconUpdatePayload = withMenuBarNativeIconFileIdentity(fs, data);
 
     let tray = menuBarTrays.get(extId);
     const updateState = getMenuBarNativeUpdateState(extId);
@@ -19122,11 +19142,11 @@ if let tiff = image?.tiffRepresentation {
       const icon = resolveTrayIcon();
       tray = new Tray(icon);
       menuBarTrays.set(extId, tray);
-      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
-    } else if (isMenuBarNativeIconRefreshNeeded(updateState, data)) {
+      rememberMenuBarNativeIcon(updateState, iconUpdatePayload, lastResolvedTrayIconOk);
+    } else if (isMenuBarNativeIconRefreshNeeded(updateState, iconUpdatePayload)) {
       // Refresh icon on accepted updates after creation (first payload can be incomplete).
       tray.setImage(resolveTrayIcon());
-      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
+      rememberMenuBarNativeIcon(updateState, iconUpdatePayload, lastResolvedTrayIconOk);
     }
 
     // Update title: if there's a text title, show it; if only emoji icon, show that

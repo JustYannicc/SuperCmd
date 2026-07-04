@@ -3,7 +3,7 @@
  * Purpose: MenuBarExtra parent component and native menu serialization/effects.
  */
 
-import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getMenuBarRuntimeDeps } from './menubar-runtime-config';
 import {
   createMenuBarVisiblePayloadHashCache,
@@ -23,6 +23,8 @@ import {
   type MenuBarProps,
 } from './menubar-runtime-shared';
 
+type SerializedMenuBarStaticPayload = Omit<SerializedMenuBarVisiblePayload, 'title' | 'tooltip'>;
+
 export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoading }: MenuBarProps) {
   const deps = getMenuBarRuntimeDeps();
   const extInfo = useContext(deps.ExtensionInfoReactContext);
@@ -37,6 +39,9 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
   const [registryVersion, setRegistryVersion] = useState(0);
   const pendingRef = useRef(false);
   const visiblePayloadHashCacheRef = useRef(createMenuBarVisiblePayloadHashCache());
+  const serializedStaticPayloadRef = useRef<SerializedMenuBarStaticPayload | null>(null);
+  const titleTooltipRef = useRef({ title: title || '', tooltip: tooltip || '' });
+  titleTooltipRef.current = { title: title || '', tooltip: tooltip || '' };
 
   resetMenuBarOrderCounters();
 
@@ -67,11 +72,28 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
     },
   }), []);
 
+  const sendMenuBarVisiblePayload = useCallback((staticPayload: SerializedMenuBarStaticPayload | null): void => {
+    if (!isMenuBar || !staticPayload) return;
+    if (staticPayload.extId !== extId) return;
+
+    const payload: SerializedMenuBarVisiblePayload = {
+      ...staticPayload,
+      title: titleTooltipRef.current.title,
+      tooltip: titleTooltipRef.current.tooltip,
+    };
+
+    if (!shouldSendMenuBarVisiblePayload(visiblePayloadHashCacheRef.current, payload)) {
+      return;
+    }
+
+    (window as any).electron?.updateMenuBar?.(payload);
+  }, [extId, isMenuBar]);
+
   useEffect(() => {
     if (!isMenuBar) return;
     let cancelled = false;
 
-    const syncMenuBar = async () => {
+    const syncMenuBarStaticPayload = async () => {
       const allItems = Array.from(registryRef.current.values()).sort((a, b) => a.order - b.order);
       const actions = new Map<string, (event: MenuBarActionEvent) => void>();
       const serialized: any[] = [];
@@ -166,7 +188,7 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
 
       if (cancelled) return;
       setMenuBarActions(extId, actions as unknown as Map<string, () => void>);
-      const payload: SerializedMenuBarVisiblePayload = {
+      const staticPayload: SerializedMenuBarStaticPayload = {
         extId,
         iconPath: trayIconPayload.iconPath,
         iconDataUrl: trayIconPayload.iconDataUrl,
@@ -174,26 +196,25 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
         iconTemplate: trayIconPayload.iconTemplate,
         iconBitmapScale: trayIconPayload.iconBitmapScale,
         fallbackIconDataUrl: extInfo.extensionIconDataUrl || '',
-        title: title || '',
-        tooltip: tooltip || '',
         items: dividedSerialized,
       };
-
-      if (!shouldSendMenuBarVisiblePayload(visiblePayloadHashCacheRef.current, payload)) {
-        return;
-      }
-
-      (window as any).electron?.updateMenuBar?.(payload);
+      serializedStaticPayloadRef.current = staticPayload;
+      sendMenuBarVisiblePayload(staticPayload);
     };
 
-    syncMenuBar().catch((error) => {
+    syncMenuBarStaticPayload().catch((error) => {
       console.error('Failed to serialize menu bar payload:', error);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [assetsPath, extId, extInfo.extensionIconDataUrl, icon, isMenuBar, registryVersion, title, tooltip]);
+  }, [assetsPath, extId, extInfo.extensionIconDataUrl, icon, isMenuBar, registryVersion, sendMenuBarVisiblePayload]);
+
+  useEffect(() => {
+    if (!isMenuBar) return;
+    sendMenuBarVisiblePayload(serializedStaticPayloadRef.current);
+  }, [isMenuBar, sendMenuBarVisiblePayload, title, tooltip]);
 
   useEffect(() => {
     return () => {
