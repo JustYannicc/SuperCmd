@@ -9,6 +9,7 @@ import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } 
 import { attachFormFields } from './form-runtime-fields';
 import { clearFormFieldError, setFormFieldError } from './form-runtime-state';
 import {
+  clearCurrentFormSnapshot,
   FormContext,
   setCurrentFormErrors,
   setCurrentFormPlaceholders,
@@ -57,45 +58,53 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
     const [errors, setErrors] = useState<Record<string, string>>({});
     const [placeholders, setPlaceholders] = useState<Record<string, string>>({});
     const [showActions, setShowActions] = useState(false);
+    const formSnapshotOwnerRef = useRef(Symbol('FormRuntime'));
+    const formSnapshotOwner = formSnapshotOwnerRef.current;
     const { pop } = useNavigation();
 
     const setValue = useCallback((id: string, value: any) => {
       setValues((previous) => {
         const next = { ...previous, [id]: value };
-        setCurrentFormValues(next);
+        setCurrentFormValues(next, formSnapshotOwner);
         return next;
       });
       setErrors((previous) => {
         const next = clearFormFieldError(previous, id);
         if (next === previous) return previous;
-        setCurrentFormErrors(next);
+        setCurrentFormErrors(next, formSnapshotOwner);
         return next;
       });
-    }, []);
+    }, [formSnapshotOwner]);
 
     const setError = useCallback((id: string, error: string) => {
       setErrors((previous) => {
         const next = setFormFieldError(previous, id, error);
         if (next === previous) return previous;
-        setCurrentFormErrors(next);
+        setCurrentFormErrors(next, formSnapshotOwner);
         return next;
       });
-    }, []);
+    }, [formSnapshotOwner]);
 
     const setPlaceholder = useCallback((id: string, placeholder: string) => {
       setPlaceholders((previous) => {
         if (previous[id] === placeholder) return previous;
         const next = { ...previous, [id]: placeholder };
-        setCurrentFormPlaceholders(next);
+        setCurrentFormPlaceholders(next, formSnapshotOwner);
         return next;
       });
-    }, []);
+    }, [formSnapshotOwner]);
 
     useEffect(() => {
-      setCurrentFormValues(values);
-      setCurrentFormErrors(errors);
-      setCurrentFormPlaceholders(placeholders);
-    }, [values, errors, placeholders]);
+      setCurrentFormValues(values, formSnapshotOwner);
+      setCurrentFormErrors(errors, formSnapshotOwner);
+      setCurrentFormPlaceholders(placeholders, formSnapshotOwner);
+    }, [errors, formSnapshotOwner, placeholders, values]);
+
+    useEffect(() => {
+      return () => {
+        clearCurrentFormSnapshot(formSnapshotOwner);
+      };
+    }, [formSnapshotOwner]);
 
     const { collectedActions: formActions, registryAPI: formActionRegistry } = useCollectedActions();
     const primaryAction = formActions[0];
