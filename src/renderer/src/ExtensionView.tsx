@@ -16,6 +16,7 @@ import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import * as RaycastAPI from './raycast-api';
 import { NavigationContext, setExtensionContext, setGlobalNavigation, ExtensionContextType, ExtensionInfoReactContext } from './raycast-api';
 import { withExtensionContext } from './raycast-api/context-scope-runtime';
+import { installExtensionFetchBridge } from './extension-fetch-bridge';
 
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
@@ -3287,120 +3288,7 @@ function ensureGlobals() {
 
   // fetch bridge — route extension HTTP(S) through main process to avoid CORS.
   // Keep native fetch for non-HTTP URLs and unsupported body types.
-  if (!g.__SUPERCMD_NATIVE_FETCH && typeof g.fetch === 'function') {
-    g.__SUPERCMD_NATIVE_FETCH = g.fetch.bind(g);
-  }
-  if (!g.__SUPERCMD_FETCH_PATCHED) {
-    const nativeFetch = g.__SUPERCMD_NATIVE_FETCH;
-    const isHttpUrl = (value: string) => /^https?:\/\//i.test(value);
-    const toHeadersObject = (headersLike: any): Record<string, string> => {
-      const out: Record<string, string> = {};
-      if (!headersLike) return out;
-      try {
-        const normalized = new Headers(headersLike as HeadersInit);
-        normalized.forEach((v, k) => {
-          out[k] = v;
-        });
-      } catch {
-        if (typeof headersLike === 'object') {
-          for (const [k, v] of Object.entries(headersLike)) {
-            out[k] = String(v);
-          }
-        }
-      }
-      return out;
-    };
-    const normalizeBody = async (body: any): Promise<string | undefined> => {
-      if (body == null) return undefined;
-      if (typeof body === 'string') return body;
-      if (body instanceof URLSearchParams) return body.toString();
-      if (body instanceof Blob) return await body.text();
-      if (typeof body === 'object') return JSON.stringify(body);
-      return String(body);
-    };
-
-    g.fetch = async (input: any, init?: any) => {
-      const url =
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input?.url || String(input ?? '');
-
-      // Only proxy HTTP(S) requests.
-      if (!isHttpUrl(url) || !(window as any).electron?.httpRequest) {
-        return typeof nativeFetch === 'function' ? nativeFetch(input, init) : fetch(input, init);
-      }
-
-      // FormData/streams are not representable via current IPC payload. Fall back.
-      const requestBody = init?.body;
-      if (
-        requestBody instanceof FormData ||
-        requestBody instanceof ReadableStream ||
-        (typeof requestBody === 'object' && requestBody?.getReader)
-      ) {
-        return typeof nativeFetch === 'function' ? nativeFetch(input, init) : fetch(input, init);
-      }
-
-      const method = (init?.method || input?.method || 'GET').toUpperCase();
-      const headers = {
-        ...toHeadersObject(input?.headers),
-        ...toHeadersObject(init?.headers),
-      };
-      const body = await normalizeBody(requestBody);
-
-      const binaryDownloader = (window as any).electron?.httpDownloadBinary;
-      const canDownloadBinary = method === 'GET' && typeof binaryDownloader === 'function';
-      const ipcRes = await (window as any).electron.httpRequest({ url, method, headers, body });
-
-      if (!ipcRes || ipcRes.status === 0) {
-        if (typeof nativeFetch === 'function') {
-          try {
-            return await nativeFetch(input, init);
-          } catch (nativeErr: any) {
-            const proxyMsg = ipcRes?.statusText || `Failed to fetch ${url}`;
-            const nativeMsg = nativeErr?.message || String(nativeErr);
-            throw new TypeError(`${proxyMsg}; native fetch fallback failed: ${nativeMsg}`);
-          }
-        }
-        throw new TypeError(ipcRes?.statusText || `Failed to fetch ${url}`);
-      }
-
-      const contentType = String(
-        ipcRes.headers?.['content-type'] ||
-        ipcRes.headers?.['Content-Type'] ||
-        ''
-      ).toLowerCase();
-      const requestAccept = String(headers?.Accept || headers?.accept || '').toLowerCase();
-      const looksLikeBinaryUrl = /\.(gif|png|apng|jpe?g|webp|bmp|ico|icns|tiff?|mp3|wav|ogg|aac|m4a|mp4|mov|webm|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|7z|rar)(?:[?#]|$)/i.test(url);
-      const isBinaryContentType =
-        /^image\/(?!svg\+xml)/i.test(contentType) ||
-        /^(audio|video|font)\//i.test(contentType) ||
-        /^application\/(?:octet-stream|pdf|zip|gzip|x-gzip|x-bzip|x-7z-compressed|x-rar-compressed)/i.test(contentType);
-      const prefersBinaryResponse = requestAccept.includes('image/') || requestAccept.includes('application/octet-stream');
-
-      let rawBytes: Uint8Array | null = null;
-      if (canDownloadBinary && (isBinaryContentType || prefersBinaryResponse || looksLikeBinaryUrl)) {
-        rawBytes = await binaryDownloader(url).catch(() => null as Uint8Array | null);
-      }
-
-      // Build Response with binary body when available, text otherwise.
-      const responseBody = rawBytes && rawBytes.length > 0 ? rawBytes : (ipcRes.bodyText ?? '');
-      const response = new Response(responseBody, {
-        status: ipcRes.status,
-        statusText: ipcRes.statusText || '',
-        headers: ipcRes.headers || {},
-      });
-
-      try {
-        Object.defineProperty(response, 'url', { value: ipcRes.url || url });
-      } catch {}
-
-      return response;
-    };
-
-    g.__SUPERCMD_FETCH_PATCHED = true;
-  }
+  installExtensionFetchBridge(g);
 }
 
 interface TrackedChildProcess {
