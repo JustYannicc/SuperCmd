@@ -43,12 +43,6 @@ jobs:
         # package.json pins darwin esbuild packages for release packaging; --force lets Ubuntu install the lockfile.
         run: npm ci --ignore-scripts --force
 
-      - name: Run tests
-        run: npm test
-
-      - name: Run perf regression budgets
-        run: npm run test:perf:ci
-
       - name: Check i18n
         run: npm run check:i18n
 
@@ -57,6 +51,12 @@ jobs:
 
       - name: Typecheck renderer
         run: npm run typecheck:renderer
+
+      - name: Run unit tests
+        run: npm run test:ci
+
+      - name: Run perf regression budgets
+        run: npm run test:perf:ci
 
       - name: Build renderer
         run: npm run build:renderer

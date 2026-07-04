@@ -287,6 +287,14 @@ function printBrowserSearchPerfReport(report) {
   console.log(JSON.stringify({ browserSearchPerf: report }, null, 2));
 }
 
+function budgetEntry(actual, budget) {
+  return {
+    actualMs: actual,
+    budgetMs: budget,
+    budgetUsedPct: Number(((actual / budget) * 100).toFixed(1)),
+  };
+}
+
 test('browser search indexed harness preserves full-scan result order', () => {
   const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
   const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
@@ -445,6 +453,14 @@ test('browser search perf CI covers large indexed responsiveness budgets', { ski
       orderedIndexedMaxAvgMs: Number(orderedMaxMs.toFixed(2)),
       rankedEventLoopDelayMs: Number(rankedMeasurement.eventLoopDelayMs.toFixed(2)),
       orderedEventLoopDelayMs: Number(orderedMeasurement.eventLoopDelayMs.toFixed(2)),
+      budgets: {
+        indexMs: budgetEntry(Number(indexMeasurement.durationMs.toFixed(2)), dataset.budgets.indexMs),
+        indexEventLoopDelayMs: budgetEntry(Number(indexMeasurement.eventLoopDelayMs.toFixed(2)), dataset.budgets.eventLoopDelayMs),
+        rankedIndexedMaxAvgMs: budgetEntry(Number(rankedMaxMs.toFixed(2)), dataset.budgets.queryAvgMs),
+        orderedIndexedMaxAvgMs: budgetEntry(Number(orderedMaxMs.toFixed(2)), dataset.budgets.queryAvgMs),
+        rankedEventLoopDelayMs: budgetEntry(Number(rankedMeasurement.eventLoopDelayMs.toFixed(2)), dataset.budgets.queryEventLoopDelayMs),
+        orderedEventLoopDelayMs: budgetEntry(Number(orderedMeasurement.eventLoopDelayMs.toFixed(2)), dataset.budgets.queryEventLoopDelayMs),
+      },
     });
 
     assert.ok(indexMeasurement.durationMs < dataset.budgets.indexMs, `${dataset.label} index build should stay below ${dataset.budgets.indexMs}ms, got ${indexMeasurement.durationMs.toFixed(2)}ms`);
