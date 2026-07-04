@@ -7,13 +7,21 @@
  * - Inline script commands (category: "script", mode: "inline"): runs the script and
  *   calls fetchCommands() to refresh the subtitle shown in the launcher
  *
- * All timers are cleared and re-registered whenever the `commands` list changes.
- * This ensures newly installed or removed commands are handled correctly.
+ * Timers are keyed by stable command identity, path, mode, and interval so
+ * unchanged background commands keep their existing intervals across command
+ * list refreshes. Removed commands are cleared, and changed commands restart.
  */
 
-import { useRef, useEffect } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import type { CommandInfo } from '../../types/electron';
 import { parseIntervalToMs } from '../utils/command-helpers';
+import {
+  clearBackgroundRefreshTimers,
+  getBackgroundRefreshTimerDescriptors,
+  reconcileBackgroundRefreshTimers,
+  type BackgroundRefreshTimerEntry,
+  type BackgroundRefreshTimerDescriptor,
+} from './backgroundRefreshTimers';
 import {
   readJsonObject,
   getScriptCmdArgsKey,
@@ -36,41 +44,20 @@ export interface UseBackgroundRefreshOptions {
 }
 
 export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommandActive }: UseBackgroundRefreshOptions): void {
-  const intervalTimerIdsRef = useRef<number[]>([]);
+  const intervalTimersRef = useRef<Map<string, BackgroundRefreshTimerEntry<number>>>(new Map());
+  const fetchCommandsRef = useRef(fetchCommands);
+  fetchCommandsRef.current = fetchCommands;
+
   const isMenuBarCommandActiveRef = useRef(isMenuBarCommandActive);
   isMenuBarCommandActiveRef.current = isMenuBarCommandActive;
 
-  const parseExtensionCommandPath = (pathValue: string): { extName: string; cmdName: string } | null => {
-    const rawPath = String(pathValue || '').trim();
-    const separatorIndex = rawPath.indexOf('/');
-    if (separatorIndex <= 0 || separatorIndex >= rawPath.length - 1) return null;
+  const createTimer = useCallback((descriptor: BackgroundRefreshTimerDescriptor): number => {
+    const cmd = descriptor.command;
 
-    const extName = rawPath.slice(0, separatorIndex).trim();
-    const cmdName = rawPath.slice(separatorIndex + 1).trim();
-    if (!extName || !cmdName) return null;
+    if (descriptor.kind === 'extension') {
+      const { extName, cmdName } = descriptor.extensionCommand!;
 
-    return { extName, cmdName };
-  };
-
-  useEffect(() => {
-    for (const timerId of intervalTimerIdsRef.current) {
-      window.clearInterval(timerId);
-    }
-    intervalTimerIdsRef.current = [];
-
-    const extensionCommands = commands.filter(
-      (cmd) => cmd.category === 'extension' && typeof cmd.interval === 'string' && cmd.path
-    );
-
-    for (const cmd of extensionCommands) {
-      const ms = parseIntervalToMs(cmd.interval);
-      if (!ms) continue;
-
-      const identity = parseExtensionCommandPath(cmd.path || '');
-      if (!identity) continue;
-      const { extName, cmdName } = identity;
-
-      const timerId = window.setInterval(async () => {
+      return window.setInterval(async () => {
         try {
           const result = await window.electron.runExtension(extName, cmdName);
           if (!result || !result.code) return;
@@ -110,47 +97,41 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
         } catch (error) {
           console.error('[BackgroundRefresh] Failed to run command:', cmd.id, error);
         }
-      }, ms);
-
-      intervalTimerIdsRef.current.push(timerId);
+      }, descriptor.intervalMs);
     }
 
-    const inlineScriptCommands = commands.filter(
-      (cmd) =>
-        cmd.category === 'script' &&
-        cmd.mode === 'inline' &&
-        typeof cmd.interval === 'string'
-    );
-    for (const cmd of inlineScriptCommands) {
-      const ms = parseIntervalToMs(cmd.interval);
-      if (!ms) continue;
-
-      const timerId = window.setInterval(async () => {
-        try {
-          const storedArgs = readJsonObject(getScriptCmdArgsKey(cmd.id));
-          const missingArgs = getMissingRequiredScriptArguments(cmd, storedArgs);
-          if (missingArgs.length > 0) return;
-          const result = await window.electron.runScriptCommand({
-            commandId: cmd.id,
-            arguments: storedArgs,
-            background: true,
-          });
-          if (result?.mode === 'inline') {
-            await fetchCommands();
-          }
-        } catch (error) {
-          console.error('[BackgroundRefresh] Failed to run script command:', cmd.id, error);
+    return window.setInterval(async () => {
+      try {
+        const storedArgs = readJsonObject(getScriptCmdArgsKey(cmd.id));
+        const missingArgs = getMissingRequiredScriptArguments(cmd, storedArgs);
+        if (missingArgs.length > 0) return;
+        const result = await window.electron.runScriptCommand({
+          commandId: cmd.id,
+          arguments: storedArgs,
+          background: true,
+        });
+        if (result?.mode === 'inline') {
+          await fetchCommandsRef.current();
         }
-      }, ms);
-
-      intervalTimerIdsRef.current.push(timerId);
-    }
-
-    return () => {
-      for (const timerId of intervalTimerIdsRef.current) {
-        window.clearInterval(timerId);
+      } catch (error) {
+        console.error('[BackgroundRefresh] Failed to run script command:', cmd.id, error);
       }
-      intervalTimerIdsRef.current = [];
+    }, descriptor.intervalMs);
+  }, []);
+
+  useEffect(() => {
+    const descriptors = getBackgroundRefreshTimerDescriptors(commands, parseIntervalToMs);
+    reconcileBackgroundRefreshTimers({
+      timers: intervalTimersRef.current,
+      descriptors,
+      createTimer,
+      clearTimer: (timerId) => window.clearInterval(timerId),
+    });
+  }, [commands, createTimer]);
+
+  useEffect(() => {
+    return () => {
+      clearBackgroundRefreshTimers(intervalTimersRef.current, (timerId) => window.clearInterval(timerId));
     };
-  }, [commands, fetchCommands]);
+  }, []);
 }
