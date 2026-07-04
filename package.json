@@ -18,6 +18,7 @@
     "measure:launcher-command-list": "node scripts/measure-launcher-command-list-render.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
     "perf:file-search": "node scripts/file-search-perf-harness.mjs",
+    "test:perf:ci": "cross-env SUPERCMD_PERF_CI=1 SUPERCMD_PERF_REPORT=1 node --test scripts/test-browser-search-performance.mjs scripts/test-file-search-perf-harness.mjs && cross-env SUPERCMD_ROOT_SEARCH_PERF_JSON=1 SUPERCMD_ROOT_SEARCH_PERF_COMMANDS=5000 SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS=3 SUPERCMD_ROOT_SEARCH_PERF_WARMUPS=1 SUPERCMD_ROOT_SEARCH_PERF_OPTIMIZED_MEDIAN_MS=900 SUPERCMD_ROOT_SEARCH_PERF_INDEXED_MEDIAN_MS=350 SUPERCMD_ROOT_SEARCH_PERF_COMPILE_MEDIAN_MS=500 SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN=1.05 node scripts/test-root-search-perf.mjs",
     "test": "node --test 'scripts/test-*.mjs'",
     "build:native": "node scripts/build-native.mjs",
     "ensure:cross-arch-esbuild": "node scripts/ensure-cross-arch-esbuild.mjs",

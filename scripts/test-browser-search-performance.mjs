@@ -11,6 +11,11 @@ import { performance } from 'node:perf_hooks';
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const FIXED_NOW = Date.UTC(2026, 6, 3, 12, 0, 0);
+const IS_PERF_CI = process.env.SUPERCMD_PERF_CI === '1';
+const IS_PERF_REPORT = IS_PERF_CI
+  || process.env.SUPERCMD_PERF_REPORT === '1'
+  || process.argv.includes('--report')
+  || process.argv.includes('--json');
 
 class FixedDate extends Date {
   constructor(...args) {
@@ -76,13 +81,18 @@ function loadTsModule(filePath) {
   return module.exports;
 }
 
-function buildSyntheticBrowserData() {
+function buildSyntheticBrowserData(options = {}) {
+  const {
+    historyCount = 4_000,
+    bookmarkCount = 800,
+    tabCount = 120,
+  } = options;
   const profiles = ['chrome:Default', 'chrome:Work', 'arc:Default', 'brave:Default'];
   const topics = ['github', 'docs', 'linear', 'notion', 'calendar', 'supercmd', 'typescript', 'electron', 'raycast', 'browser'];
   const entries = [];
   const tabs = [];
 
-  for (let index = 0; index < 20_000; index += 1) {
+  for (let index = 0; index < historyCount; index += 1) {
     const topic = topics[index % topics.length];
     const profile = profiles[index % profiles.length];
     const source = profile.split(':')[0];
@@ -101,7 +111,7 @@ function buildSyntheticBrowserData() {
     });
   }
 
-  for (let index = 0; index < 4_000; index += 1) {
+  for (let index = 0; index < bookmarkCount; index += 1) {
     const topic = topics[(index * 3) % topics.length];
     const profile = profiles[index % profiles.length];
     const source = profile.split(':')[0];
@@ -138,7 +148,7 @@ function buildSyntheticBrowserData() {
   };
   entries.push(nicknameBookmark);
 
-  for (let index = 0; index < 300; index += 1) {
+  for (let index = 0; index < tabCount; index += 1) {
     const topic = topics[(index * 7) % topics.length];
     const profile = profiles[index % profiles.length];
     const source = profile.split(':')[0];
@@ -203,17 +213,32 @@ function measureAverageMs(iterations, queries, fn) {
   return byQuery;
 }
 
-test('browser search indexed harness preserves full-scan result order', () => {
-  const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
-  const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
-  const { entries, tabs, nicknames } = buildSyntheticBrowserData();
-  const entryIndex = buildBrowserEntryIndex(entries);
-  const groups = [
+async function measureBlockedTurn(fn) {
+  const scheduledAt = performance.now();
+  const delayPromise = new Promise((resolve) => {
+    setTimeout(() => resolve(performance.now() - scheduledAt), 0);
+  });
+  const start = performance.now();
+  const result = fn();
+  const durationMs = performance.now() - start;
+  const eventLoopDelayMs = await delayPromise;
+  return {
+    result,
+    durationMs,
+    eventLoopDelayMs,
+  };
+}
+
+function browserResultGroups() {
+  return [
     { kind: 'bookmark', limit: 2 },
     { kind: 'open-tab', limit: 2 },
     { kind: 'history', limit: 2 },
   ];
-  const queries = [
+}
+
+function browserQueries() {
+  return [
     'github',
     'hub',
     'gi',
@@ -224,30 +249,71 @@ test('browser search indexed harness preserves full-scan result order', () => {
     'tab 37',
     'gh',
   ];
+}
 
-  for (const query of queries) {
-    assert.deepEqual(
-      resultSignature(getRankedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, 60)),
-      resultSignature(getRankedBrowserResults(query, groups, entries, null, tabs, nicknames, 60)),
-      `ranked results should match the full scan for ${query}`
-    );
-    assert.deepEqual(
-      resultSignature(getOrderedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, { useConfiguredLimits: true })),
-      resultSignature(getOrderedBrowserResults(query, groups, entries, null, tabs, nicknames, { useConfiguredLimits: true })),
-      `ordered results should match the full scan for ${query}`
-    );
-  }
-});
+function assertBrowserSearchEquivalence({
+  query,
+  groups,
+  entries,
+  entryIndex,
+  tabs,
+  nicknames,
+  getOrderedBrowserResults,
+  getRankedBrowserResults,
+}) {
+  assert.deepEqual(
+    resultSignature(getRankedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, 60)),
+    resultSignature(getRankedBrowserResults(query, groups, entries, null, tabs, nicknames, 60)),
+    `ranked results should match the full scan for ${query}`
+  );
+  assert.deepEqual(
+    resultSignature(getOrderedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, { useConfiguredLimits: true })),
+    resultSignature(getOrderedBrowserResults(query, groups, entries, null, tabs, nicknames, { useConfiguredLimits: true })),
+    `ordered results should match the full scan for ${query}`
+  );
+}
 
-test('browser search indexed harness stays under generous query thresholds', () => {
+function roundReportValues(values) {
+  return Object.fromEntries(
+    Object.entries(values).map(([query, item]) => [query, {
+      avgMs: Number(item.avgMs.toFixed(2)),
+      checksum: item.checksum,
+    }])
+  );
+}
+
+function printBrowserSearchPerfReport(report) {
+  if (!IS_PERF_REPORT) return;
+  console.log(JSON.stringify({ browserSearchPerf: report }, null, 2));
+}
+
+test('browser search indexed harness preserves full-scan result order', () => {
   const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
   const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
   const { entries, tabs, nicknames } = buildSyntheticBrowserData();
-  const groups = [
-    { kind: 'bookmark', limit: 2 },
-    { kind: 'open-tab', limit: 2 },
-    { kind: 'history', limit: 2 },
-  ];
+  const entryIndex = buildBrowserEntryIndex(entries);
+  const groups = browserResultGroups();
+  const queries = browserQueries();
+
+  for (const query of queries) {
+    assertBrowserSearchEquivalence({
+      query,
+      groups,
+      entries,
+      entryIndex,
+      tabs,
+      nicknames,
+      getOrderedBrowserResults,
+      getRankedBrowserResults,
+    });
+  }
+});
+
+test('browser search indexed harness stays under generous query thresholds', async () => {
+  const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
+  const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
+  const { entries, tabs, nicknames } = buildSyntheticBrowserData();
+  const groups = browserResultGroups();
   const queries = [
     'github',
     'supercmd',
@@ -257,15 +323,8 @@ test('browser search indexed harness stays under generous query thresholds', () 
     'tab 37',
   ];
 
-  const indexStart = performance.now();
-  const entryIndex = buildBrowserEntryIndex(entries);
-  const indexMs = performance.now() - indexStart;
-  const rankedFullScan = measureAverageMs(3, queries, (query) =>
-    getRankedBrowserResults(query, groups, entries, null, tabs, nicknames, 60)
-  );
-  const orderedFullScan = measureAverageMs(3, queries, (query) =>
-    getOrderedBrowserResults(query, groups, entries, null, tabs, nicknames, { useConfiguredLimits: true })
-  );
+  const indexMeasurement = await measureBlockedTurn(() => buildBrowserEntryIndex(entries));
+  const entryIndex = indexMeasurement.result;
   const rankedIndexed = measureAverageMs(15, queries, (query) =>
     getRankedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, 60)
   );
@@ -274,19 +333,92 @@ test('browser search indexed harness stays under generous query thresholds', () 
   );
   const rankedMaxMs = Math.max(...Object.values(rankedIndexed).map((item) => item.avgMs));
   const orderedMaxMs = Math.max(...Object.values(orderedIndexed).map((item) => item.avgMs));
+  const report = {
+    dataset: { entries: entries.length, tabs: tabs.length },
+    indexMs: Number(indexMeasurement.durationMs.toFixed(2)),
+    indexEventLoopDelayMs: Number(indexMeasurement.eventLoopDelayMs.toFixed(2)),
+    rankedIndexedAvgMs: roundReportValues(rankedIndexed),
+    orderedIndexedAvgMs: roundReportValues(orderedIndexed),
+  };
 
-  console.log(JSON.stringify({
-    browserSearchPerf: {
-      dataset: { entries: entries.length, tabs: tabs.length },
-      indexMs: Number(indexMs.toFixed(2)),
-      rankedFullScanAvgMs: Object.fromEntries(Object.entries(rankedFullScan).map(([query, item]) => [query, Number(item.avgMs.toFixed(2))])),
-      orderedFullScanAvgMs: Object.fromEntries(Object.entries(orderedFullScan).map(([query, item]) => [query, Number(item.avgMs.toFixed(2))])),
-      rankedIndexedAvgMs: Object.fromEntries(Object.entries(rankedIndexed).map(([query, item]) => [query, Number(item.avgMs.toFixed(2))])),
-      orderedIndexedAvgMs: Object.fromEntries(Object.entries(orderedIndexed).map(([query, item]) => [query, Number(item.avgMs.toFixed(2))])),
-    },
-  }));
+  if (IS_PERF_REPORT) {
+    report.rankedFullScanAvgMs = roundReportValues(measureAverageMs(3, queries, (query) =>
+      getRankedBrowserResults(query, groups, entries, null, tabs, nicknames, 60)
+    ));
+    report.orderedFullScanAvgMs = roundReportValues(measureAverageMs(3, queries, (query) =>
+      getOrderedBrowserResults(query, groups, entries, null, tabs, nicknames, { useConfiguredLimits: true })
+    ));
+  }
+  printBrowserSearchPerfReport(report);
 
-  assert.ok(indexMs < 2_000, `index build should stay below 2000ms, got ${indexMs.toFixed(2)}ms`);
+  assert.ok(indexMeasurement.durationMs < 1_500, `index build should stay below 1500ms, got ${indexMeasurement.durationMs.toFixed(2)}ms`);
   assert.ok(rankedMaxMs < 120, `ranked indexed search should stay below 120ms, got ${rankedMaxMs.toFixed(2)}ms`);
   assert.ok(orderedMaxMs < 120, `ordered indexed search should stay below 120ms, got ${orderedMaxMs.toFixed(2)}ms`);
+});
+
+test('browser search perf CI covers large indexed responsiveness budgets', { skip: !IS_PERF_CI }, async () => {
+  const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
+  const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
+  const groups = browserResultGroups();
+  const queries = ['github', 'supercmd', 'electron workspace', 'bookmark reference 42', 'https://typescript', 'gh'];
+  const datasets = [
+    {
+      label: '25k',
+      options: { historyCount: 21_000, bookmarkCount: 3_999, tabCount: 240 },
+      budgets: { indexMs: 3_500, eventLoopDelayMs: 4_000, queryAvgMs: 180, queryEventLoopDelayMs: 4_000 },
+    },
+    {
+      label: '50k',
+      options: { historyCount: 45_000, bookmarkCount: 4_999, tabCount: 360 },
+      budgets: { indexMs: 7_000, eventLoopDelayMs: 7_500, queryAvgMs: 260, queryEventLoopDelayMs: 7_500 },
+    },
+  ];
+  const reports = [];
+
+  for (const dataset of datasets) {
+    const { entries, tabs, nicknames } = buildSyntheticBrowserData(dataset.options);
+    const indexMeasurement = await measureBlockedTurn(() => buildBrowserEntryIndex(entries));
+    const entryIndex = indexMeasurement.result;
+
+    for (const query of queries) {
+      assertBrowserSearchEquivalence({
+        query,
+        groups,
+        entries,
+        entryIndex,
+        tabs,
+        nicknames,
+        getOrderedBrowserResults,
+        getRankedBrowserResults,
+      });
+    }
+
+    const rankedMeasurement = await measureBlockedTurn(() => measureAverageMs(5, queries, (query) =>
+      getRankedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, 60)
+    ));
+    const orderedMeasurement = await measureBlockedTurn(() => measureAverageMs(5, queries, (query) =>
+      getOrderedBrowserResults(query, groups, entries, entryIndex, tabs, nicknames, { useConfiguredLimits: true })
+    ));
+    const rankedMaxMs = Math.max(...Object.values(rankedMeasurement.result).map((item) => item.avgMs));
+    const orderedMaxMs = Math.max(...Object.values(orderedMeasurement.result).map((item) => item.avgMs));
+
+    reports.push({
+      dataset: { label: dataset.label, entries: entries.length, tabs: tabs.length },
+      indexMs: Number(indexMeasurement.durationMs.toFixed(2)),
+      indexEventLoopDelayMs: Number(indexMeasurement.eventLoopDelayMs.toFixed(2)),
+      rankedIndexedMaxAvgMs: Number(rankedMaxMs.toFixed(2)),
+      orderedIndexedMaxAvgMs: Number(orderedMaxMs.toFixed(2)),
+      rankedEventLoopDelayMs: Number(rankedMeasurement.eventLoopDelayMs.toFixed(2)),
+      orderedEventLoopDelayMs: Number(orderedMeasurement.eventLoopDelayMs.toFixed(2)),
+    });
+
+    assert.ok(indexMeasurement.durationMs < dataset.budgets.indexMs, `${dataset.label} index build should stay below ${dataset.budgets.indexMs}ms, got ${indexMeasurement.durationMs.toFixed(2)}ms`);
+    assert.ok(indexMeasurement.eventLoopDelayMs < dataset.budgets.eventLoopDelayMs, `${dataset.label} index event-loop delay should stay below ${dataset.budgets.eventLoopDelayMs}ms, got ${indexMeasurement.eventLoopDelayMs.toFixed(2)}ms`);
+    assert.ok(rankedMaxMs < dataset.budgets.queryAvgMs, `${dataset.label} ranked indexed search should stay below ${dataset.budgets.queryAvgMs}ms, got ${rankedMaxMs.toFixed(2)}ms`);
+    assert.ok(orderedMaxMs < dataset.budgets.queryAvgMs, `${dataset.label} ordered indexed search should stay below ${dataset.budgets.queryAvgMs}ms, got ${orderedMaxMs.toFixed(2)}ms`);
+    assert.ok(rankedMeasurement.eventLoopDelayMs < dataset.budgets.queryEventLoopDelayMs, `${dataset.label} ranked query event-loop delay should stay below ${dataset.budgets.queryEventLoopDelayMs}ms, got ${rankedMeasurement.eventLoopDelayMs.toFixed(2)}ms`);
+    assert.ok(orderedMeasurement.eventLoopDelayMs < dataset.budgets.queryEventLoopDelayMs, `${dataset.label} ordered query event-loop delay should stay below ${dataset.budgets.queryEventLoopDelayMs}ms, got ${orderedMeasurement.eventLoopDelayMs.toFixed(2)}ms`);
+  }
+
+  printBrowserSearchPerfReport({ largeDatasets: reports });
 });
