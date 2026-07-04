@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { performance } from 'node:perf_hooks';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { importTs } from './lib/ts-import.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -229,6 +229,27 @@ async function measureDuration(fn) {
   };
 }
 
+function summarizeEventLoopDelay(histogram) {
+  return {
+    meanMs: Number((histogram.mean / 1_000_000).toFixed(3)),
+    maxMs: Number((histogram.max / 1_000_000).toFixed(3)),
+    p95Ms: Number((histogram.percentile(95) / 1_000_000).toFixed(3)),
+  };
+}
+
+async function measureDurationWithEventLoopDelay(fn) {
+  const histogram = monitorEventLoopDelay({ resolution: 1 });
+  histogram.enable();
+  await new Promise((resolve) => setImmediate(resolve));
+  const measured = await measureDuration(fn);
+  await new Promise((resolve) => setImmediate(resolve));
+  histogram.disable();
+  return {
+    ...measured,
+    eventLoopDelay: summarizeEventLoopDelay(histogram),
+  };
+}
+
 async function measureQueries(searchIndexedFiles, queries, config) {
   const samples = [];
   for (let run = 0; run < config.queryRuns; run += 1) {
@@ -331,7 +352,7 @@ function toDisplayLines(summary) {
     'File search perf harness',
     `Home fixture: ${summary.fixture.homeDir}`,
     `Indexed entries: ${summary.fixture.initialEntryCount}`,
-    `Initial indexing: ${summary.metrics.initialIndexMs.toFixed(3)}ms`,
+    `Initial indexing: ${summary.metrics.initialIndexMs.toFixed(3)}ms (event-loop delay p95 ${summary.metrics.initialIndexEventLoopDelay.p95Ms.toFixed(3)}ms, max ${summary.metrics.initialIndexEventLoopDelay.maxMs.toFixed(3)}ms)`,
     `Normal queries: mean ${summary.metrics.normalQueries.meanMs.toFixed(3)}ms, p95 ${summary.metrics.normalQueries.p95Ms.toFixed(3)}ms, results ${summary.metrics.normalQueries.totalResults}`,
     `Path-like queries: mean ${summary.metrics.pathLikeQueries.meanMs.toFixed(3)}ms, p95 ${summary.metrics.pathLikeQueries.p95Ms.toFixed(3)}ms, results ${summary.metrics.pathLikeQueries.totalResults}`,
     `Watcher-style updates: ${summary.metrics.watchUpdateBatchMs.toFixed(3)}ms for ${summary.fixture.updateCount} paths`,
@@ -362,7 +383,7 @@ export async function runFileSearchPerfHarness(overrides = {}) {
     }
 
     const queries = buildQueries(fixture.homeDir);
-    const initialIndex = await measureDuration(() =>
+    const initialIndex = await measureDurationWithEventLoopDelay(() =>
       fileSearchIndexPerfHarness.rebuild({
         homeDir: fixture.homeDir,
         includeProtectedHomeRoots: config.includeProtectedHomeRoots,
@@ -395,6 +416,7 @@ export async function runFileSearchPerfHarness(overrides = {}) {
 
     const metrics = {
       initialIndexMs: roundMetric(initialIndex.durationMs),
+      initialIndexEventLoopDelay: initialIndex.eventLoopDelay,
       normalQueries,
       pathLikeQueries,
       watchUpdateBatchMs: roundMetric(watchUpdate.durationMs),

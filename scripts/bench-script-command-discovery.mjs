@@ -54,6 +54,16 @@ function printMetric(label, durationMs, metricSnapshot) {
   console.log(`  total runner bytes read: ${formatBytes(metricSnapshot.totalBytes)}`);
 }
 
+async function withFakeDateNow(now, callback) {
+  const previousDateNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await callback();
+  } finally {
+    Date.now = previousDateNow;
+  }
+}
+
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-script-bench-'));
 const scriptsDir = path.join(tempRoot, 'script-commands');
 const userDataDir = path.join(tempRoot, 'user-data');
@@ -113,6 +123,16 @@ try {
   }
 
   resetMetrics();
+  const ttlRefreshStart = performance.now();
+  const ttlRefreshCommands = await withFakeDateNow(Date.now() + 20_000, () => runner.discoverScriptCommands());
+  const ttlRefreshMs = performance.now() - ttlRefreshStart;
+  const ttlRefreshMetrics = snapshot(metrics);
+
+  if (ttlRefreshCommands.length !== fileCount) {
+    throw new Error(`Expected ${fileCount} commands after TTL refresh, discovered ${ttlRefreshCommands.length}`);
+  }
+
+  resetMetrics();
   runner.invalidateScriptCommandsCache();
   const invalidatedExecuteStart = performance.now();
   await runner.executeScriptCommand(commands[0].id);
@@ -126,6 +146,7 @@ try {
   printMetric('discovery', discoveryMs, discoveryMetrics);
   printMetric('cached execution shebang lookup', executeMs, executeMetrics);
   printMetric('invalidated discovery', invalidatedDiscoveryMs, invalidatedDiscoveryMetrics);
+  printMetric('ttl-expired unchanged discovery', ttlRefreshMs, ttlRefreshMetrics);
   printMetric('invalidated execution lookup', invalidatedExecuteMs, invalidatedExecuteMetrics);
 } finally {
   delete process.env.SUPERCMD_SCRIPT_COMMAND_PATHS;
