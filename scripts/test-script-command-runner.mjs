@@ -164,4 +164,45 @@ ${body}
       `expected a bounded prefix read, got ${metrics.readSyncBytes} bytes`,
     );
   });
+
+  await t.test('caches file icon data across invalidated discoveries and refreshes changed icons', async (t) => {
+    const { module: runner, scriptsDir, metrics, resetMetrics } = await withScriptCommandRunner(t, {}, {
+      instrumentFs: true,
+    });
+    const iconsDir = path.join(scriptsDir, '.icons');
+    const iconPath = path.join(iconsDir, 'icon.png');
+    const scriptPath = path.join(scriptsDir, 'with-file-icon.sh');
+    const firstIcon = Buffer.alloc(4096, 1);
+    const secondIcon = Buffer.alloc(8192, 2);
+
+    fs.mkdirSync(iconsDir, { recursive: true });
+    fs.writeFileSync(iconPath, firstIcon);
+    fs.writeFileSync(scriptPath, `#!/bin/bash
+${scriptHeader({
+  title: 'File Icon Command',
+  extra: '# @raycast.icon .icons/icon.png\n',
+})}
+echo ok
+`, { mode: 0o755 });
+
+    resetMetrics();
+    const [initialCommand] = runner.discoverScriptCommands();
+    assert.equal(initialCommand.title, 'File Icon Command');
+    assert.ok(initialCommand.iconDataUrl?.startsWith('data:image/png;base64,'));
+    assert.equal(metrics.readFileSyncBytes, firstIcon.byteLength);
+
+    resetMetrics();
+    runner.invalidateScriptCommandsCache();
+    const [cachedCommand] = runner.discoverScriptCommands();
+    assert.equal(cachedCommand.iconDataUrl, initialCommand.iconDataUrl);
+    assert.equal(metrics.readFileSyncBytes, 0);
+    assert.ok(metrics.readSyncBytes > 0, 'expected invalidated discovery to reread script headers');
+
+    fs.writeFileSync(iconPath, secondIcon);
+    resetMetrics();
+    runner.invalidateScriptCommandsCache();
+    const [changedCommand] = runner.discoverScriptCommands();
+    assert.notEqual(changedCommand.iconDataUrl, initialCommand.iconDataUrl);
+    assert.equal(metrics.readFileSyncBytes, secondIcon.byteLength);
+  });
 });

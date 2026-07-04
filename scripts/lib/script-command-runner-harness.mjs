@@ -49,6 +49,7 @@ function makeInstrumentedFsSource(metricsKey) {
     export const writeFileSync = realFs.writeFileSync.bind(realFs);
     export const chmodSync = realFs.chmodSync.bind(realFs);
     export const unlinkSync = realFs.unlinkSync.bind(realFs);
+    export const statSync = realFs.statSync.bind(realFs);
     export const openSync = (...args) => {
       metrics.openSyncCalls += 1;
       return realFs.openSync(...args);
@@ -77,6 +78,7 @@ function makeInstrumentedFsSource(metricsKey) {
       writeFileSync,
       chmodSync,
       unlinkSync,
+      statSync,
       openSync,
       closeSync,
       accessSync,
