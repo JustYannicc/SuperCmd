@@ -18387,7 +18387,7 @@ if let tiff = image?.tiffRepresentation {
                 requestId,
                 error: `HTTP ${res.statusCode}: ${errBody.slice(0, 200)}`,
               });
-              activeAIRequests.delete(requestId);
+              finishPullRequest();
             });
             return;
           }
@@ -18431,7 +18431,7 @@ if let tiff = image?.tiffRepresentation {
             if (!controller.signal.aborted) {
               event.sender.send('ollama-pull-done', { requestId });
             }
-            activeAIRequests.delete(requestId);
+            finishPullRequest();
           });
         }
       );
@@ -18443,16 +18443,34 @@ if let tiff = image?.tiffRepresentation {
             error: err.message || 'Failed to pull model',
           });
         }
-        activeAIRequests.delete(requestId);
+        finishPullRequest();
       });
 
+      let abortListenerAttached = false;
+      let pullRequestFinished = false;
+      const onAbort = () => {
+        finishPullRequest();
+        req.destroy();
+      };
+      const cleanupAbortListener = () => {
+        if (!abortListenerAttached) return;
+        controller.signal.removeEventListener('abort', onAbort);
+        abortListenerAttached = false;
+      };
+      const finishPullRequest = () => {
+        if (pullRequestFinished) return;
+        pullRequestFinished = true;
+        cleanupAbortListener();
+        activeOllamaPullRequests.delete(requestId);
+      };
+
       if (controller.signal.aborted) {
+        finishPullRequest();
         req.destroy();
         return;
       }
-      controller.signal.addEventListener('abort', () => {
-        req.destroy();
-      }, { once: true });
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      abortListenerAttached = true;
 
       req.write(body);
       req.end();
