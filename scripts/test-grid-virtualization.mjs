@@ -80,6 +80,46 @@ function rowContainsIndex(rows, index) {
   return rows.some((row) => row.kind === 'items' && row.items.some((entry) => entry.globalIdx === index));
 }
 
+function makeVirtualSectionRow(key, top, height) {
+  return {
+    kind: 'section',
+    key,
+    sectionKey: key,
+    title: key,
+    top,
+    height,
+  };
+}
+
+function getVisibleRowKeys(getVisibleVirtualRows, rows, options) {
+  return getVisibleVirtualRows(rows, options).map((row) => row.key);
+}
+
+function makeInstrumentedRows(rowCount) {
+  const stats = { topReads: 0, heightReads: 0 };
+  const rowHeight = 20;
+  const rowGap = 4;
+  const rows = Array.from({ length: rowCount }, (_, index) => {
+    const top = index * (rowHeight + rowGap);
+
+    return {
+      kind: 'section',
+      key: `instrumented-${index}`,
+      sectionKey: 'instrumented',
+      get top() {
+        stats.topReads += 1;
+        return top;
+      },
+      get height() {
+        stats.heightReads += 1;
+        return rowHeight;
+      },
+    };
+  });
+
+  return { rows, stats };
+}
+
 test('Grid virtualization keeps large grids to visible cells', async (t) => {
   const groups = makeLargeGridGroups();
   const eagerStart = performance.now();
@@ -142,6 +182,65 @@ test('Grid virtualization keeps large grids to visible cells', async (t) => {
     });
 
     assert.ok(rowContainsIndex(selectedRows, targetIndex), 'selected off-screen item is rendered after selection scroll');
+  });
+
+  await t.test('preserves inclusive visible-row boundary semantics', () => {
+    const rows = [
+      makeVirtualSectionRow('a', 0, 10),
+      makeVirtualSectionRow('b', 20, 10),
+      makeVirtualSectionRow('c', 40, 10),
+    ];
+
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 10, viewportHeight: 1, overscan: 0 }),
+      ['a'],
+      'row whose bottom equals the visible start remains included',
+    );
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 15, viewportHeight: 5, overscan: 0 }),
+      ['b'],
+      'row whose top equals the visible end remains included',
+    );
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 11, viewportHeight: 8, overscan: 0 }),
+      [],
+      'rows outside the unexpanded viewport gap are excluded',
+    );
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 11, viewportHeight: 8, overscan: 1 }),
+      ['a', 'b'],
+      'overscan preserves the same inclusive start and end comparisons',
+    );
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 45, viewportHeight: 1, overscan: 0 }),
+      ['c'],
+      'partially visible rows remain included',
+    );
+    assert.deepEqual(
+      getVisibleRowKeys(getVisibleVirtualRows, rows, { scrollTop: 51, viewportHeight: 1, overscan: 0 }),
+      [],
+      'rows whose bottom is before the visible start are excluded',
+    );
+  });
+
+  await t.test('uses sublinear row-bound lookup for large row sets', () => {
+    const { rows, stats } = makeInstrumentedRows(100000);
+    const rangeStart = performance.now();
+    const visibleRows = getVisibleVirtualRows(rows, {
+      scrollTop: 1200000,
+      viewportHeight: VIEWPORT_HEIGHT,
+      overscan: 320,
+    });
+    const duration = performance.now() - rangeStart;
+    const boundReads = stats.topReads + stats.heightReads;
+
+    console.log(
+      `[grid-perf] visibleRange rows=${rows.length} renderedRows=${visibleRows.length} boundReads=${boundReads} durationMs=${duration.toFixed(3)}`,
+    );
+
+    assert.ok(visibleRows.length > 0, 'large range returns visible rows');
+    assert.ok(visibleRows.length < 100, `expected a small visible window, got ${visibleRows.length}`);
+    assert.ok(boundReads < 512, `expected logarithmic bound reads, got ${boundReads}`);
   });
 
   await t.test('preserves section layout options', () => {
