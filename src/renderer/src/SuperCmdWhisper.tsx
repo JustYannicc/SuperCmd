@@ -310,7 +310,7 @@ function insertIntoLocalWhisperTextTarget(target: LocalWhisperTextTarget | null,
   return true;
 }
 
-function flattenFloat32Chunks(chunks: Float32Array[]): Float32Array {
+export function flattenFloat32Chunks(chunks: Float32Array[]): Float32Array {
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const merged = new Float32Array(totalLength);
   let offset = 0;
@@ -321,7 +321,7 @@ function flattenFloat32Chunks(chunks: Float32Array[]): Float32Array {
   return merged;
 }
 
-function downsampleTo16k(samples: Float32Array, sourceSampleRate: number): Float32Array {
+export function downsampleTo16k(samples: Float32Array, sourceSampleRate: number): Float32Array {
   if (!samples.length || !sourceSampleRate || sourceSampleRate === 16000) {
     return samples;
   }
@@ -348,7 +348,7 @@ function downsampleTo16k(samples: Float32Array, sourceSampleRate: number): Float
   return downsampled;
 }
 
-function encodeWavePcm16(samples: Float32Array, sampleRate: number): ArrayBuffer {
+export function encodeWavePcm16(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const bytesPerSample = 2;
   const blockAlign = bytesPerSample;
   const byteRate = sampleRate * blockAlign;
@@ -385,6 +385,165 @@ function encodeWavePcm16(samples: Float32Array, sampleRate: number): ArrayBuffer
   }
 
   return buffer;
+}
+
+export interface LocalWaveSnapshotCache {
+  sourceSampleRate: number;
+  chunkCount: number;
+  sampleCount: number;
+  downsampledSampleCount: number;
+  pcmBytes: Uint8Array;
+}
+
+function encodePcm16Bytes(samples: Float32Array): Uint8Array {
+  const bytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const normalized = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, normalized < 0 ? normalized * 0x8000 : normalized * 0x7fff, true);
+    offset += 2;
+  }
+  return bytes;
+}
+
+function encodeWaveFromPcm16Bytes(pcmBytes: Uint8Array, sampleRate: number): ArrayBuffer {
+  const bytesPerSample = 2;
+  const blockAlign = bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcmBytes.byteLength;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+
+  let offset = 0;
+  const writeString = (value: string) => {
+    for (let i = 0; i < value.length; i += 1) {
+      view.setUint8(offset + i, value.charCodeAt(i));
+    }
+    offset += value.length;
+  };
+
+  writeString('RIFF');
+  view.setUint32(offset, 36 + dataSize, true); offset += 4;
+  writeString('WAVE');
+  writeString('fmt ');
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, byteRate, true); offset += 4;
+  view.setUint16(offset, blockAlign, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+  writeString('data');
+  view.setUint32(offset, dataSize, true); offset += 4;
+  bytes.set(pcmBytes, offset);
+
+  return buffer;
+}
+
+function mergeUint8(a: Uint8Array, b: Uint8Array): Uint8Array {
+  if (!a.byteLength) return b;
+  if (!b.byteLength) return a;
+  const merged = new Uint8Array(a.byteLength + b.byteLength);
+  merged.set(a, 0);
+  merged.set(b, a.byteLength);
+  return merged;
+}
+
+function countFloat32Samples(chunks: Float32Array[]): number {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  return total;
+}
+
+function downsampleNewRangeTo16k(
+  chunks: Float32Array[],
+  sourceSampleRate: number,
+  startOutputSample: number,
+  endOutputSample: number,
+  totalSourceSamples: number
+): Float32Array {
+  if (endOutputSample <= startOutputSample) return new Float32Array(0);
+  const ratio = sourceSampleRate / 16000;
+  const output = new Float32Array(endOutputSample - startOutputSample);
+  let chunkIndex = 0;
+  let chunkStart = 0;
+
+  const sampleAt = (globalIndex: number): number => {
+    while (
+      chunkIndex < chunks.length - 1 &&
+      globalIndex >= chunkStart + chunks[chunkIndex].length
+    ) {
+      chunkStart += chunks[chunkIndex].length;
+      chunkIndex += 1;
+    }
+    return chunks[chunkIndex]?.[globalIndex - chunkStart] || 0;
+  };
+
+  for (let outIndex = startOutputSample; outIndex < endOutputSample; outIndex += 1) {
+    const start = Math.min(totalSourceSamples, Math.round(outIndex * ratio));
+    const end = Math.min(totalSourceSamples, Math.round((outIndex + 1) * ratio));
+    let accumulator = 0;
+    let count = 0;
+    for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
+      accumulator += sampleAt(sourceIndex);
+      count += 1;
+    }
+    output[outIndex - startOutputSample] = count > 0
+      ? accumulator / count
+      : sampleAt(Math.min(start, totalSourceSamples - 1));
+  }
+
+  return output;
+}
+
+export function buildCachedLocalWaveSnapshot(
+  chunks: Float32Array[],
+  sourceSampleRate: number,
+  cache: LocalWaveSnapshotCache | null
+): { buffer: ArrayBuffer | null; cache: LocalWaveSnapshotCache | null } {
+  if (!chunks.length) return { buffer: null, cache: null };
+  const sampleRate = sourceSampleRate || 16000;
+  const totalSourceSamples = countFloat32Samples(chunks);
+  const canReuse = !!cache
+    && cache.sourceSampleRate === sampleRate
+    && cache.chunkCount <= chunks.length
+    && cache.sampleCount <= totalSourceSamples;
+  const previousChunkCount = canReuse ? cache.chunkCount : 0;
+  const previousPcmBytes = canReuse ? cache.pcmBytes : new Uint8Array(0);
+  const previousDownsampledSamples = canReuse ? cache.downsampledSampleCount : 0;
+  let newSourceSampleCount = 0;
+  let newDownsampled: Float32Array;
+  if (sampleRate === 16000) {
+    const newChunks = chunks.slice(previousChunkCount);
+    const newSourceSamples = flattenFloat32Chunks(newChunks);
+    newSourceSampleCount = newSourceSamples.length;
+    newDownsampled = newSourceSamples;
+  } else {
+    const nextDownsampledSamples = Math.max(1, Math.round(totalSourceSamples / (sampleRate / 16000)));
+    newSourceSampleCount = totalSourceSamples - (canReuse ? cache.sampleCount : 0);
+    newDownsampled = downsampleNewRangeTo16k(
+      chunks,
+      sampleRate,
+      previousDownsampledSamples,
+      nextDownsampledSamples,
+      totalSourceSamples
+    );
+  }
+  const nextPcmBytes = mergeUint8(previousPcmBytes, encodePcm16Bytes(newDownsampled));
+  if (!nextPcmBytes.byteLength) return { buffer: null, cache };
+  const nextCache: LocalWaveSnapshotCache = {
+    sourceSampleRate: sampleRate,
+    chunkCount: chunks.length,
+    sampleCount: (canReuse ? cache.sampleCount : 0) + newSourceSampleCount,
+    downsampledSampleCount: previousDownsampledSamples + newDownsampled.length,
+    pcmBytes: nextPcmBytes,
+  };
+  return {
+    buffer: encodeWaveFromPcm16Bytes(nextPcmBytes, 16000),
+    cache: nextCache,
+  };
 }
 
 const SuperCmdWhisper: React.FC<SuperCmdWhisperProps> = ({
@@ -462,6 +621,7 @@ const SuperCmdWhisper: React.FC<SuperCmdWhisperProps> = ({
   const captureGainRef = useRef<GainNode | null>(null);
   const captureSampleRateRef = useRef(16000);
   const pcmCaptureChunksRef = useRef<Float32Array[]>([]);
+  const localWaveSnapshotCacheRef = useRef<LocalWaveSnapshotCache | null>(null);
   const rafRef = useRef<number | null>(null);
 
   // MediaRecorder refs (Whisper API backend)
@@ -562,6 +722,7 @@ const SuperCmdWhisper: React.FC<SuperCmdWhisperProps> = ({
     sourceNodeRef.current = source;
     captureSampleRateRef.current = audioContext.sampleRate || 16000;
     pcmCaptureChunksRef.current = [];
+    localWaveSnapshotCacheRef.current = null;
 
     if (capturePcm) {
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -652,13 +813,13 @@ const SuperCmdWhisper: React.FC<SuperCmdWhisperProps> = ({
   }, []);
 
   const buildLocalWaveSnapshot = useCallback((): ArrayBuffer | null => {
-    const chunks = pcmCaptureChunksRef.current;
-    if (!chunks.length) return null;
-    const merged = flattenFloat32Chunks(chunks);
-    if (!merged.length) return null;
-    const downsampled = downsampleTo16k(merged, captureSampleRateRef.current || 16000);
-    if (!downsampled.length) return null;
-    return encodeWavePcm16(downsampled, 16000);
+    const result = buildCachedLocalWaveSnapshot(
+      pcmCaptureChunksRef.current,
+      captureSampleRateRef.current || 16000,
+      localWaveSnapshotCacheRef.current
+    );
+    localWaveSnapshotCacheRef.current = result.cache;
+    return result.buffer;
   }, []);
 
   const restoreEditorFocusOnce = useCallback((delayMs = 0) => {
@@ -1818,6 +1979,7 @@ const SuperCmdWhisper: React.FC<SuperCmdWhisperProps> = ({
     // All local models (whispercpp, parakeet, qwen3) use PCM; cloud/native don't but
     // capturing a few extra chunks is harmless.
     pcmCaptureChunksRef.current = [];
+    localWaveSnapshotCacheRef.current = null;
     captureSampleRateRef.current = 16000;
     startVisualizer(preflightStream!, true);
 

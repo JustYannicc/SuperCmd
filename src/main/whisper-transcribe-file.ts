@@ -137,61 +137,62 @@ export async function transcribeWhisperAudioFile(params: {
     }
   );
   if (provider === 'native') {
+    cleanupWhisperFileAudioPath(deps.fs, audioPath);
     return '';
   }
 
-  const audioBuffer = shouldReadWhisperFileAudioBuffer(provider)
-    ? deps.fs.readFileSync(audioPath)
-    : null;
+  try {
+    const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
+    const language = deps.normalizeWhisperLanguageCode(rawLang);
 
-  const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
-  const language = deps.normalizeWhisperLanguageCode(rawLang);
-
-  if (provider === 'openai' && !s.ai.openaiApiKey) {
-    throw new Error('OpenAI API key not configured.');
-  }
-  const elevenLabsApiKey = deps.getElevenLabsApiKey(s);
-  if (provider === 'elevenlabs' && !elevenLabsApiKey) {
-    throw new Error('ElevenLabs API key not configured.');
-  }
-  const mistralApiKey = deps.getMistralApiKey(s);
-  if (provider === 'mistral' && !mistralApiKey) {
-    throw new Error('Mistral API key not configured.');
-  }
-
-  if (provider === 'whispercpp') {
-    const status = deps.getWhisperCppModelStatus();
-    if (status.state === 'downloading') {
-      throw new Error('Whisper model still downloading.');
+    if (provider === 'openai' && !s.ai.openaiApiKey) {
+      throw new Error('OpenAI API key not configured.');
     }
-    if (status.state !== 'downloaded') {
-      throw new Error('Whisper model not downloaded.');
+    const elevenLabsApiKey = deps.getElevenLabsApiKey(s);
+    if (provider === 'elevenlabs' && !elevenLabsApiKey) {
+      throw new Error('ElevenLabs API key not configured.');
     }
-    await deps.ensureWhisperCppServer();
-    const result = await deps.sendWhisperCppRequest({
-      command: 'transcribe',
-      file: audioPath,
-      language,
-    });
+    const mistralApiKey = deps.getMistralApiKey(s);
+    if (provider === 'mistral' && !mistralApiKey) {
+      throw new Error('Mistral API key not configured.');
+    }
+
+    if (provider === 'whispercpp') {
+      const status = deps.getWhisperCppModelStatus();
+      if (status.state === 'downloading') {
+        throw new Error('Whisper model still downloading.');
+      }
+      if (status.state !== 'downloaded') {
+        throw new Error('Whisper model not downloaded.');
+      }
+      await deps.ensureWhisperCppServer();
+      const result = await deps.sendWhisperCppRequest({
+        command: 'transcribe',
+        file: audioPath,
+        language,
+      });
+      return result.text || '';
+    }
+
+    const audioBuffer = shouldReadWhisperFileAudioBuffer(provider)
+      ? deps.fs.readFileSync(audioPath)
+      : null;
+
+    if (!audioBuffer) {
+      throw new Error(`No audio buffer available for ${provider} transcription.`);
+    }
+
+    const mimeType = 'audio/wav';
+    return provider === 'parakeet'
+      ? await deps.transcribeAudioWithParakeet({ audioBuffer, language, mimeType })
+      : provider === 'qwen3'
+        ? await deps.transcribeAudioWithQwen3({ audioBuffer, language, mimeType })
+        : provider === 'elevenlabs'
+          ? await deps.transcribeAudioWithElevenLabs({ audioBuffer, apiKey: elevenLabsApiKey, model, language, mimeType })
+          : provider === 'mistral'
+            ? await deps.transcribeAudioWithMistralVoxtral({ audioBuffer, apiKey: mistralApiKey, model, language, mimeType })
+            : await deps.transcribeAudio({ audioBuffer, apiKey: s.ai.openaiApiKey, model, language, mimeType });
+  } finally {
     cleanupWhisperFileAudioPath(deps.fs, audioPath);
-    return result.text || '';
   }
-
-  if (!audioBuffer) {
-    throw new Error(`No audio buffer available for ${provider} transcription.`);
-  }
-
-  const mimeType = 'audio/wav';
-  const text = provider === 'parakeet'
-    ? await deps.transcribeAudioWithParakeet({ audioBuffer, language, mimeType })
-    : provider === 'qwen3'
-      ? await deps.transcribeAudioWithQwen3({ audioBuffer, language, mimeType })
-      : provider === 'elevenlabs'
-        ? await deps.transcribeAudioWithElevenLabs({ audioBuffer, apiKey: elevenLabsApiKey, model, language, mimeType })
-        : provider === 'mistral'
-          ? await deps.transcribeAudioWithMistralVoxtral({ audioBuffer, apiKey: mistralApiKey, model, language, mimeType })
-          : await deps.transcribeAudio({ audioBuffer, apiKey: s.ai.openaiApiKey, model, language, mimeType });
-
-  cleanupWhisperFileAudioPath(deps.fs, audioPath);
-  return text;
 }

@@ -32,6 +32,23 @@ const SPEED_PRESETS = [
   { value: '+30%', label: '1.3x' },
 ];
 
+export type SpeakTextToken =
+  | { kind: 'space'; text: string; key: string }
+  | { kind: 'word'; text: string; key: string; wordIndex: number };
+
+export function tokenizeSpeakText(text: string): SpeakTextToken[] {
+  const parts = String(text || '').split(/(\s+)/g);
+  let currentWord = 0;
+  return parts.map((part, index) => {
+    if (!part.trim()) {
+      return { kind: 'space', text: part, key: `sp-${index}` };
+    }
+    const token = { kind: 'word' as const, text: part, key: `wd-${index}`, wordIndex: currentWord };
+    currentWord += 1;
+    return token;
+  });
+}
+
 const SuperCmdRead: React.FC<SuperCmdReadProps> = ({
   status,
   voice,
@@ -45,10 +62,11 @@ const SuperCmdRead: React.FC<SuperCmdReadProps> = ({
   onClose,
   portalTarget,
 }) => {
-  if (typeof document === 'undefined') return null;
-  const target = portalTarget || document.body;
-  if (!target) return null;
   const textScrollRef = useRef<HTMLDivElement | null>(null);
+  const highlightedWordRef = useRef<HTMLElement | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const lastScrollAtRef = useRef(0);
+  const target = typeof document === 'undefined' ? null : (portalTarget || document.body);
 
   const caption =
     status.state === 'speaking' || status.state === 'paused'
@@ -74,45 +92,53 @@ const SuperCmdRead: React.FC<SuperCmdReadProps> = ({
   const canGoPrevious = isSessionActive && status.index > 1;
   const canGoNext = isSessionActive && status.index > 0 && status.index < status.total;
 
-  const renderedText = useMemo(() => {
-    const text = mainText;
-    const wordIndex = status.state === 'speaking' || status.state === 'paused' ? status.wordIndex : undefined;
-    if (typeof wordIndex !== 'number' || wordIndex < 0) {
-      return text;
-    }
-    const tokens = text.split(/(\s+)/g);
-    let currentWord = 0;
-    return tokens.map((token, idx) => {
-      if (!token.trim()) {
-        return <span key={`sp-${idx}`}>{token}</span>;
-      }
-      const highlighted = currentWord === wordIndex;
-      const thisWordIndex = currentWord;
-      currentWord += 1;
-      return (
-        <span
-          key={`wd-${idx}`}
-          data-word-idx={thisWordIndex}
-          className={highlighted ? 'speak-word-highlight' : undefined}
-        >
-          {token}
-        </span>
-      );
-    });
-  }, [mainText, status.state, status.wordIndex]);
+  const textTokens = useMemo(() => tokenizeSpeakText(mainText), [mainText]);
+
+  const renderedText = useMemo(() => (
+    textTokens.map((token) => (
+      token.kind === 'space'
+        ? <span key={token.key}>{token.text}</span>
+        : <span key={token.key} data-word-idx={token.wordIndex}>{token.text}</span>
+    ))
+  ), [textTokens]);
 
   useEffect(() => {
-    if (status.state !== 'speaking' || typeof status.wordIndex !== 'number') return;
+    const previous = highlightedWordRef.current;
+    if (previous) {
+      previous.classList.remove('speak-word-highlight');
+      highlightedWordRef.current = null;
+    }
+    if ((status.state !== 'speaking' && status.state !== 'paused') || typeof status.wordIndex !== 'number') return;
     const root = textScrollRef.current;
     if (!root) return;
     const el = root.querySelector(`[data-word-idx="${status.wordIndex}"]`) as HTMLElement | null;
     if (!el) return;
-    el.scrollIntoView({
-      block: 'nearest',
-      inline: 'nearest',
-      behavior: 'smooth',
+    el.classList.add('speak-word-highlight');
+    highlightedWordRef.current = el;
+
+    if (status.state !== 'speaking') return;
+    if (scrollRafRef.current !== null) return;
+    const now = performance.now();
+    if (now - lastScrollAtRef.current < 140) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      lastScrollAtRef.current = performance.now();
+      el.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+        behavior: 'smooth',
+      });
     });
-  }, [status.state, status.wordIndex]);
+  }, [status.state, status.wordIndex, textTokens]);
+
+  useEffect(() => () => {
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+  }, []);
+
+  if (!target) return null;
 
   return createPortal(
     <div className="speak-widget-host">

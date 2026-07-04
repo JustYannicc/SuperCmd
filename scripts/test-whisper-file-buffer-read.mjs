@@ -14,8 +14,10 @@ const {
 const AUDIO_PATH = '/tmp/supercmd-whisper-file-buffer-read/input.wav';
 const DEFAULT_FILE_BYTES = 73_400_320;
 
-function makeSettings(speechToTextModel) {
+function makeSettings(speechToTextModel, overrides = {}) {
+  const { ai: aiOverrides = {}, ...rest } = overrides;
   return {
+    ...rest,
     ai: {
       enabled: true,
       whisperEnabled: true,
@@ -24,11 +26,18 @@ function makeSettings(speechToTextModel) {
       openaiApiKey: 'openai-key',
       elevenlabsApiKey: 'elevenlabs-key',
       mistralApiKey: 'mistral-key',
+      ...aiOverrides,
     },
   };
 }
 
-function makeHarness({ speechToTextModel = 'whispercpp', exists = true, fileBytes = DEFAULT_FILE_BYTES } = {}) {
+function makeHarness({
+  speechToTextModel = 'whispercpp',
+  exists = true,
+  fileBytes = DEFAULT_FILE_BYTES,
+  settingsOverrides = {},
+  transcriberRejects = false,
+} = {}) {
   const events = [];
   const fakeAudioBuffer = Buffer.from('fake wav bytes');
   const calls = {
@@ -64,12 +73,13 @@ function makeHarness({ speechToTextModel = 'whispercpp', exists = true, fileByte
   const makeTranscriber = (label) => async (opts) => {
     events.push(`transcribe:${label}`);
     calls[label].push(opts);
+    if (transcriberRejects) throw new Error(`${label} failed`);
     return `${label} transcript`;
   };
 
   const deps = {
     fs,
-    loadSettings: () => makeSettings(speechToTextModel),
+    loadSettings: () => makeSettings(speechToTextModel, settingsOverrides),
     isAIDisabledInSettings: (settings) => settings.ai?.enabled === false,
     normalizeWhisperLanguageCode: (rawLanguage) => String(rawLanguage || 'en-US').split('-')[0].toLowerCase(),
     resolveElevenLabsSttModel: (model) => model.replace(/^elevenlabs-/, '').replace(/-/g, '_') || 'scribe_v1',
@@ -211,6 +221,49 @@ test('missing audio file does not read a buffer or run cleanup', async () => {
   assert.equal(harness.nodeBufferBytes, 0);
   assert.equal(harness.events.some((event) => event.startsWith('unlink:')), false);
   assert.equal(harness.events.some((event) => event.startsWith('rmdir:')), false);
+});
+
+test('cloud provider validation runs before large file reads and still cleans up temp capture', async () => {
+  const harness = makeHarness({
+    speechToTextModel: 'openai-whisper-1',
+    settingsOverrides: { ai: { openaiApiKey: '' } },
+  });
+
+  await assert.rejects(
+    transcribeWhisperAudioFile({
+      audioPath: AUDIO_PATH,
+      deps: harness.deps,
+    }),
+    /OpenAI API key not configured/
+  );
+
+  assert.equal(harness.readCalls, 0);
+  assert.equal(harness.nodeBufferBytes, 0);
+  assert.deepEqual(
+    harness.events.filter((event) => event.startsWith('unlink:') || event.startsWith('rmdir:')),
+    [
+      `unlink:${AUDIO_PATH}`,
+      `rmdir:${path.dirname(AUDIO_PATH)}:${JSON.stringify({ recursive: true })}`,
+    ]
+  );
+});
+
+test('temp capture cleanup runs when buffer-backed transcription fails after reading', async () => {
+  const harness = makeHarness({
+    speechToTextModel: 'mistral-voxtral-mini-latest',
+    transcriberRejects: true,
+  });
+
+  await assert.rejects(
+    transcribeWhisperAudioFile({
+      audioPath: AUDIO_PATH,
+      deps: harness.deps,
+    }),
+    /mistral failed/
+  );
+
+  assert.equal(harness.readCalls, 1);
+  assertCleanupAfter(harness.events, 'transcribe:mistral');
 });
 
 test('instrumentation shows whispercpp avoids the legacy eager full-file read', async () => {
