@@ -15,6 +15,7 @@ function createIconRuntimeHarness() {
   const moduleCache = new Map();
   const existingPaths = new Set();
   let statCalls = 0;
+  let nowMs = 0;
 
   const windowStub = {
     electron: {
@@ -28,6 +29,11 @@ function createIconRuntimeHarness() {
           size: exists ? 123 : 0,
         };
       },
+    },
+  };
+  const performanceStub = {
+    now() {
+      return nowMs;
     },
   };
 
@@ -71,6 +77,7 @@ function createIconRuntimeHarness() {
       console,
       URL,
       window: windowStub,
+      performance: performanceStub,
       document: {
         documentElement: {
           classList: {
@@ -89,6 +96,9 @@ function createIconRuntimeHarness() {
     config: loadTsModule('src/renderer/src/raycast-api/icon-runtime-config.ts'),
     addExistingPath(filePath) {
       existingPaths.add(filePath);
+    },
+    advanceTime(ms) {
+      nowMs += ms;
     },
     get statCalls() {
       return statCalls;
@@ -123,7 +133,7 @@ test('icon asset existence cache', async (t) => {
     assert.equal(harness.statCalls, 1);
   });
 
-  await t.test('does not cache misses so newly available assets resolve later', () => {
+  await t.test('does not permanently cache misses so newly available assets resolve after the stale window', () => {
     const harness = createIconRuntimeHarness();
     const assetsPath = '/tmp/supercmd-assets';
     const iconPath = `${assetsPath}/late.png`;
@@ -131,6 +141,9 @@ test('icon asset existence cache', async (t) => {
 
     assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), '');
     harness.addExistingPath(iconPath);
+    assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), '');
+
+    harness.advanceTime(300);
     assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), expectedUrl);
 
     assert.equal(harness.statCalls, 2);
@@ -169,5 +182,22 @@ test('icon asset existence cache', async (t) => {
     assert.equal(result, expectedUrl);
     assert.equal(harness.statCalls, 1);
     console.log(`icon-asset-cache measurement: iterations=${iterations} statSync=${harness.statCalls} elapsedMs=${elapsedMs.toFixed(3)}`);
+  });
+
+  await t.test('repeated missing measurement avoids repeated statSync calls within the stale window', () => {
+    const harness = createIconRuntimeHarness();
+    const assetsPath = '/tmp/supercmd-assets';
+    const iterations = 10_000;
+
+    const start = performance.now();
+    let result = 'not-run';
+    for (let i = 0; i < iterations; i += 1) {
+      result = harness.assets.resolveIconSrc('missing.png', assetsPath);
+    }
+    const elapsedMs = performance.now() - start;
+
+    assert.equal(result, '');
+    assert.equal(harness.statCalls, 1);
+    console.log(`icon-asset-miss-cache measurement: iterations=${iterations} statSync=${harness.statCalls} elapsedMs=${elapsedMs.toFixed(3)}`);
   });
 });
