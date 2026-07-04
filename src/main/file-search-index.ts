@@ -944,41 +944,51 @@ function getDescendantPathPrefix(rootPath: string): string {
   return rootPath.endsWith(path.sep) ? rootPath : `${rootPath}${path.sep}`;
 }
 
-function tombstoneDeletedPaths(snapshot: IndexSnapshot, deletePaths: string[]): void {
-  const collapsedDeletePaths = collapseNestedDeletedPaths(deletePaths);
-  if (collapsedDeletePaths.length === 0) return;
+function markDescendantEntriesDeleted(snapshot: IndexSnapshot, deletedRootPaths: string[]): void {
+  if (deletedRootPaths.length === 0) return;
 
-  const directIds = new Set<number>();
-  for (const deletedPath of collapsedDeletePaths) {
-    const id = snapshot.pathToEntryId.get(deletedPath);
-    if (id !== undefined) directIds.add(id);
-  }
-
-  if (collapsedDeletePaths.length === 1) {
-    const descendantPrefix = getDescendantPathPrefix(collapsedDeletePaths[0]);
-    for (let i = 0; i < snapshot.entries.length; i += 1) {
-      const entry = snapshot.entries[i];
+  if (deletedRootPaths.length === 1) {
+    const descendantPrefix = getDescendantPathPrefix(deletedRootPaths[0]);
+    for (const entry of snapshot.entries) {
       if (entry.deleted) continue;
-      if (directIds.has(i) || entry.path.startsWith(descendantPrefix)) {
+      if (entry.path.startsWith(descendantPrefix)) {
         entry.deleted = true;
       }
     }
     return;
   }
 
-  const deletedPathSet = new Set(collapsedDeletePaths);
-
-  for (let i = 0; i < snapshot.entries.length; i += 1) {
-    const entry = snapshot.entries[i];
+  const deletedPathSet = new Set(deletedRootPaths);
+  for (const entry of snapshot.entries) {
     if (entry.deleted) continue;
-    if (directIds.has(i)) {
-      entry.deleted = true;
-      continue;
-    }
     if (hasDeletedPathAncestor(entry.path, deletedPathSet)) {
       entry.deleted = true;
     }
   }
+}
+
+function tombstoneDeletedPaths(snapshot: IndexSnapshot, deletePaths: string[]): void {
+  const collapsedDeletePaths = collapseNestedDeletedPaths(deletePaths);
+  if (collapsedDeletePaths.length === 0) return;
+
+  const deletedRootPaths: string[] = [];
+  for (const deletedPath of collapsedDeletePaths) {
+    const id = snapshot.pathToEntryId.get(deletedPath);
+    if (id === undefined) {
+      deletedRootPaths.push(deletedPath);
+      continue;
+    }
+
+    const entry = snapshot.entries[id];
+    if (entry && !entry.deleted) {
+      entry.deleted = true;
+    }
+    if (entry?.isDirectory) {
+      deletedRootPaths.push(deletedPath);
+    }
+  }
+
+  markDescendantEntriesDeleted(snapshot, deletedRootPaths);
 }
 
 async function walkAddedDirectory(snapshot: IndexSnapshot, dirPath: string): Promise<void> {
