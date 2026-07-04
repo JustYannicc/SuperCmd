@@ -9,6 +9,14 @@ import { runFileSearchPerfHarness } from './file-search-perf-harness.mjs';
 const IS_PERF_CI = process.env.SUPERCMD_PERF_CI === '1';
 const IS_PERF_REPORT = IS_PERF_CI || process.env.SUPERCMD_PERF_REPORT === '1';
 
+function budgetEntry(actual, budget) {
+  return {
+    actualMs: actual,
+    budgetMs: budget,
+    budgetUsedPct: budget > 0 ? Number(((actual / budget) * 100).toFixed(1)) : null,
+  };
+}
+
 async function pathExists(filePath) {
   try {
     await fs.access(filePath);
@@ -19,12 +27,23 @@ async function pathExists(filePath) {
 }
 
 function pickBudgetEvidence(summary) {
+  const thresholds = summary.thresholds.applied;
   return {
+    label: summary.label,
     config: summary.config,
     fixture: {
-      initialEntryCount: summary.fixture.initialEntryCount,
+      indexedEntries: summary.fixture.initialEntryCount,
+      indexedFiles: summary.fixture.initialFileCount,
       updateCount: summary.fixture.updateCount,
       deleteCount: summary.fixture.deleteCount,
+    },
+    budgets: {
+      initialIndexMs: budgetEntry(summary.metrics.initialIndexMs, thresholds.initialIndexMs),
+      normalQueryP95Ms: budgetEntry(summary.metrics.normalQueries.p95Ms, thresholds.normalQueryP95Ms),
+      pathQueryP95Ms: budgetEntry(summary.metrics.pathLikeQueries.p95Ms, thresholds.pathQueryP95Ms),
+      eventLoopLagP95Ms: budgetEntry(summary.metrics.eventLoopLag.p95Ms, thresholds.eventLoopLagP95Ms),
+      watchUpdateBatchMs: budgetEntry(summary.metrics.watchUpdateBatchMs, thresholds.watchUpdateBatchMs),
+      deleteBatchMs: budgetEntry(summary.metrics.deleteBatchMs, thresholds.deleteBatchMs),
     },
     metrics: {
       initialIndexMs: summary.metrics.initialIndexMs,
@@ -39,13 +58,14 @@ function pickBudgetEvidence(summary) {
       postDeleteQueryMs: summary.metrics.postDeleteQueryMs,
     },
     thresholds: summary.thresholds,
+    thresholdStatus: summary.thresholds.passed ? 'passed' : 'failed',
     cleanup: summary.cleanup,
   };
 }
 
-function printFileSearchPerfReport(summary) {
+function printFileSearchPerfReport(label, summary) {
   if (!IS_PERF_REPORT) return;
-  console.log(JSON.stringify({ fileSearchPerf: pickBudgetEvidence(summary) }, null, 2));
+  console.log(JSON.stringify({ fileSearchPerf: pickBudgetEvidence({ ...summary, label }) }, null, 2));
 }
 
 test('file search perf harness covers deterministic temp-home scenarios', async () => {
@@ -68,6 +88,7 @@ test('file search perf harness covers deterministic temp-home scenarios', async 
   });
 
   assert.equal(summary.thresholds.passed, true, summary.thresholds.failures.join('\n'));
+  printFileSearchPerfReport('deterministic-small', summary);
   assert.equal(summary.verification.homeDirectoryUsed, summary.fixture.homeDir);
   assert.equal(summary.verification.homeIsTempDirectory, true);
   assert.ok(
@@ -106,6 +127,7 @@ test('file search perf CI covers large path-query p95 and event-loop lag budgets
   });
 
   assert.equal(summary.thresholds.passed, true, summary.thresholds.failures.join('\n'));
+  printFileSearchPerfReport('ci-large', summary);
   assert.ok(
     summary.fixture.initialEntryCount >= 30_000 && summary.fixture.initialEntryCount <= 60_000,
     `expected 30k-60k indexed entries, got ${summary.fixture.initialEntryCount}`

@@ -173,6 +173,32 @@ function evaluateBudgets(summary, budgets) {
   };
 }
 
+function summarizeBudgetUtilization(summary) {
+  const checks = [
+    ['optimizedMedianMs', summary.metrics.optimized.median, summary.budgets.applied.optimizedMedianMs],
+    ['indexedMedianMs', summary.metrics.indexed.median, summary.budgets.applied.indexedMedianMs],
+    ['compileMedianMs', summary.metrics.compile.median, summary.budgets.applied.compileMedianMs],
+  ];
+  const utilization = Object.fromEntries(
+    checks
+      .filter(([, , budget]) => typeof budget === 'number')
+      .map(([name, actual, budget]) => [name, {
+        actualMs: Number(actual.toFixed(3)),
+        budgetMs: budget,
+        budgetUsedPct: Number(((actual / budget) * 100).toFixed(1)),
+      }])
+  );
+
+  if (typeof summary.budgets.applied.indexedSpeedupMin === 'number') {
+    utilization.indexedSpeedupMin = {
+      actualSpeedup: Number(summary.speedups.legacyVsIndexed.toFixed(3)),
+      minimumSpeedup: summary.budgets.applied.indexedSpeedupMin,
+    };
+  }
+
+  return utilization;
+}
+
 const WORDS = [
   'Notes',
   'Clipboard',
@@ -448,6 +474,7 @@ const summary = {
   },
 };
 summary.budgets = evaluateBudgets(summary, readBudgets());
+summary.budgetUtilization = summarizeBudgetUtilization(summary);
 
 if (JSON_OUTPUT) {
   console.log(JSON.stringify(summary, null, 2));
