@@ -21,7 +21,7 @@ import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { createAerospaceWorkspaceMover } from './aerospace-workspace';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
 import { createLocalAsrHelperStatusProbeCache } from './local-model-status-probe';
-import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow } from './commands';
+import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow, applyCommandMetadataUpdate } from './commands';
 import {
   loadSettings,
   saveSettings,
@@ -15256,7 +15256,7 @@ app.whenReady().then(async () => {
             delete metadata[executed.commandId];
           }
           saveSettings({ commandMetadata: metadata });
-          invalidateCache();
+          applyCommandMetadataUpdate(executed.commandId, { subtitle: subtitle || null });
         }
 
         if (!background && (executed.mode === 'compact' || executed.mode === 'silent')) {
@@ -15351,7 +15351,10 @@ app.whenReady().then(async () => {
         saveSettings({ commandMetadata: settings.commandMetadata });
 
         // Notify all windows to refresh command list
-        invalidateCache();
+        const patchResult = applyCommandMetadataUpdate(commandId, metadata);
+        if (patchResult.changedCommands > 0) {
+          broadcastCommandsUpdated();
+        }
         return { success: true };
       } catch (e: any) {
         console.error('update-command-metadata error:', e);
