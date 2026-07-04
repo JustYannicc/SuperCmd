@@ -222,11 +222,49 @@ function measurePerItemSignatures(baseItems, nextItems, signatureFn) {
   };
 }
 
+function measureShallowGuardedSignatures(baseItems, nextItems, changedFn, signatureFn) {
+  const itemById = new Map(baseItems.map((item) => [item.id, item]));
+  let shallowSkips = 0;
+  let itemSignatureBuilds = 0;
+  let visibleChanges = 0;
+  const signatureById = new Map(baseItems.map((item) => [item.id, signatureFn(item)]));
+  const start = performance.now();
+  for (const item of nextItems) {
+    const previous = itemById.get(item.id);
+    if (previous && !changedFn(previous, item)) {
+      shallowSkips += 1;
+      itemById.set(item.id, item);
+      continue;
+    }
+    itemSignatureBuilds += 1;
+    const nextSignature = signatureFn(item);
+    if (signatureById.get(item.id) !== nextSignature) {
+      visibleChanges += 1;
+      signatureById.set(item.id, nextSignature);
+    }
+    itemById.set(item.id, item);
+  }
+  const durationMs = performance.now() - start;
+  return {
+    fullSnapshotItemWalks: 0,
+    shallowSkips,
+    itemSignatureBuilds,
+    versionUpdates: visibleChanges > 0 ? 1 : 0,
+    visibleChanges,
+    durationMs: Number(durationMs.toFixed(3)),
+  };
+}
+
 function collectMetrics() {
   const listBaseItems = Array.from({ length: ITEM_COUNT }, (_, index) => makeListItem(index));
   const listEquivalentItems = Array.from({ length: ITEM_COUNT }, (_, index) => makeListItem(index));
   const listSingleEquivalentItems = listBaseItems.slice();
   listSingleEquivalentItems[ITEM_COUNT - 1] = makeListItem(ITEM_COUNT - 1);
+  const listSingleSameVisualRefs = listBaseItems.slice();
+  listSingleSameVisualRefs[ITEM_COUNT - 1] = {
+    ...listBaseItems[ITEM_COUNT - 1],
+    props: { ...listBaseItems[ITEM_COUNT - 1].props },
+  };
   const listOneTitleChange = Array.from({ length: ITEM_COUNT }, (_, index) => (
     index === ITEM_COUNT - 1
       ? makeListItem(index, { props: { title: { value: `Changed ${index}`, tooltip: `Emoji title ${index}` } } })
@@ -237,6 +275,12 @@ function collectMetrics() {
   const gridEquivalentItems = Array.from({ length: ITEM_COUNT }, (_, index) => makeGridItem(index));
   const gridSingleEquivalentItems = gridBaseItems.slice();
   gridSingleEquivalentItems[ITEM_COUNT - 1] = makeGridItem(ITEM_COUNT - 1);
+  const gridSingleSameVisualRefs = gridBaseItems.slice();
+  gridSingleSameVisualRefs[ITEM_COUNT - 1] = {
+    ...gridBaseItems[ITEM_COUNT - 1],
+    props: { ...gridBaseItems[ITEM_COUNT - 1].props },
+    section: { ...gridBaseItems[ITEM_COUNT - 1].section },
+  };
   const gridOneContentChange = Array.from({ length: ITEM_COUNT }, (_, index) => (
     index === ITEM_COUNT - 1
       ? makeGridItem(index, { props: { content: { source: `changed-${index}.png`, tintColor: 'red' } } })
@@ -246,6 +290,15 @@ function collectMetrics() {
   return {
     itemCount: ITEM_COUNT,
     list: {
+      singleSameVisualRefs: {
+        before: measurePerItemSignatures(listBaseItems, [listSingleSameVisualRefs[ITEM_COUNT - 1]], listHooks.buildListItemVisibleSignature),
+        after: measureShallowGuardedSignatures(
+          listBaseItems,
+          [listSingleSameVisualRefs[ITEM_COUNT - 1]],
+          listHooks.listItemVisibleInputsChanged,
+          listHooks.buildListItemVisibleSignature,
+        ),
+      },
       singleRecreatedEquivalent: {
         before: measureLegacySnapshot(listBaseItems, listSingleEquivalentItems, legacyListSnapshot),
         after: measurePerItemSignatures(listBaseItems, [makeListItem(ITEM_COUNT - 1)], listHooks.buildListItemVisibleSignature),
@@ -260,6 +313,15 @@ function collectMetrics() {
       },
     },
     grid: {
+      singleSameVisualRefs: {
+        before: measurePerItemSignatures(gridBaseItems, [gridSingleSameVisualRefs[ITEM_COUNT - 1]], gridHooks.buildGridItemVisibleSignature),
+        after: measureShallowGuardedSignatures(
+          gridBaseItems,
+          [gridSingleSameVisualRefs[ITEM_COUNT - 1]],
+          gridHooks.gridItemVisibleInputsChanged,
+          gridHooks.buildGridItemVisibleSignature,
+        ),
+      },
       singleRecreatedEquivalent: {
         before: measureLegacySnapshot(gridBaseItems, gridSingleEquivalentItems, legacyGridSnapshot),
         after: measurePerItemSignatures(gridBaseItems, [makeGridItem(ITEM_COUNT - 1)], gridHooks.buildGridItemVisibleSignature),
@@ -317,6 +379,10 @@ if (process.argv.includes('--report')) {
   test('Registry dirty-check metrics avoid full-registry walks for recreated equivalent props', () => {
     const metrics = collectMetrics();
 
+    assert.equal(metrics.list.singleSameVisualRefs.before.itemSignatureBuilds, 1);
+    assert.equal(metrics.list.singleSameVisualRefs.after.shallowSkips, 1);
+    assert.equal(metrics.list.singleSameVisualRefs.after.itemSignatureBuilds, 0);
+    assert.equal(metrics.list.singleSameVisualRefs.after.versionUpdates, 0);
     assert.equal(metrics.list.singleRecreatedEquivalent.before.fullSnapshotItemWalks, ITEM_COUNT);
     assert.equal(metrics.list.singleRecreatedEquivalent.after.fullSnapshotItemWalks, 0);
     assert.equal(metrics.list.singleRecreatedEquivalent.after.itemSignatureBuilds, 1);
@@ -328,6 +394,10 @@ if (process.argv.includes('--report')) {
     assert.equal(metrics.list.oneVisibleChange.before.versionUpdates, 1);
     assert.equal(metrics.list.oneVisibleChange.after.versionUpdates, 1);
 
+    assert.equal(metrics.grid.singleSameVisualRefs.before.itemSignatureBuilds, 1);
+    assert.equal(metrics.grid.singleSameVisualRefs.after.shallowSkips, 1);
+    assert.equal(metrics.grid.singleSameVisualRefs.after.itemSignatureBuilds, 0);
+    assert.equal(metrics.grid.singleSameVisualRefs.after.versionUpdates, 0);
     assert.equal(metrics.grid.singleRecreatedEquivalent.before.fullSnapshotItemWalks, ITEM_COUNT);
     assert.equal(metrics.grid.singleRecreatedEquivalent.after.fullSnapshotItemWalks, 0);
     assert.equal(metrics.grid.singleRecreatedEquivalent.after.itemSignatureBuilds, 1);

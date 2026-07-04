@@ -186,17 +186,23 @@ export function useStreamJSON<T = any>(
     }
   }, [allItems, revalidate]);
 
+  const visibleData = useMemo(() => {
+    if (displayCount >= allItems.length) return allItems;
+    return allItems.slice(0, displayCount);
+  }, [allItems, displayCount]);
+
   const hasMore = displayCount < allItems.length;
+  const onLoadMore = useCallback(() => {
+    if (hasMore) setDisplayCount((prev) => prev + pageSize);
+  }, [hasMore, pageSize]);
   const pagination = useMemo(() => ({
     pageSize,
     hasMore,
-    onLoadMore: () => {
-      if (hasMore) setDisplayCount((prev) => prev + pageSize);
-    },
-  }), [pageSize, hasMore]);
+    onLoadMore,
+  }), [pageSize, hasMore, onLoadMore]);
 
   return {
-    data: allItems.slice(0, displayCount),
+    data: visibleData,
     isLoading,
     error,
     revalidate,

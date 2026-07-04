@@ -441,6 +441,9 @@ function toBinaryUint8Array(data: any): Uint8Array {
 
 const FS_PREFIX = 'sc-fs:';
 const fsMemoryStore = new Map<string, string>();
+const fsVirtualDirectoryIndex = new Map<string, Map<string, FsEntryKind>>();
+let fsVirtualDirectoryIndexReady = false;
+let fsVirtualDirectoryIndexBuildScans = 0;
 
 function getStoredText(path: string): string | null {
   if (fsMemoryStore.has(path)) return fsMemoryStore.get(path) ?? null;
@@ -455,11 +458,13 @@ function setStoredText(path: string, value: string): void {
     // Fallback for large payloads (e.g. cached JSON files) that exceed localStorage quota.
     fsMemoryStore.set(path, value);
   }
+  indexVirtualFilePath(path);
 }
 
 function removeStoredText(path: string): void {
   fsMemoryStore.delete(path);
   localStorage.removeItem(FS_PREFIX + path);
+  if (fsVirtualDirectoryIndexReady) rebuildVirtualDirectoryIndex();
 }
 
 function normalizeFsPath(input: any): string {
@@ -837,9 +842,68 @@ function normalizeDirectoryPath(dirPath: string): string {
   return trimmed.replace(/\/+$/, '') || '/';
 }
 
-function buildDirectoryPrefix(dirPath: string): string {
-  const normalized = normalizeDirectoryPath(dirPath);
-  return normalized === '/' ? '/' : `${normalized}/`;
+function splitStoredPath(storedPath: string): { parent: string; name: string } | null {
+  const normalized = String(storedPath || '').replace(/\/+$/, '');
+  if (!normalized) return null;
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex < 0) return { parent: '.', name: normalized };
+  if (slashIndex === 0) return { parent: '/', name: normalized.slice(1) };
+  return {
+    parent: normalized.slice(0, slashIndex),
+    name: normalized.slice(slashIndex + 1),
+  };
+}
+
+function upsertVirtualDirectoryEntry(dirPath: string, name: string, kind: FsEntryKind): void {
+  if (!name) return;
+  const normalizedDir = normalizeDirectoryPath(dirPath);
+  let entries = fsVirtualDirectoryIndex.get(normalizedDir);
+  if (!entries) {
+    entries = new Map<string, FsEntryKind>();
+    fsVirtualDirectoryIndex.set(normalizedDir, entries);
+  }
+
+  const existing = entries.get(name);
+  if (existing === 'directory') return;
+  if (existing === 'file' && kind === 'unknown') return;
+  if (!existing || kind === 'directory') {
+    entries.set(name, kind);
+  }
+}
+
+function indexVirtualFilePath(storedPath: string): void {
+  if (!fsVirtualDirectoryIndexReady) return;
+  let current = splitStoredPath(storedPath);
+  if (!current) return;
+
+  upsertVirtualDirectoryEntry(current.parent, current.name, 'file');
+
+  while (current.parent !== '/' && current.parent !== '.') {
+    const parentDirectory = current.parent;
+    current = splitStoredPath(parentDirectory);
+    if (!current) break;
+    upsertVirtualDirectoryEntry(current.parent, current.name, 'directory');
+  }
+}
+
+function rebuildVirtualDirectoryIndex(): void {
+  fsVirtualDirectoryIndex.clear();
+  fsVirtualDirectoryIndexReady = true;
+  fsVirtualDirectoryIndexBuildScans += 1;
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key?.startsWith(FS_PREFIX)) continue;
+    indexVirtualFilePath(key.slice(FS_PREFIX.length));
+  }
+  for (const memoryPath of fsMemoryStore.keys()) {
+    indexVirtualFilePath(memoryPath);
+  }
+}
+
+function ensureVirtualDirectoryIndex(): void {
+  if (fsVirtualDirectoryIndexReady) return;
+  rebuildVirtualDirectoryIndex();
 }
 
 function joinDirectoryPath(dirPath: string, entryName: string): string {
@@ -879,39 +943,29 @@ function createDirentLike(name: string, kind: FsEntryKind, encoding: string | nu
 }
 
 function collectVirtualDirectoryEntries(dirPath: string): Map<string, FsEntryKind> {
-  const entries = new Map<string, FsEntryKind>();
-  const prefix = buildDirectoryPrefix(dirPath);
+  ensureVirtualDirectoryIndex();
+  return new Map(fsVirtualDirectoryIndex.get(normalizeDirectoryPath(dirPath)) || []);
+}
 
-  const upsert = (name: string, kind: FsEntryKind) => {
-    if (!name) return;
-    const existing = entries.get(name);
-    if (existing === 'directory') return;
-    if (existing === 'file' && kind === 'unknown') return;
-    if (!existing || kind === 'directory') {
-      entries.set(name, kind);
-    }
-  };
-
-  const addFromStoredPath = (storedPath: string) => {
-    if (!storedPath || !storedPath.startsWith(prefix)) return;
-    const rest = storedPath.slice(prefix.length);
-    if (!rest) return;
-    const firstSlash = rest.indexOf('/');
-    const entryName = firstSlash === -1 ? rest : rest.slice(0, firstSlash);
-    const kind: FsEntryKind = firstSlash === -1 ? 'file' : 'directory';
-    upsert(entryName, kind);
-  };
-
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key?.startsWith(FS_PREFIX)) continue;
-    addFromStoredPath(key.slice(FS_PREFIX.length));
+export function getVirtualFsDirectoryIndexStatsForTests(): {
+  directories: number;
+  entries: number;
+  buildScans: number;
+} {
+  ensureVirtualDirectoryIndex();
+  let entries = 0;
+  for (const directoryEntries of fsVirtualDirectoryIndex.values()) {
+    entries += directoryEntries.size;
   }
-  for (const memoryPath of fsMemoryStore.keys()) {
-    addFromStoredPath(memoryPath);
-  }
+  return {
+    directories: fsVirtualDirectoryIndex.size,
+    entries,
+    buildScans: fsVirtualDirectoryIndexBuildScans,
+  };
+}
 
-  return entries;
+export function getVirtualFsDirectoryEntriesForTests(dirPath: string): Array<[string, FsEntryKind]> {
+  return Array.from(collectVirtualDirectoryEntries(dirPath).entries());
 }
 
 function getRealDirectoryEntriesSync(dirPath: string): string[] {

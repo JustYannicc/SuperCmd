@@ -4,7 +4,7 @@
  * Builds `List.Item.Detail` and handles markdown image source resolution.
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { renderSimpleMarkdown } from './detail-markdown';
 import { useI18n } from '../i18n';
 
@@ -36,6 +36,10 @@ export function createListDetailRuntime(deps: ListDetailDeps) {
     children?: React.ReactNode;
   }) => {
     const { t } = useI18n();
+    const extensionContext = getExtensionContext();
+    const renderedMarkdown = useMemo(() => (
+      markdown ? renderSimpleMarkdown(markdown, resolveListDetailMarkdownImageSrc) : null
+    ), [extensionContext.assetsPath, markdown]);
 
     return (
       <div className="flex flex-col h-full overflow-y-auto px-3 py-2.5">
@@ -43,7 +47,7 @@ export function createListDetailRuntime(deps: ListDetailDeps) {
           <div className="flex items-center justify-center h-full text-white/50"><p className="text-sm">{t('common.loading')}</p></div>
         ) : (
           <>
-            {markdown && <div className="text-white/80 text-sm leading-relaxed">{renderSimpleMarkdown(markdown, resolveListDetailMarkdownImageSrc)}</div>}
+            {markdown && <div className="text-white/80 text-sm leading-relaxed">{renderedMarkdown}</div>}
             {metadata}
             {children}
           </>

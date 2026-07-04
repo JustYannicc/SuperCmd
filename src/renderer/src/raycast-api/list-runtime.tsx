@@ -177,6 +177,10 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       ActionRegistryContext,
     }), [selectedItem?.id, actionRegistry, ActionRegistryContext]);
     const primaryAction = selectedActions[0];
+    const selectedActionsRef = useRef(selectedActions);
+    useEffect(() => {
+      selectedActionsRef.current = selectedActions;
+    }, [selectedActions]);
 
     const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
       if (isMetaK(event)) {
@@ -186,7 +190,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       }
 
       if ((event.metaKey || event.altKey || event.ctrlKey) && !event.repeat) {
-        for (const action of selectedActions) {
+        for (const action of selectedActionsRef.current) {
           if (!action.shortcut || !matchesShortcut(event, action.shortcut)) continue;
           event.preventDefault();
           event.stopPropagation();
@@ -230,7 +234,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       };
       window.addEventListener('keydown', handler, true);
       return () => window.removeEventListener('keydown', handler, true);
-    }, [isMetaK, matchesShortcut, selectedActions]);
+    }, [isMetaK, matchesShortcut]);
 
     const prevFilteredItemsRef = useRef(filteredItems);
     useEffect(() => {

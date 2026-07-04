@@ -1040,6 +1040,7 @@ export interface ElectronAPI {
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    requestId?: string;
   }) => Promise<{
     status: number;
     statusText: string;
@@ -1047,6 +1048,7 @@ export interface ElectronAPI {
     bodyText: string;
     url: string;
   }>;
+  cancelHttpRequest?: (requestId: string) => void;
   httpDownloadBinary: (url: string) => Promise<Uint8Array>;
   fsWriteBinaryFile: (filePath: string, data: Uint8Array) => Promise<void>;
   execCommand: (

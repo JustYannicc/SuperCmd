@@ -48,13 +48,25 @@ export function useFetch<T = any, U = undefined>(
   const mountedRef = useRef(true);
   const runIdRef = useRef(0);
   const lastInitialRequestKeyRef = useRef<string | undefined>(undefined);
+  const activeRequestRef = useRef<{ requestId: string; controller: AbortController } | null>(null);
+  const requestSeqRef = useRef(0);
+
+  const cancelActiveRequest = useCallback(() => {
+    const active = activeRequestRef.current;
+    if (!active) return;
+    active.controller.abort();
+    activeRequestRef.current = null;
+    window.electron.cancelHttpRequest?.(active.requestId);
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       runIdRef.current += 1;
+      cancelActiveRequest();
     };
-  }, []);
+  }, [cancelActiveRequest]);
 
   const urlRef = useRef(url);
   const optionsRef = useRef(options);
@@ -74,7 +86,16 @@ export function useFetch<T = any, U = undefined>(
     if (opts?.execute === false || !mountedRef.current) return;
 
     const runId = ++runIdRef.current;
-    const isCurrentRun = () => mountedRef.current && runIdRef.current === runId;
+    cancelActiveRequest();
+    const requestId = `useFetch:${Date.now()}:${++requestSeqRef.current}`;
+    const controller = new AbortController();
+    activeRequestRef.current = { requestId, controller };
+    const isCurrentRun = () => (
+      mountedRef.current
+      && runIdRef.current === runId
+      && activeRequestRef.current?.requestId === requestId
+      && !controller.signal.aborted
+    );
 
     setIsLoading(true);
     setError(undefined);
@@ -87,6 +108,7 @@ export function useFetch<T = any, U = undefined>(
         method: opts?.method,
         headers: opts?.headers,
         body: normalizeRequestBody(opts?.body) as string | undefined,
+        requestId,
       });
       if (!isCurrentRun()) return;
 
@@ -126,14 +148,18 @@ export function useFetch<T = any, U = undefined>(
         opts?.onData?.(mapped as T);
       }
     } catch (err) {
-      if (!isCurrentRun()) return;
+      if (!isCurrentRun() || controller.signal.aborted) return;
       const e = err instanceof Error ? err : new Error(String(err));
       setError(e);
       opts?.onError?.(e);
     } finally {
-      if (isCurrentRun()) setIsLoading(false);
+      const shouldFinishCurrentRun = isCurrentRun();
+      if (activeRequestRef.current?.requestId === requestId) {
+        activeRequestRef.current = null;
+      }
+      if (shouldFinishCurrentRun) setIsLoading(false);
     }
-  }, [resolveUrl]);
+  }, [cancelActiveRequest, resolveUrl]);
 
   const optionsKey = useMemo(() => {
     try {
@@ -151,6 +177,7 @@ export function useFetch<T = any, U = undefined>(
   useEffect(() => {
     if (options?.execute === false) {
       runIdRef.current += 1;
+      cancelActiveRequest();
       lastInitialRequestKeyRef.current = undefined;
       setIsLoading(false);
       setError(undefined);
@@ -175,7 +202,7 @@ export function useFetch<T = any, U = undefined>(
     setCursor(undefined);
     setAllData(options?.initialData);
     fetchData(0, undefined, initialResolvedUrl);
-  }, [fetchData, url, optionsKey]);
+  }, [cancelActiveRequest, fetchData, url, optionsKey]);
 
   const revalidate = useCallback(() => {
     setPage(0);
