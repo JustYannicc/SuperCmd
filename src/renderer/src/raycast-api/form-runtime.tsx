@@ -9,6 +9,7 @@ import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } 
 import { attachFormFields } from './form-runtime-fields';
 import { clearFormFieldError, setFormFieldError } from './form-runtime-state';
 import {
+  clearCurrentFormSnapshots,
   FormContext,
   setCurrentFormErrors,
   setCurrentFormPlaceholders,
@@ -58,16 +59,19 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
     const [placeholders, setPlaceholders] = useState<Record<string, string>>({});
     const [showActions, setShowActions] = useState(false);
     const { pop } = useNavigation();
+    const publishedSnapshotsRef = useRef({ values, errors, placeholders });
 
     const setValue = useCallback((id: string, value: any) => {
       setValues((previous) => {
         const next = { ...previous, [id]: value };
+        publishedSnapshotsRef.current = { ...publishedSnapshotsRef.current, values: next };
         setCurrentFormValues(next);
         return next;
       });
       setErrors((previous) => {
         const next = clearFormFieldError(previous, id);
         if (next === previous) return previous;
+        publishedSnapshotsRef.current = { ...publishedSnapshotsRef.current, errors: next };
         setCurrentFormErrors(next);
         return next;
       });
@@ -77,6 +81,7 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
       setErrors((previous) => {
         const next = setFormFieldError(previous, id, error);
         if (next === previous) return previous;
+        publishedSnapshotsRef.current = { ...publishedSnapshotsRef.current, errors: next };
         setCurrentFormErrors(next);
         return next;
       });
@@ -86,16 +91,22 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
       setPlaceholders((previous) => {
         if (previous[id] === placeholder) return previous;
         const next = { ...previous, [id]: placeholder };
+        publishedSnapshotsRef.current = { ...publishedSnapshotsRef.current, placeholders: next };
         setCurrentFormPlaceholders(next);
         return next;
       });
     }, []);
 
     useEffect(() => {
+      publishedSnapshotsRef.current = { values, errors, placeholders };
       setCurrentFormValues(values);
       setCurrentFormErrors(errors);
       setCurrentFormPlaceholders(placeholders);
     }, [values, errors, placeholders]);
+
+    useEffect(() => () => {
+      clearCurrentFormSnapshots(publishedSnapshotsRef.current);
+    }, []);
 
     const { collectedActions: formActions, registryAPI: formActionRegistry } = useCollectedActions();
     const primaryAction = formActions[0];

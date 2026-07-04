@@ -41,6 +41,16 @@ export function setCurrentFormPlaceholders(placeholders: Record<string, string>)
   currentFormPlaceholders = placeholders;
 }
 
+export function clearCurrentFormSnapshots(snapshots: {
+  values: Record<string, any>;
+  errors: Record<string, string>;
+  placeholders: Record<string, string>;
+}) {
+  if (currentFormValues === snapshots.values) currentFormValues = {};
+  if (currentFormErrors === snapshots.errors) currentFormErrors = {};
+  if (currentFormPlaceholders === snapshots.placeholders) currentFormPlaceholders = {};
+}
+
 export function getFormValues(): Record<string, any> {
   // Fall back to placeholder for fields the user didn't fill. Lets extensions
   // declare a sensible default like `placeholder="0"` and have it submitted
@@ -65,4 +75,12 @@ export function getFormValues(): Record<string, any> {
 
 export function getFormErrors(): Record<string, string> {
   return { ...currentFormErrors };
+}
+
+export function __getCurrentFormSnapshotForTests() {
+  return {
+    values: { ...currentFormValues },
+    errors: { ...currentFormErrors },
+    placeholders: { ...currentFormPlaceholders },
+  };
 }
