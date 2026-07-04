@@ -26,6 +26,16 @@ function makeSettingsMockSource(scriptCommandFolders) {
   `;
 }
 
+function makeChildProcessMockSource(childProcessKey) {
+  return `
+    const mock = globalThis[${JSON.stringify(childProcessKey)}];
+
+    export function spawn(...args) {
+      return mock.spawn(...args);
+    }
+  `;
+}
+
 function makeInstrumentedFsSource(metricsKey) {
   return `
     import realFs from 'node:fs';
@@ -100,8 +110,12 @@ export async function loadScriptCommandRunner({
   userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-user-data-')),
   scriptCommandFolders = [],
   instrumentFs = false,
+  mockChildProcess = false,
 } = {}) {
   const metricsKey = `__supercmdScriptCommandFsMetrics_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  const childProcessKey = `__supercmdScriptCommandChildProcess_${Date.now()}_${Math.random()
     .toString(36)
     .slice(2)}`;
   const metrics = {
@@ -111,7 +125,15 @@ export async function loadScriptCommandRunner({
     readSyncBytes: 0,
     openSyncCalls: 0,
   };
+  const childProcess = {
+    spawn() {
+      throw new Error('Unexpected child_process.spawn call');
+    },
+  };
   globalThis[metricsKey] = metrics;
+  if (mockChildProcess) {
+    globalThis[childProcessKey] = childProcess;
+  }
 
   const plugins = [
     {
@@ -137,6 +159,22 @@ export async function loadScriptCommandRunner({
       },
     },
   ];
+
+  if (mockChildProcess) {
+    plugins.push({
+      name: 'supercmd-script-command-child-process-mock',
+      setup(pluginBuild) {
+        pluginBuild.onResolve({ filter: /^child_process$/ }, () => ({
+          path: 'child-process-mock',
+          namespace: 'supercmd-child-process',
+        }));
+        pluginBuild.onLoad({ filter: /^child-process-mock$/, namespace: 'supercmd-child-process' }, () => ({
+          contents: makeChildProcessMockSource(childProcessKey),
+          loader: 'js',
+        }));
+      },
+    });
+  }
 
   if (instrumentFs) {
     plugins.push({
@@ -174,6 +212,7 @@ export async function loadScriptCommandRunner({
   return {
     module,
     metrics,
+    childProcess,
     resetMetrics: () => resetMetrics(metrics),
     root,
   };
