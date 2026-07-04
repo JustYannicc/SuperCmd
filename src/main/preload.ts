@@ -454,6 +454,7 @@ const electronAPI = {
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    requestId?: string;
   }): Promise<{
     status: number;
     statusText: string;
@@ -461,6 +462,9 @@ const electronAPI = {
     bodyText: string;
     url: string;
   }> => ipcRenderer.invoke('http-request', options),
+  cancelHttpRequest: (requestId: string): void => {
+    ipcRenderer.send('http-request-cancel', requestId);
+  },
 
   // Download a URL via Node.js (avoids renderer CORS restrictions for binary CDN downloads)
   httpDownloadBinary: (url: string): Promise<Uint8Array> =>

@@ -56,6 +56,11 @@ function buildActionTypeSignature(actions: unknown): string {
   return getReactTypeName((actions as React.ReactElement).type);
 }
 
+function getActionType(actions: unknown): unknown {
+  if (!React.isValidElement(actions)) return actions;
+  return (actions as React.ReactElement).type;
+}
+
 function buildImageLikeSignature(value: unknown): string {
   if (!value || typeof value !== 'object' || Array.isArray(value) || React.isValidElement(value)) {
     return buildValueSignature(value);
@@ -120,6 +125,39 @@ export function buildGridItemVisibleSignature(entry: GridItemRegistration): stri
   ].join('\u001f');
 }
 
+function gridSectionVisibleInputsChanged(
+  previous: GridItemRegistration['section'],
+  next: GridItemRegistration['section'],
+): boolean {
+  if (previous === next) return false;
+  return (
+    previous?.id !== next?.id
+    || previous?.title !== next?.title
+    || previous?.subtitle !== next?.subtitle
+    || previous?.columns !== next?.columns
+    || previous?.aspectRatio !== next?.aspectRatio
+    || previous?.fit !== next?.fit
+    || previous?.inset !== next?.inset
+  );
+}
+
+export function gridItemVisibleInputsChanged(existing: GridItemRegistration, next: Omit<GridItemRegistration, 'id'>): boolean {
+  if (existing.order !== next.order || gridSectionVisibleInputsChanged(existing.section, next.section)) return true;
+  const previousProps = existing.props;
+  const nextProps = next.props;
+  if (previousProps === nextProps) return false;
+  return (
+    previousProps.id !== nextProps.id
+    || previousProps.title !== nextProps.title
+    || previousProps.subtitle !== nextProps.subtitle
+    || previousProps.content !== nextProps.content
+    || previousProps.accessory !== nextProps.accessory
+    || previousProps.keywords !== nextProps.keywords
+    || previousProps.quickLook !== nextProps.quickLook
+    || getActionType(previousProps.actions) !== getActionType(nextProps.actions)
+  );
+}
+
 export function useGridRegistry() {
   const registryRef = useRef(new Map<string, GridItemRegistration>());
   const visibleSignatureRef = useRef(new Map<string, string>());
@@ -140,13 +178,11 @@ export function useGridRegistry() {
       set(id, data) {
         const existing = registryRef.current.get(id);
         if (existing) {
-          const propsChanged = existing.props !== data.props;
-          const sectionChanged = existing.section !== data.section;
-          const orderChanged = existing.order !== data.order;
+          const visibleInputsChanged = gridItemVisibleInputsChanged(existing, data);
           existing.props = data.props;
           existing.section = data.section;
           existing.order = data.order;
-          if (!propsChanged && !sectionChanged && !orderChanged) return;
+          if (!visibleInputsChanged) return;
 
           const nextSignature = buildGridItemVisibleSignature(existing);
           if (visibleSignatureRef.current.get(id) === nextSignature) return;

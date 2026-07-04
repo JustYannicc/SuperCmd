@@ -23,6 +23,7 @@ const fakeReact = {
 const windowShim = {
   electron: {
     httpRequest: () => Promise.reject(new Error('httpRequest stub not configured')),
+    cancelHttpRequest: () => {},
   },
 };
 
@@ -61,6 +62,7 @@ function loadTsModule(filePath) {
   };
 
   const sandbox = {
+    AbortController,
     Array,
     Blob,
     console,
@@ -243,6 +245,7 @@ const { useFetch } = loadTsModule('src/renderer/src/raycast-api/hooks/use-fetch.
 test('useFetch keeps the latest revalidate result when an older request resolves later', async () => {
   const pending = [];
   const requestedUrls = [];
+  const canceledRequestIds = [];
   const onDataCalls = [];
 
   windowShim.electron.httpRequest = (request) => {
@@ -250,6 +253,9 @@ test('useFetch keeps the latest revalidate result when an older request resolves
     const run = deferred();
     pending.push(run);
     return run.promise;
+  };
+  windowShim.electron.cancelHttpRequest = (requestId) => {
+    canceledRequestIds.push(requestId);
   };
 
   const host = new HookHost(() => useFetch('https://api.test/items', {
@@ -264,6 +270,7 @@ test('useFetch keeps the latest revalidate result when an older request resolves
   await flushAsync();
   assert.equal(pending.length, 2);
   assert.deepEqual(requestedUrls, ['https://api.test/items', 'https://api.test/items']);
+  assert.equal(canceledRequestIds.length, 1);
 
   pending[1].resolve(httpResponse({ value: 'latest' }));
   await flushAsync();
@@ -283,6 +290,7 @@ test('useFetch keeps the latest revalidate result when an older request resolves
 test('useFetch refetches when a function URL resolves to a new request input', async () => {
   const pending = [];
   const requestedUrls = [];
+  const canceledRequestIds = [];
   let query = 'one';
 
   windowShim.electron.httpRequest = (request) => {
@@ -290,6 +298,9 @@ test('useFetch refetches when a function URL resolves to a new request input', a
     const run = deferred();
     pending.push(run);
     return run.promise;
+  };
+  windowShim.electron.cancelHttpRequest = (requestId) => {
+    canceledRequestIds.push(requestId);
   };
 
   const host = new HookHost(() => useFetch(() => `https://api.test/search?q=${query}`));
@@ -303,6 +314,7 @@ test('useFetch refetches when a function URL resolves to a new request input', a
   host.render();
   await flushAsync();
   assert.equal(pending.length, 2);
+  assert.equal(canceledRequestIds.length, 1);
   assert.deepEqual(requestedUrls, [
     'https://api.test/search?q=one',
     'https://api.test/search?q=two',

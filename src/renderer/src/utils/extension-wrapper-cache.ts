@@ -33,7 +33,6 @@ interface CacheEntry {
 }
 
 interface CodeFingerprint {
-  code: string;
   codeLength: number;
   codeHash: string;
 }
@@ -45,6 +44,8 @@ interface CacheStats {
   evictions: number;
   wrapperCreationCount: number;
   wrapperCreationMs: number;
+  fingerprintEntries: number;
+  fingerprintRetainedSourceBytes: number;
 }
 
 const compiledWrapperCache = new Map<string, CacheEntry>();
@@ -56,6 +57,8 @@ const cacheStats: CacheStats = {
   evictions: 0,
   wrapperCreationCount: 0,
   wrapperCreationMs: 0,
+  fingerprintEntries: 0,
+  fingerprintRetainedSourceBytes: 0,
 };
 
 function nowMs(): number {
@@ -85,16 +88,17 @@ function createExtensionWrapperCacheKeyFromFingerprint(
 
 function getCodeFingerprint(extensionIdentity: string, code: string): CodeFingerprint {
   const cached = codeFingerprintCache.get(extensionIdentity);
-  if (cached?.code === code) {
+  const codeLength = code.length;
+  const codeHash = hashExtensionCodeForCache(code);
+  if (cached?.codeLength === codeLength && cached.codeHash === codeHash) {
     codeFingerprintCache.delete(extensionIdentity);
     codeFingerprintCache.set(extensionIdentity, cached);
     return cached;
   }
 
   const fingerprint = {
-    code,
-    codeLength: code.length,
-    codeHash: hashExtensionCodeForCache(code),
+    codeLength,
+    codeHash,
   };
   codeFingerprintCache.set(extensionIdentity, fingerprint);
 
@@ -180,6 +184,8 @@ export function getCompiledExtensionWrapperCacheStats(): CacheStats {
   return {
     ...cacheStats,
     entries: compiledWrapperCache.size,
+    fingerprintEntries: codeFingerprintCache.size,
+    fingerprintRetainedSourceBytes: 0,
   };
 }
 
@@ -192,4 +198,6 @@ export function clearCompiledExtensionWrapperCache(): void {
   cacheStats.evictions = 0;
   cacheStats.wrapperCreationCount = 0;
   cacheStats.wrapperCreationMs = 0;
+  cacheStats.fingerprintEntries = 0;
+  cacheStats.fingerprintRetainedSourceBytes = 0;
 }

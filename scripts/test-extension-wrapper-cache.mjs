@@ -83,7 +83,10 @@ test('Extension wrapper cache', async (t) => {
     assert.equal(first.cacheHit, false);
     assert.equal(second.cacheHit, true);
     assert.strictEqual(second.wrapper, first.wrapper);
-    assert.equal(getCompiledExtensionWrapperCacheStats().wrapperCreationCount, 1);
+    const stats = getCompiledExtensionWrapperCacheStats();
+    assert.equal(stats.wrapperCreationCount, 1);
+    assert.equal(stats.fingerprintEntries, 1);
+    assert.equal(stats.fingerprintRetainedSourceBytes, 0);
   });
 
   await t.test('invalidates when code changes even if the length is unchanged', () => {
@@ -163,5 +166,30 @@ exports.touched = "mutated";
 
     assert.equal(envA.timers.size, 0);
     assert.equal(envB.timers.size, 0);
+  });
+
+  await t.test('does not retain full bundle sources in fingerprint stats', () => {
+    clearCompiledExtensionWrapperCache();
+    const largeCode = `const payload = ${JSON.stringify('x'.repeat(256_000))}; exports.default = () => payload.length;`;
+
+    const first = getCompiledExtensionWrapper({
+      extensionIdentity: 'owner/extension/large-command',
+      code: largeCode,
+    });
+    const second = getCompiledExtensionWrapper({
+      extensionIdentity: 'owner/extension/large-command',
+      code: largeCode,
+    });
+
+    assert.equal(first.cacheHit, false);
+    assert.equal(second.cacheHit, true);
+    const stats = getCompiledExtensionWrapperCacheStats();
+    assert.equal(stats.fingerprintEntries, 1);
+    assert.equal(stats.fingerprintRetainedSourceBytes, 0);
+    console.log(JSON.stringify({
+      mode: 'extension-wrapper-cache-retained-source',
+      codeLength: largeCode.length,
+      stats,
+    }, null, 2));
   });
 });

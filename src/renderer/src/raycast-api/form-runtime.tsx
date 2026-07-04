@@ -5,7 +5,7 @@
  * all field subcomponents.
  */
 
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { attachFormFields } from './form-runtime-fields';
 import { clearFormFieldError, setFormFieldError } from './form-runtime-state';
 import {
@@ -99,6 +99,12 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
 
     const { collectedActions: formActions, registryAPI: formActionRegistry } = useCollectedActions();
     const primaryAction = formActions[0];
+    const formActionsRef = useRef(formActions);
+    const primaryActionRef = useRef(primaryAction);
+    useEffect(() => {
+      formActionsRef.current = formActions;
+      primaryActionRef.current = primaryAction;
+    }, [formActions, primaryAction]);
 
     const extensionContext = getExtensionContext();
     const footerTitle =
@@ -116,13 +122,14 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
           setShowActions((value) => !value);
           return;
         }
-        if (event.key === 'Enter' && event.metaKey && !event.repeat && primaryAction) {
+        const currentPrimaryAction = primaryActionRef.current;
+        if (event.key === 'Enter' && event.metaKey && !event.repeat && currentPrimaryAction) {
           event.preventDefault();
-          primaryAction.execute();
+          currentPrimaryAction.execute();
           return;
         }
         if (event.repeat) return;
-        for (const action of formActions) {
+        for (const action of formActionsRef.current) {
           if (!action.shortcut || !matchesShortcut(event, action.shortcut)) continue;
           event.preventDefault();
           action.execute();
@@ -132,7 +139,7 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
 
       window.addEventListener('keydown', handler);
       return () => window.removeEventListener('keydown', handler);
-    }, [formActions, isMetaK, matchesShortcut, primaryAction]);
+    }, [isMetaK, matchesShortcut]);
 
     const contextValue = useMemo(
       () => ({ values, setValue, errors, setError, placeholders, setPlaceholder }),

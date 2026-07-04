@@ -15395,6 +15395,15 @@ app.whenReady().then(async () => {
   // ─── IPC: Extension APIs (for @raycast/api compatibility) ────────
 
   // HTTP request proxy (so extensions can make Node.js HTTP requests without CORS)
+  const activeHttpRequests = new Map<string, () => void>();
+
+  ipcMain.on('http-request-cancel', (_event: any, requestId: string) => {
+    if (!requestId) return;
+    const cancel = activeHttpRequests.get(requestId);
+    if (!cancel) return;
+    cancel();
+  });
+
   ipcMain.handle(
     'http-request',
     async (
@@ -15404,6 +15413,7 @@ app.whenReady().then(async () => {
         method?: string;
         headers?: Record<string, string>;
         body?: string;
+        requestId?: string;
       }
     ) => {
       const http = require('http');
@@ -15421,8 +15431,24 @@ app.whenReady().then(async () => {
         }
       } catch {}
 
+      const requestId = typeof options.requestId === 'string' ? options.requestId : '';
+      let canceled = false;
+
+      const resolveCanceled = (url: string) => ({
+        status: 0,
+        statusText: 'Request canceled',
+        headers: {},
+        bodyText: '',
+        url,
+      });
+
       const doRequest = (url: string, method: string, headers: Record<string, string>, body: string | undefined, redirectsLeft: number): Promise<any> => {
         return new Promise((resolve) => {
+          if (canceled) {
+            resolve(resolveCanceled(url));
+            return;
+          }
+
           try {
             const parsedUrl = new URL(url);
             const transport = parsedUrl.protocol === 'https:' ? https : http;
@@ -15439,6 +15465,12 @@ app.whenReady().then(async () => {
             };
 
             const req = transport.request(reqOptions, (res: any) => {
+              if (canceled) {
+                res.resume();
+                resolve(resolveCanceled(url));
+                return;
+              }
+
               // Follow redirects (301, 302, 303, 307, 308)
               if (redirectsLeft > 0 && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 res.resume(); // drain the response
@@ -15450,8 +15482,15 @@ app.whenReady().then(async () => {
               }
 
               const chunks: Buffer[] = [];
-              res.on('data', (chunk: Buffer) => chunks.push(chunk));
+              res.on('data', (chunk: Buffer) => {
+                if (!canceled) chunks.push(chunk);
+              });
               res.on('end', () => {
+                if (canceled) {
+                  resolve(resolveCanceled(url));
+                  return;
+                }
+
                 const bodyBuffer = Buffer.concat(chunks);
                 const contentEncoding = String(res.headers['content-encoding'] || '').toLowerCase();
                 let decodedBuffer = bodyBuffer;
@@ -15483,6 +15522,11 @@ app.whenReady().then(async () => {
             });
 
             req.on('error', (err: Error) => {
+              if (canceled) {
+                resolve(resolveCanceled(url));
+                return;
+              }
+
               resolve({
                 status: 0,
                 statusText: err.message,
@@ -15503,6 +15547,17 @@ app.whenReady().then(async () => {
               });
             });
 
+            if (requestId) {
+              activeHttpRequests.set(requestId, () => {
+                canceled = true;
+                try {
+                  req.destroy(new Error('Request canceled'));
+                } catch {
+                  req.destroy();
+                }
+              });
+            }
+
             if (body) {
               req.write(body);
             }
@@ -15519,7 +15574,11 @@ app.whenReady().then(async () => {
         });
       };
 
-      return doRequest(requestUrl, (options.method || 'GET').toUpperCase(), options.headers || {}, options.body, 5);
+      try {
+        return await doRequest(requestUrl, (options.method || 'GET').toUpperCase(), options.headers || {}, options.body, 5);
+      } finally {
+        if (requestId) activeHttpRequests.delete(requestId);
+      }
     }
   );
 

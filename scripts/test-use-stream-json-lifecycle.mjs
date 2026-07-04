@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
+import { performance } from 'node:perf_hooks';
 
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
@@ -360,6 +361,54 @@ test('useStreamJSON composes caller signal with lifecycle aborts', async () => {
   assert.ok(secondSignal instanceof AbortSignal, 'revalidated fetch should receive an abort signal');
   callerController.abort();
   assert.equal(secondSignal.aborted, true, 'caller abort should cancel the composed signal');
+
+  host.unmount();
+});
+
+test('useStreamJSON keeps large visible slices stable across unrelated renders', async () => {
+  const fetchMock = createFetchMock();
+  activeFetch = fetchMock.fetch;
+  const itemCount = 10000;
+  const items = Array.from({ length: itemCount }, (_, id) => ({ id, title: `Item ${id}` }));
+  const host = new HookHost(() => useStreamJSON('https://example.test/large-items', {
+    pageSize: itemCount,
+  }));
+
+  host.render();
+  await flushAsync();
+  fetchMock.requests[0].resolveJson(items);
+  await flushAsync();
+
+  const firstData = host.output.data;
+  assert.equal(firstData.length, itemCount);
+
+  const renderIterations = 100;
+  const stableStart = performance.now();
+  for (let index = 0; index < renderIterations; index += 1) {
+    host.render();
+    assert.strictEqual(host.output.data, firstData);
+  }
+  const stableRenderMs = performance.now() - stableStart;
+
+  const legacyStart = performance.now();
+  for (let index = 0; index < renderIterations; index += 1) {
+    items.slice(0, itemCount);
+  }
+  const legacySliceMs = performance.now() - legacyStart;
+
+  console.log(JSON.stringify({
+    mode: 'use-stream-json-large-payload',
+    itemCount,
+    renderIterations,
+    before: {
+      sliceAllocations: renderIterations,
+      durationMs: Number(legacySliceMs.toFixed(3)),
+    },
+    after: {
+      sliceAllocations: 0,
+      durationMs: Number(stableRenderMs.toFixed(3)),
+    },
+  }, null, 2));
 
   host.unmount();
 });

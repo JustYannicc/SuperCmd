@@ -77,6 +77,11 @@ function buildActionTypeSignature(actions: unknown): string {
   return getReactTypeName((actions as React.ReactElement).type);
 }
 
+function getActionType(actions: unknown): unknown {
+  if (!React.isValidElement(actions)) return actions;
+  return (actions as React.ReactElement).type;
+}
+
 function buildListAccessorySignature(accessory: NonNullable<ItemRegistration['props']['accessories']>[number]): string {
   return [
     buildValueSignature(accessory?.text),
@@ -105,6 +110,24 @@ export function buildListItemVisibleSignature(item: ItemRegistration): string {
   ].join('\u001f');
 }
 
+export function listItemVisibleInputsChanged(existing: ItemRegistration, next: Omit<ItemRegistration, 'id'>): boolean {
+  if (existing.sectionTitle !== next.sectionTitle || existing.order !== next.order) return true;
+  const previousProps = existing.props;
+  const nextProps = next.props;
+  if (previousProps === nextProps) return false;
+  return (
+    previousProps.id !== nextProps.id
+    || previousProps.title !== nextProps.title
+    || previousProps.subtitle !== nextProps.subtitle
+    || previousProps.icon !== nextProps.icon
+    || previousProps.accessories !== nextProps.accessories
+    || previousProps.keywords !== nextProps.keywords
+    || previousProps.detail !== nextProps.detail
+    || previousProps.quickLook !== nextProps.quickLook
+    || getActionType(previousProps.actions) !== getActionType(nextProps.actions)
+  );
+}
+
 export function useListRegistry() {
   const registryRef = useRef(new Map<string, ItemRegistration>());
   const visibleSignatureRef = useRef(new Map<string, string>());
@@ -124,19 +147,11 @@ export function useListRegistry() {
     set(id, data) {
       const existing = registryRef.current.get(id);
       if (existing) {
-        // Hot path: an unrelated re-render (e.g. hover changing selection)
-        // re-runs every <List.Item> render even though no content actually
-        // changed. The renderOrder counter shifts uniformly so relative
-        // order is preserved; just write it through and skip the costly
-        // visible-signature work. Only publish when the id's visible
-        // signature, section, or order actually changed.
-        const propsChanged = existing.props !== data.props;
-        const sectionChanged = existing.sectionTitle !== data.sectionTitle;
-        const orderChanged = existing.order !== data.order;
+        const visibleInputsChanged = listItemVisibleInputsChanged(existing, data);
         existing.props = data.props;
         existing.sectionTitle = data.sectionTitle;
         existing.order = data.order;
-        if (!propsChanged && !sectionChanged && !orderChanged) return;
+        if (!visibleInputsChanged) return;
 
         const nextSignature = buildListItemVisibleSignature(existing);
         if (visibleSignatureRef.current.get(id) === nextSignature) return;

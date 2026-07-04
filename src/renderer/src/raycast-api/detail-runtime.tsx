@@ -3,7 +3,7 @@
  * Purpose: Detail component runtime and metadata primitives.
  */
 
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { normalizeScAssetUrl, resolveReadableTintColor, resolveTintColor, toScAssetUrl } from './icon-runtime-assets';
 import { renderSimpleMarkdown } from './detail-markdown';
 import { useI18n } from '../i18n';
@@ -74,6 +74,12 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
     const { pop } = deps.useNavigation();
     const { collectedActions: detailActions, registryAPI: detailActionRegistry } = deps.useCollectedActions();
     const primaryAction = detailActions[0];
+    const detailActionsRef = useRef(detailActions);
+    const primaryActionRef = useRef(primaryAction);
+    useEffect(() => {
+      detailActionsRef.current = detailActions;
+      primaryActionRef.current = primaryAction;
+    }, [detailActions, primaryAction]);
 
     const { detailMetadata, detailChildren } = useMemo(() => {
       if (metadata) {
@@ -106,15 +112,19 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
     }, [children, metadata]);
 
     const extensionContext = deps.getExtensionContext();
+    const renderedMarkdown = useMemo(() => (
+      markdown ? renderSimpleMarkdown(markdown, resolveMarkdownImageSrc) : null
+    ), [extensionContext.assetsPath, markdown]);
     const footerTitle = navigationTitle || extInfo.extensionDisplayName || extensionContext.extensionDisplayName || extensionContext.extensionName || 'Extension';
     const footerIcon = extInfo.extensionIconDataUrl || extensionContext.extensionIconDataUrl;
 
     useEffect(() => {
       const handler = (event: KeyboardEvent) => {
+        const currentPrimaryAction = primaryActionRef.current;
         if (deps.isMetaK(event)) { event.preventDefault(); setShowActions((prev) => !prev); return; }
-        if (event.key === 'Enter' && event.metaKey && !event.repeat && primaryAction) { event.preventDefault(); primaryAction.execute(); return; }
+        if (event.key === 'Enter' && event.metaKey && !event.repeat && currentPrimaryAction) { event.preventDefault(); currentPrimaryAction.execute(); return; }
         if (!event.repeat) {
-          for (const action of detailActions) {
+          for (const action of detailActionsRef.current) {
             if (action.shortcut && deps.matchesShortcut(event, action.shortcut)) {
               event.preventDefault();
               action.execute();
@@ -125,7 +135,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
       };
       window.addEventListener('keydown', handler);
       return () => window.removeEventListener('keydown', handler);
-    }, [detailActions, primaryAction]);
+    }, []);
 
     const handleActionExecute = useCallback((action: ExtractedActionLike) => {
       setShowActions(false);
@@ -163,7 +173,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
               <div className="flex-1 overflow-y-auto px-4 py-4">
                 {markdown ? (
                   <div className="text-[var(--text-secondary)] text-sm leading-relaxed">
-                    {renderSimpleMarkdown(markdown, resolveMarkdownImageSrc)}
+                    {renderedMarkdown}
                   </div>
                 ) : null}
                 {detailChildren}
@@ -176,7 +186,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
             <div className="h-full overflow-y-auto px-4 py-4">
               {markdown ? (
                 <div className="text-[var(--text-secondary)] text-sm leading-relaxed">
-                  {renderSimpleMarkdown(markdown, resolveMarkdownImageSrc)}
+                  {renderedMarkdown}
                 </div>
               ) : null}
               {detailChildren}
