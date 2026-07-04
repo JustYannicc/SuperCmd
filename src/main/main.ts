@@ -44,6 +44,7 @@ import {
 import type { AppSettings, BrowserProfileSetting, BrowserProfileFilters, BrowserProfileFilterKind, RelocateMode } from './settings-store';
 import { recordRootSearchLaunchInState, type RootSearchRankingState } from '../shared/root-search-ranking-state';
 import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
+import { transcribeWhisperAudioFile } from './whisper-transcribe-file';
 import { scanAppRemnants } from './app-uninstaller';
 import * as soulverCalculator from './soulver-calculator';
 import { addMemory, buildMemoryContextSystemPrompt } from './memory';
@@ -17917,102 +17918,28 @@ if let tiff = image?.tiffRepresentation {
   ipcMain.handle(
     'whisper-transcribe-file',
     async (_event: any, audioPath: string, options?: { language?: string }) => {
-      const s = loadSettings();
-      if (isAIDisabledInSettings(s)) {
-        throw new Error('AI is disabled. Enable AI in Settings -> AI to use Whisper.');
-      }
-      if (s.ai?.whisperEnabled === false) {
-        throw new Error('SuperCmd Whisper is disabled in Settings -> AI.');
-      }
-
-      if (!fs.existsSync(audioPath)) {
-        throw new Error(`Audio file not found: ${audioPath}`);
-      }
-
-      const audioBuffer = fs.readFileSync(audioPath);
-
-      // Reuse the existing whisper-transcribe logic by reading the file into a buffer
-      const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
-      const language = normalizeWhisperLanguageCode(rawLang);
-
-      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' | 'mistral' = 'whispercpp';
-      let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      const sttModel = s.ai.speechToTextModel || '';
-      if (sttModel === 'parakeet') {
-        provider = 'parakeet';
-        model = 'parakeet-tdt-0.6b-v3';
-      } else if (sttModel === 'qwen3') {
-        provider = 'qwen3';
-        model = 'qwen3-asr-0.6b';
-      } else if (!sttModel || sttModel === 'default' || sttModel === 'whispercpp') {
-        provider = 'whispercpp';
-        model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      } else if (sttModel === 'native') {
-        return '';
-      } else if (sttModel.startsWith('openai-')) {
-        provider = 'openai';
-        model = sttModel.slice('openai-'.length);
-      } else if (sttModel.startsWith('elevenlabs-')) {
-        provider = 'elevenlabs';
-        model = resolveElevenLabsSttModel(sttModel);
-      } else if (sttModel.startsWith('mistral-')) {
-        provider = 'mistral';
-        model = sttModel.slice('mistral-'.length) || 'voxtral-mini-latest';
-      } else if (sttModel) {
-        model = sttModel;
-      }
-
-      if (provider === 'openai' && !s.ai.openaiApiKey) {
-        throw new Error('OpenAI API key not configured.');
-      }
-      const elevenLabsApiKey = getElevenLabsApiKey(s);
-      if (provider === 'elevenlabs' && !elevenLabsApiKey) {
-        throw new Error('ElevenLabs API key not configured.');
-      }
-      const mistralApiKey = getMistralApiKey(s);
-      if (provider === 'mistral' && !mistralApiKey) {
-        throw new Error('Mistral API key not configured.');
-      }
-
-      // For whisper.cpp, use the file-path directly via the persistent server
-      // to avoid reading the file into a Node buffer just to write it again.
-      if (provider === 'whispercpp') {
-        const status = getWhisperCppModelStatus();
-        if (status.state === 'downloading') {
-          throw new Error('Whisper model still downloading.');
-        }
-        if (status.state !== 'downloaded') {
-          throw new Error('Whisper model not downloaded.');
-        }
-        await ensureWhisperCppServer();
-        const result = await sendWhisperCppRequest({
-          command: 'transcribe',
-          file: audioPath,
-          language,
-        });
-        // Clean up the temp file after transcription
-        try { fs.unlinkSync(audioPath); } catch {}
-        try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
-        return result.text || '';
-      }
-
-      // For cloud providers, use buffer-based transcription
-      const mimeType = 'audio/wav';
-      const text = provider === 'parakeet'
-        ? await transcribeAudioWithParakeet({ audioBuffer, language, mimeType })
-        : provider === 'qwen3'
-          ? await transcribeAudioWithQwen3({ audioBuffer, language, mimeType })
-          : provider === 'elevenlabs'
-            ? await transcribeAudioWithElevenLabs({ audioBuffer, apiKey: elevenLabsApiKey, model, language, mimeType })
-            : provider === 'mistral'
-              ? await transcribeAudioWithMistralVoxtral({ audioBuffer, apiKey: mistralApiKey, model, language, mimeType })
-              : await transcribeAudio({ audioBuffer, apiKey: s.ai.openaiApiKey, model, language, mimeType });
-
-      // Clean up the temp file
-      try { fs.unlinkSync(audioPath); } catch {}
-      try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
-
-      return text;
+      return await transcribeWhisperAudioFile({
+        audioPath,
+        options,
+        deps: {
+          fs,
+          loadSettings,
+          isAIDisabledInSettings,
+          normalizeWhisperLanguageCode,
+          resolveElevenLabsSttModel,
+          getElevenLabsApiKey,
+          getMistralApiKey,
+          getWhisperCppModelStatus,
+          ensureWhisperCppServer,
+          sendWhisperCppRequest,
+          transcribeAudioWithParakeet,
+          transcribeAudioWithQwen3,
+          transcribeAudioWithElevenLabs,
+          transcribeAudioWithMistralVoxtral,
+          transcribeAudio,
+          whisperCppModelName: WHISPERCPP_MODEL_NAME,
+        },
+      });
     }
   );
   ipcMain.handle(
