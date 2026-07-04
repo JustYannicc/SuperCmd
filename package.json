@@ -16,6 +16,8 @@
     "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit --pretty false",
     "build:renderer": "vite build",
     "measure:launcher-command-list": "node scripts/measure-launcher-command-list-render.mjs",
+    "measure:renderer-bundle": "node scripts/measure-renderer-bundle.mjs",
+    "measure:canvas-asset-event-loop": "node scripts/measure-canvas-asset-event-loop.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
     "perf:file-search": "node scripts/file-search-perf-harness.mjs",
     "test": "node --test 'scripts/test-*.mjs'",

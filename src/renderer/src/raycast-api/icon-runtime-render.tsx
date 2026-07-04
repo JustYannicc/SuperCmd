@@ -10,6 +10,8 @@ import { isEmojiOrSymbol, renderTintedAssetIcon, resolveIconSrc, resolveTintColo
 const FILE_ICON_CACHE_MAX_ENTRIES = 1024;
 const fileIconCache = new Map<string, string | null>();
 const inFlightFileIconRequests = new Map<string, Promise<string | null>>();
+const fileIconKindCache = new Map<string, 'file' | 'directory'>();
+const inFlightFileIconKindRequests = new Map<string, Promise<'file' | 'directory'>>();
 
 function peekCachedFileIcon(filePath: string): string | null | undefined {
   if (!fileIconCache.has(filePath)) return undefined;
@@ -33,6 +35,46 @@ function writeCachedFileIcon(filePath: string, src: string | null) {
     if (oldestKey === undefined) break;
     fileIconCache.delete(oldestKey);
   }
+}
+
+function peekCachedFileIconKind(filePath: string): 'file' | 'directory' {
+  return fileIconKindCache.get(filePath) || 'file';
+}
+
+function writeCachedFileIconKind(filePath: string, kind: 'file' | 'directory') {
+  if (fileIconKindCache.has(filePath)) fileIconKindCache.delete(filePath);
+  fileIconKindCache.set(filePath, kind);
+  while (fileIconKindCache.size > FILE_ICON_CACHE_MAX_ENTRIES) {
+    const oldestKey = fileIconKindCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    fileIconKindCache.delete(oldestKey);
+  }
+}
+
+function loadFileIconKind(filePath: string): Promise<'file' | 'directory'> {
+  const cached = fileIconKindCache.get(filePath);
+  if (cached) return Promise.resolve(cached);
+
+  const pending = inFlightFileIconKindRequests.get(filePath);
+  if (pending) return pending;
+
+  const stat = typeof window !== 'undefined'
+    ? (window as any).electron?.stat
+    : undefined;
+  if (typeof stat !== 'function') return Promise.resolve('file');
+
+  const request: Promise<'file' | 'directory'> = Promise.resolve(stat(filePath))
+    .then((payload: any) => {
+      const kind: 'file' | 'directory' = payload?.exists && payload?.isDirectory ? 'directory' : 'file';
+      writeCachedFileIconKind(filePath, kind);
+      return kind;
+    })
+    .catch((): 'file' => 'file')
+    .finally(() => {
+      inFlightFileIconKindRequests.delete(filePath);
+    });
+  inFlightFileIconKindRequests.set(filePath, request);
+  return request;
 }
 
 function loadFileIconDataUrl(filePath: string): Promise<string | null> {
@@ -69,18 +111,23 @@ function loadFileIconDataUrl(filePath: string): Promise<string | null> {
 
 function FileIcon({ filePath, className }: { filePath: string; className: string }) {
   const [src, setSrc] = useState<string | null>(() => peekCachedFileIcon(filePath) ?? null);
+  const [fileKind, setFileKind] = useState<'file' | 'directory'>(() => peekCachedFileIconKind(filePath));
 
   useEffect(() => {
     let cancelled = false;
     const cached = readCachedFileIcon(filePath);
     if (cached !== undefined) {
       setSrc(cached);
-      return;
+    } else {
+      loadFileIconDataUrl(filePath).then((iconSrc) => {
+        if (cancelled) return;
+        setSrc(iconSrc);
+      });
     }
 
-    loadFileIconDataUrl(filePath).then((iconSrc) => {
+    loadFileIconKind(filePath).then((kind) => {
       if (cancelled) return;
-      setSrc(iconSrc);
+      setFileKind(kind);
     });
 
     return () => {
@@ -90,15 +137,7 @@ function FileIcon({ filePath, className }: { filePath: string; className: string
 
   if (src) return <img src={src} className={className + ' rounded'} alt="" />;
 
-  let isDirectory = false;
-  try {
-    const stat = (window as any).electron?.statSync?.(filePath);
-    isDirectory = Boolean(stat?.exists && stat?.isDirectory);
-  } catch {
-    // best-effort
-  }
-
-  return <span className="text-center" style={{ fontSize: '0.875rem' }}>{isDirectory ? '📁' : '📄'}</span>;
+  return <span className="text-center" style={{ fontSize: '0.875rem' }}>{fileKind === 'directory' ? '📁' : '📄'}</span>;
 }
 
 export const Icon: Record<string, string> = new Proxy({} as Record<string, string>, {

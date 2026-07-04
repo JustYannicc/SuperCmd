@@ -1,8 +1,9 @@
-import React, { memo, useCallback, useEffect, useMemo } from 'react';
-import ExtensionView from '../ExtensionView';
+import React, { lazy, memo, useCallback, useEffect, useMemo } from 'react';
 import type { BackgroundNoViewRun, MenuBarEntry } from '../hooks/useMenuBarExtensions';
 import { NOOP_ON_CLOSE } from '../utils/launcher-misc';
 import { removeBackgroundNoViewRun } from '../utils/background-no-view-runs';
+
+const ExtensionView = lazy(() => import('../ExtensionView'));
 
 type HiddenExtensionRunnersProps = {
   menuBarExtensions: MenuBarEntry[];
@@ -105,10 +106,10 @@ const HiddenExtensionRunners: React.FC<HiddenExtensionRunnersProps> = ({
   }, [backgroundNoViewRuns, onBackgroundNoViewRunFinished]);
 
   return (
-    <>
+    <React.Suspense fallback={null}>
       {menuBarRunner}
       {backgroundNoViewRunner}
-    </>
+    </React.Suspense>
   );
 };
 

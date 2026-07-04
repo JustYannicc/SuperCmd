@@ -40,9 +40,15 @@ export default defineConfig({
   build: {
     outDir: path.join(__dirname, 'dist/renderer'),
     emptyOutDir: true,
-    minify: false, // Keep unminified for debugging extension errors
+    minify: 'esbuild',
+    sourcemap: true,
     rollupOptions: {
       external: NODE_BUILTIN_EXTERNALS,
+      output: {
+        chunkFileNames: 'assets/[name]-[hash].js',
+        entryFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash][extname]',
+      },
     },
   },
   optimizeDeps: {
@@ -53,4 +59,3 @@ export default defineConfig({
     port: 5173,
   },
 });
-

@@ -1,12 +1,13 @@
-import React, { memo } from 'react';
+import React, { lazy, memo } from 'react';
 import { createPortal } from 'react-dom';
-import SuperCmdWhisper from '../SuperCmdWhisper';
-import SuperCmdRead from '../SuperCmdRead';
-import WindowManagerPanel from '../WindowManagerPanel';
 import type { SpeakStatus } from '../hooks/useSpeakManager';
 import type { UseCursorPromptReturn } from '../hooks/useCursorPrompt';
 import type { ReadVoiceOption } from '../utils/command-helpers';
-import CursorPromptView from '../views/CursorPromptView';
+
+const SuperCmdWhisper = lazy(() => import('../SuperCmdWhisper'));
+const SuperCmdRead = lazy(() => import('../SuperCmdRead'));
+const WindowManagerPanel = lazy(() => import('../WindowManagerPanel'));
+const CursorPromptView = lazy(() => import('../views/CursorPromptView'));
 
 type DetachedOverlayRunnersProps = {
   showWhisper: boolean;
@@ -85,7 +86,7 @@ const DetachedOverlayRunners: React.FC<DetachedOverlayRunnersProps> = ({
   acceptCursorPrompt,
 }) => {
   return (
-    <>
+    <React.Suspense fallback={null}>
       {showWhisper && whisperPortalTarget ? (
         <SuperCmdWhisper
           portalTarget={whisperPortalTarget}
@@ -137,7 +138,7 @@ const DetachedOverlayRunners: React.FC<DetachedOverlayRunnersProps> = ({
             cursorPromptPortalTarget
           )
         : null}
-    </>
+    </React.Suspense>
   );
 };
 
