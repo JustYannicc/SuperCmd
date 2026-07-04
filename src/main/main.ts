@@ -15476,7 +15476,58 @@ app.whenReady().then(async () => {
   // This is the generic fix for any extension that uses child_process.spawn with progressive output
   // (e.g. speedtest CLI outputting JSON lines, ffmpeg progress, etc.)
   {
-    const spawnedProcesses = new Map<number, any>();
+    const spawnedProcesses = new Map<number, { proc: any; sender: any }>();
+    const spawnedProcessPidsBySender = new WeakMap<any, Set<number>>();
+    const senderCleanupRegistered = new WeakSet<any>();
+
+    const forgetSpawnedProcess = (pid: number) => {
+      const entry = spawnedProcesses.get(pid);
+      if (!entry) return;
+      spawnedProcesses.delete(pid);
+      const senderPids = spawnedProcessPidsBySender.get(entry.sender);
+      senderPids?.delete(pid);
+    };
+
+    const terminateSpawnedProcess = (pid: number, signal?: string | number) => {
+      const entry = spawnedProcesses.get(pid);
+      if (!entry) return;
+      const proc = entry.proc;
+      const killSignal = signal ?? 'SIGTERM';
+      forgetSpawnedProcess(pid);
+      try {
+        if (process.platform !== 'win32' && typeof proc.pid === 'number' && proc.pid > 0) {
+          process.kill(-proc.pid, killSignal as NodeJS.Signals | number);
+        } else {
+          proc.kill(killSignal);
+        }
+      } catch {
+        try { proc.kill(killSignal); } catch {}
+      }
+    };
+
+    const cleanupSenderSpawnedProcesses = (sender: any) => {
+      const senderPids = spawnedProcessPidsBySender.get(sender);
+      if (!senderPids) return;
+      for (const pid of Array.from(senderPids)) {
+        terminateSpawnedProcess(pid, 'SIGTERM');
+      }
+      spawnedProcessPidsBySender.delete(sender);
+    };
+
+    const trackSenderSpawnedProcess = (sender: any, pid: number) => {
+      if (pid === -1 || !sender) return;
+      let senderPids = spawnedProcessPidsBySender.get(sender);
+      if (!senderPids) {
+        senderPids = new Set<number>();
+        spawnedProcessPidsBySender.set(sender, senderPids);
+      }
+      senderPids.add(pid);
+      if (!senderCleanupRegistered.has(sender)) {
+        senderCleanupRegistered.add(sender);
+        try { sender.once?.('destroyed', () => cleanupSenderSpawnedProcesses(sender)); } catch {}
+        try { sender.on?.('render-process-gone', () => cleanupSenderSpawnedProcesses(sender)); } catch {}
+      }
+    };
 
     ipcMain.handle(
       'spawn-process',
@@ -15515,9 +15566,11 @@ app.whenReady().then(async () => {
           : spawn(resolvedFile, args || [], spawnOpts);
 
         const pid: number = proc.pid ?? -1;
-        if (pid !== -1) spawnedProcesses.set(pid, proc);
-
         const sender = event.sender;
+        if (pid !== -1) {
+          spawnedProcesses.set(pid, { proc, sender });
+          trackSenderSpawnedProcess(sender, pid);
+        }
         const safeSend = (channel: string, ...sendArgs: any[]) => {
           try { if (!sender.isDestroyed()) sender.send(channel, ...sendArgs); } catch {}
         };
@@ -15549,7 +15602,7 @@ app.whenReady().then(async () => {
         });
         proc.on('close', (code: number | null) => {
           if (!finalize()) return;
-          spawnedProcesses.delete(pid);
+          forgetSpawnedProcess(pid);
           const exitCode = code ?? 0;
           const seq = nextSeq();
           safeSendSpawnEvent({ pid, seq, type: 'exit', code: exitCode });
@@ -15558,7 +15611,7 @@ app.whenReady().then(async () => {
         });
         proc.on('error', (err: Error) => {
           if (!finalize()) return;
-          spawnedProcesses.delete(pid);
+          forgetSpawnedProcess(pid);
           const message = err.message;
           const seq = nextSeq();
           safeSendSpawnEvent({ pid, seq, type: 'error', message });
@@ -15571,7 +15624,7 @@ app.whenReady().then(async () => {
     );
 
     ipcMain.on('spawn-stdin', (_event: any, pid: number, data: Uint8Array | string, end?: boolean) => {
-      const proc = spawnedProcesses.get(pid);
+      const proc = spawnedProcesses.get(pid)?.proc;
       if (!proc?.stdin) return;
       try {
         if (data != null && (typeof data === 'string' ? data.length > 0 : data.byteLength > 0)) {
@@ -15582,20 +15635,7 @@ app.whenReady().then(async () => {
     });
 
     ipcMain.handle('spawn-kill', (_event: any, pid: number, signal?: string | number) => {
-      const proc = spawnedProcesses.get(pid);
-      if (proc) {
-        const killSignal = signal ?? 'SIGTERM';
-        try {
-          if (process.platform !== 'win32' && typeof proc.pid === 'number' && proc.pid > 0) {
-            process.kill(-proc.pid, killSignal as NodeJS.Signals | number);
-          } else {
-            proc.kill(killSignal);
-          }
-        } catch {
-          try { proc.kill(killSignal); } catch {}
-        }
-        spawnedProcesses.delete(pid);
-      }
+      terminateSpawnedProcess(pid, signal);
     });
   }
 
