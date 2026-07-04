@@ -13650,7 +13650,7 @@ app.whenReady().then(async () => {
   }
 
   // Register the sc-asset:// protocol handler to serve extension asset files
-  protocol.handle('sc-asset', (request: any) => {
+  protocol.handle('sc-asset', async (request: any) => {
     // URL format: sc-asset://ext-asset/path/to/file
     try {
       const url = new URL(request.url);
@@ -13660,9 +13660,8 @@ app.whenReady().then(async () => {
         if (!relPath) return new Response('Bad Request', { status: 400 });
         const canvasLibPath = path.join(app.getPath('userData'), 'canvas-lib');
         const fullPath = path.join(canvasLibPath, relPath);
-        console.log('[sc-asset:canvas-lib] Serving:', fullPath);
         try {
-          const data = fs.readFileSync(fullPath);
+          const data = await fs.promises.readFile(fullPath);
           const ext = path.extname(fullPath).toLowerCase();
           const mimeTypes: Record<string, string> = {
             '.js': 'application/javascript',
@@ -13677,7 +13676,6 @@ app.whenReady().then(async () => {
             headers: { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' },
           });
         } catch (e) {
-          console.error('[sc-asset:canvas-lib] File not found:', fullPath);
           return new Response('Not Found', { status: 404 });
         }
       }
@@ -16299,6 +16297,28 @@ return appURL's |path|() as text`,
         ctimeMs: 0,
         birthtimeMs: 0,
       };
+    }
+  });
+
+  ipcMain.handle('stat', async (_event: any, filePath: string) => {
+    try {
+      const stat = await fs.promises.stat(filePath);
+      return {
+        exists: true,
+        isDirectory: stat.isDirectory(),
+        isFile: stat.isFile(),
+        size: stat.size,
+        mode: stat.mode,
+        uid: stat.uid,
+        gid: stat.gid,
+        dev: stat.dev,
+        ino: stat.ino,
+        nlink: stat.nlink,
+        atimeMs: stat.atimeMs,
+        mtimeMs: stat.mtimeMs,
+      };
+    } catch {
+      return { exists: false, isDirectory: false, isFile: false, size: 0 };
     }
   });
 

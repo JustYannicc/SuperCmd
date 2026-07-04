@@ -5,7 +5,7 @@
  * Shows category labels like Raycast.
  */
 
-import React, { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
+import React, { lazy, useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import supercmdLogo from '../../../supercmd.png';
 import type {
   CommandInfo,
@@ -15,17 +15,6 @@ import type {
   BrowserSearchSource,
   BrowserSearchResultGroupSetting,
 } from '../types/electron';
-import ExtensionView from './ExtensionView';
-import ClipboardManager from './ClipboardManager';
-import SnippetManager from './SnippetManager';
-import NotesSearchInline from './NotesSearchInline';
-import CanvasSearchInline from './CanvasSearchInline';
-import QuickLinkManager from './QuickLinkManager';
-import CameraExtension from './CameraExtension';
-import ScheduleExtension from './ScheduleExtension';
-import OnboardingExtension from './OnboardingExtension';
-import FileSearchExtension from './FileSearchExtension';
-import MenuItemSearch from './MenuItemSearchExtension';
 import { useDetachedPortalWindow } from './useDetachedPortalWindow';
 import { useAppViewManager } from './hooks/useAppViewManager';
 import { useAiChat } from './hooks/useAiChat';
@@ -46,7 +35,6 @@ import { useLauncherWindowShownHandler } from './hooks/useLauncherWindowShownHan
 import { useLauncherKeyboardControls } from './hooks/useLauncherKeyboardControls';
 import { AI_CHAT_STORAGE_KEY, LAST_EXT_KEY, LAST_LAUNCHER_QUERY_KEY, MAX_LAUNCHER_QUERY_HISTORY, MAX_RECENT_COMMANDS } from './utils/constants';
 import { applyBaseColor } from './utils/base-color';
-import { resetAccessToken } from './raycast-api';
 import {
   type MemoryFeedback,
   formatShortcutLabel,
@@ -66,14 +54,6 @@ import {
 import { applyAppFontSize, getDefaultAppFontSize } from './utils/font-size';
 import { refreshThemeFromStorage, setForcedTheme } from './utils/theme';
 import { applyUiStyle } from './utils/ui-style';
-import ScriptCommandSetupView from './views/ScriptCommandSetupView';
-import ScriptCommandOutputView from './views/ScriptCommandOutputView';
-import ExtensionPreferenceSetupView from './views/ExtensionPreferenceSetupView';
-import AiChatView from './views/AiChatView';
-import CursorPromptView from './views/CursorPromptView';
-import AppUninstallView from './views/AppUninstallView';
-import BrowserResultsView from './views/BrowserResultsView';
-import WebSearchView from './views/WebSearchView';
 import LauncherMainView from './views/LauncherMainView';
 import HiddenExtensionRunners from './components/HiddenExtensionRunners';
 import DetachedOverlayRunners from './components/DetachedOverlayRunners';
@@ -122,6 +102,26 @@ import {
   type RootSearchRankingState,
 } from './utils/root-search-ranking';
 
+const ExtensionView = lazy(() => import('./ExtensionView'));
+const ClipboardManager = lazy(() => import('./ClipboardManager'));
+const SnippetManager = lazy(() => import('./SnippetManager'));
+const NotesSearchInline = lazy(() => import('./NotesSearchInline'));
+const CanvasSearchInline = lazy(() => import('./CanvasSearchInline'));
+const QuickLinkManager = lazy(() => import('./QuickLinkManager'));
+const CameraExtension = lazy(() => import('./CameraExtension'));
+const ScheduleExtension = lazy(() => import('./ScheduleExtension'));
+const OnboardingExtension = lazy(() => import('./OnboardingExtension'));
+const FileSearchExtension = lazy(() => import('./FileSearchExtension'));
+const MenuItemSearch = lazy(() => import('./MenuItemSearchExtension'));
+const ScriptCommandSetupView = lazy(() => import('./views/ScriptCommandSetupView'));
+const ScriptCommandOutputView = lazy(() => import('./views/ScriptCommandOutputView'));
+const ExtensionPreferenceSetupView = lazy(() => import('./views/ExtensionPreferenceSetupView'));
+const AiChatView = lazy(() => import('./views/AiChatView'));
+const CursorPromptView = lazy(() => import('./views/CursorPromptView'));
+const AppUninstallView = lazy(() => import('./views/AppUninstallView'));
+const BrowserResultsView = lazy(() => import('./views/BrowserResultsView'));
+const WebSearchView = lazy(() => import('./views/WebSearchView'));
+
 const BROWSER_APP_PATHS: Partial<Record<BrowserSearchSource, string[]>> = {
   chrome: [
     '/Applications/Google Chrome.app',
@@ -135,6 +135,15 @@ const BROWSER_APP_PATHS: Partial<Record<BrowserSearchSource, string[]>> = {
 };
 
 const DEFAULT_POP_TO_ROOT_TIMEOUT_SECONDS = 90;
+const LAZY_VIEW_FALLBACK = null;
+
+function resetRaycastAccessToken(): void {
+  void import('./raycast-api/oauth/with-access-token')
+    .then((module) => {
+      module.resetAccessToken();
+    })
+    .catch(() => {});
+}
 
 // Intern cache: commandId → stable iconDataUrl string reference.
 // Prevents duplicate base64 strings accumulating across repeated fetchCommands() IPC calls.
@@ -334,6 +343,12 @@ const App: React.FC = () => {
     setAiMode,
     onExitAiMode,
   });
+  const setAiAvailableFromWindowShown = useCallback<React.Dispatch<React.SetStateAction<boolean>>>(
+    (value) => {
+      setAiAvailable(typeof value === 'function' ? value(aiAvailable) : value);
+    },
+    [aiAvailable, setAiAvailable]
+  );
 
   const {
     cursorPromptText, setCursorPromptText,
@@ -346,7 +361,7 @@ const App: React.FC = () => {
   } = useCursorPrompt({
     showCursorPrompt,
     setShowCursorPrompt,
-    setAiAvailable,
+    setAiAvailable: setAiAvailableFromWindowShown,
   });
 
   const acceptCursorPrompt = applyCursorPromptResultToEditor;
@@ -754,7 +769,7 @@ const App: React.FC = () => {
     openSchedule,
     openCamera,
     openOnboarding,
-    setAiAvailable,
+    setAiAvailable: setAiAvailableFromWindowShown,
     setSelectedTextSnapshot,
     setMemoryFeedback,
     setMemoryActionLoading,
@@ -852,7 +867,7 @@ const App: React.FC = () => {
       } catch {}
       // Clear the in-memory OAuth token and tear down the extension view
       // so the auth prompt shows on next launch.
-      resetAccessToken();
+      resetRaycastAccessToken();
       setExtensionView(null);
       localStorage.removeItem(LAST_EXT_KEY);
     });
@@ -1076,7 +1091,7 @@ const App: React.FC = () => {
 
   const pinToggleForCommand = useCallback(
     async (command: CommandInfo) => {
-      console.log('[PIN-TOGGLE] called for command:', command?.id, command?.name);
+      console.log('[PIN-TOGGLE] called for command:', command?.id, command?.title);
       const currentPinned = pinnedCommandsRef.current;
       const exists = currentPinned.includes(command.id);
       console.log('[PIN-TOGGLE] currentPinned:', currentPinned, 'exists:', exists);
@@ -2416,83 +2431,89 @@ const App: React.FC = () => {
   // ─── Script Command Setup ───────────────────────────────────────
   if (scriptCommandSetup) {
     return (
-      <ScriptCommandSetupView
-        setup={scriptCommandSetup}
-        alwaysMountedRunners={alwaysMountedRunners}
-        onBack={() => {
-          setScriptCommandSetup(null);
-          setSearchQuery('');
-          setSelectedIndex(0);
-        }}
-        onContinue={(command, values) => {
-          setScriptCommandSetup(null);
-          void runScriptCommand(command, values);
-        }}
-        setScriptCommandSetup={setScriptCommandSetup}
-      />
+      <React.Suspense fallback={LAZY_VIEW_FALLBACK}>
+        <ScriptCommandSetupView
+          setup={scriptCommandSetup}
+          alwaysMountedRunners={alwaysMountedRunners}
+          onBack={() => {
+            setScriptCommandSetup(null);
+            setSearchQuery('');
+            setSelectedIndex(0);
+          }}
+          onContinue={(command, values) => {
+            setScriptCommandSetup(null);
+            void runScriptCommand(command, values);
+          }}
+          setScriptCommandSetup={setScriptCommandSetup}
+        />
+      </React.Suspense>
     );
   }
 
   // ─── Script Output ──────────────────────────────────────────────
   if (scriptCommandOutput) {
     return (
-      <ScriptCommandOutputView
-        output={scriptCommandOutput}
-        alwaysMountedRunners={alwaysMountedRunners}
-        onBack={() => {
-          setScriptCommandOutput(null);
-          setSearchQuery('');
-          setSelectedIndex(0);
-        }}
-      />
+      <React.Suspense fallback={LAZY_VIEW_FALLBACK}>
+        <ScriptCommandOutputView
+          output={scriptCommandOutput}
+          alwaysMountedRunners={alwaysMountedRunners}
+          onBack={() => {
+            setScriptCommandOutput(null);
+            setSearchQuery('');
+            setSelectedIndex(0);
+          }}
+        />
+      </React.Suspense>
     );
   }
 
   // ─── Extension Preferences Setup ────────────────────────────────
   if (extensionPreferenceSetup) {
     return (
-      <ExtensionPreferenceSetupView
-        setup={extensionPreferenceSetup}
-        alwaysMountedRunners={alwaysMountedRunners}
-        onBack={() => {
-          setExtensionPreferenceSetup(null);
-          setScriptCommandSetup(null);
-          setScriptCommandOutput(null);
-          setSearchQuery('');
-          setSelectedIndex(0);
-        }}
-        onLaunchExtension={(updatedBundle) => {
-          setExtensionPreferenceSetup(null);
-          setScriptCommandSetup(null);
-          setScriptCommandOutput(null);
-          if (updatedBundle.mode === 'no-view') {
-            queueNoViewBundleRun(updatedBundle, 'userInitiated');
+      <React.Suspense fallback={LAZY_VIEW_FALLBACK}>
+        <ExtensionPreferenceSetupView
+          setup={extensionPreferenceSetup}
+          alwaysMountedRunners={alwaysMountedRunners}
+          onBack={() => {
+            setExtensionPreferenceSetup(null);
+            setScriptCommandSetup(null);
+            setScriptCommandOutput(null);
+            setSearchQuery('');
+            setSelectedIndex(0);
+          }}
+          onLaunchExtension={(updatedBundle) => {
+            setExtensionPreferenceSetup(null);
+            setScriptCommandSetup(null);
+            setScriptCommandOutput(null);
+            if (updatedBundle.mode === 'no-view') {
+              queueNoViewBundleRun(updatedBundle, 'userInitiated');
+              localStorage.removeItem(LAST_EXT_KEY);
+              return;
+            }
+            setExtensionView(updatedBundle);
+            const extName = updatedBundle.extName || (updatedBundle as any).extensionName || '';
+            const cmdName = updatedBundle.cmdName || (updatedBundle as any).commandName || '';
+            if (updatedBundle.mode === 'view') {
+              localStorage.setItem(LAST_EXT_KEY, JSON.stringify({ extName, cmdName }));
+            } else {
+              localStorage.removeItem(LAST_EXT_KEY);
+            }
+          }}
+          onLaunchMenuBar={(updatedBundle) => {
+            setExtensionPreferenceSetup(null);
+            setScriptCommandSetup(null);
+            setScriptCommandOutput(null);
+            if (isMenuBarExtensionMounted(updatedBundle)) {
+              hideMenuBarExtension(updatedBundle);
+            } else {
+              upsertMenuBarExtension(updatedBundle);
+            }
+            window.electron.hideWindow();
             localStorage.removeItem(LAST_EXT_KEY);
-            return;
-          }
-          setExtensionView(updatedBundle);
-          const extName = updatedBundle.extName || (updatedBundle as any).extensionName || '';
-          const cmdName = updatedBundle.cmdName || (updatedBundle as any).commandName || '';
-          if (updatedBundle.mode === 'view') {
-            localStorage.setItem(LAST_EXT_KEY, JSON.stringify({ extName, cmdName }));
-          } else {
-            localStorage.removeItem(LAST_EXT_KEY);
-          }
-        }}
-        onLaunchMenuBar={(updatedBundle) => {
-          setExtensionPreferenceSetup(null);
-          setScriptCommandSetup(null);
-          setScriptCommandOutput(null);
-          if (isMenuBarExtensionMounted(updatedBundle)) {
-            hideMenuBarExtension(updatedBundle);
-          } else {
-            upsertMenuBarExtension(updatedBundle);
-          }
-          window.electron.hideWindow();
-          localStorage.removeItem(LAST_EXT_KEY);
-        }}
-        setExtensionPreferenceSetup={setExtensionPreferenceSetup}
-      />
+          }}
+          setExtensionPreferenceSetup={setExtensionPreferenceSetup}
+        />
+      </React.Suspense>
     );
   }
 
@@ -3050,4 +3071,10 @@ const App: React.FC = () => {
   );
 };
 
-export default App;
+const AppWithLazyBoundaries: React.FC = () => (
+  <React.Suspense fallback={LAZY_VIEW_FALLBACK}>
+    <App />
+  </React.Suspense>
+);
+
+export default AppWithLazyBoundaries;

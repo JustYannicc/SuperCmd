@@ -1104,6 +1104,7 @@ export interface ElectronAPI {
   readFileSync: (filePath: string) => { data: string | null; error: string | null };
   fileExistsSync: (filePath: string) => boolean;
   statSync: (filePath: string) => { exists: boolean; isDirectory: boolean; isFile: boolean; size: number };
+  stat: (filePath: string) => Promise<{ exists: boolean; isDirectory: boolean; isFile: boolean; size: number }>;
 
   // Clipboard Manager
   clipboardGetHistory: () => Promise<ClipboardItem[]>;

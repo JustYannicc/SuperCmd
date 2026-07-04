@@ -111,6 +111,80 @@ interface InstalledExtensionSource {
   sourceRoot: string;
 }
 
+interface FsPathSignature {
+  exists: boolean;
+  isFile: boolean;
+  isDirectory: boolean;
+  size: number;
+  mtimeMs: number;
+}
+
+interface InstalledExtensionSourceSignature {
+  extName: string;
+  extPath: string;
+  sourceRoot: string;
+  extPathSignature: FsPathSignature;
+  packageJsonSignature: FsPathSignature;
+}
+
+interface InstalledExtensionsSnapshot {
+  roots: string[];
+  rootSignatures: FsPathSignature[];
+  sources: InstalledExtensionSource[];
+  sourceSignatures: InstalledExtensionSourceSignature[];
+}
+
+interface CachedManifest {
+  signature: FsPathSignature;
+  value: any;
+}
+
+interface CachedTextFile {
+  signature: FsPathSignature;
+  value: string;
+}
+
+let _installedExtensionsSnapshot: InstalledExtensionsSnapshot | null = null;
+const _extensionManifestCache = new Map<string, CachedManifest>();
+const _extensionBundleCodeCache = new Map<string, CachedTextFile>();
+
+function createNativeSchemeExternalPlugin(): any {
+  return {
+    name: 'native-scheme-external',
+    setup(build: any) {
+      build.onResolve({ filter: /^(swift|rust):/ }, (args: any) => ({
+        path: args.path,
+        external: true,
+      }));
+    },
+  };
+}
+
+function getExtensionBuildExternals(manifestExternal: string[]): string[] {
+  return [
+    'react',
+    'react-dom',
+    'react-dom/*',
+    'react/jsx-runtime',
+    'react/jsx-dev-runtime',
+    '@raycast/api',
+    '@raycast/utils',
+    're2',
+    'better-sqlite3',
+    'fsevents',
+    'raycast-cross-extension',
+    'node-fetch',
+    'undici',
+    'undici/*',
+    'axios',
+    'tar',
+    'extract-zip',
+    'sha256-file',
+    ...manifestExternal,
+    ...nodeBuiltins,
+  ];
+}
+
 function getManagedExtensionsDir(): string {
   const dir = path.join(app.getPath('userData'), 'extensions');
   if (!fs.existsSync(dir)) {
@@ -701,8 +775,7 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
     fs.rmSync(buildDir, { recursive: true, force: true });
   } catch {}
   fs.mkdirSync(buildDir, { recursive: true });
-  let built = 0;
-
+  const buildableCommands: Array<{ cmd: any; entryFile: string; outFile: string }> = [];
   for (const cmd of commands) {
     if (!cmd.name) continue;
     if (!isCommandPlatformCompatible(cmd)) continue;
@@ -715,84 +788,81 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
 
     const outFile = path.join(buildDir, `${cmd.name}.js`);
     fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    buildableCommands.push({ cmd, entryFile, outFile });
+  }
 
-    try {
-      console.log(`  Building ${extName}/${cmd.name}…`);
+  if (buildableCommands.length === 0) {
+    console.log(`Built 0/${commands.length} commands for ${extName}`);
+    return 0;
+  }
 
-      await runEsbuildBuild(
-        esbuild,
-        {
-          entryPoints: [entryFile],
-          absWorkingDir: extPath,
-          bundle: true,
-          format: 'cjs',
-          platform: 'node',
-          outfile: outFile,
-          plugins: [
-            // Mark swift:/rust: imports as external so fakeRequire can handle them at runtime
-            {
-              name: 'native-scheme-external',
-              setup(build: any) {
-                build.onResolve({ filter: /^(swift|rust):/ }, (args: any) => ({
-                  path: args.path,
-                  external: true,
-                }));
-              },
-            },
-          ],
-          external: [
-            // React — provided by the renderer at runtime
-            'react',
-            'react-dom',
-            'react-dom/*',
-            'react/jsx-runtime',
-            'react/jsx-dev-runtime',
-            // Raycast — provided by our shim
-            '@raycast/api',
-            '@raycast/utils',
-            // Native C++ addons — cannot be bundled, we stub them at runtime
-            're2',
-            'better-sqlite3',
-            'fsevents',
-            // Cross-extension calls — not supported, stubbed
-            'raycast-cross-extension',
-            // Fetch libs — use runtime shims in renderer instead of bundling Node internals
-            'node-fetch',
-            'undici',
-            'undici/*',
-            // HTTP / file-download / archive packages — must be kept external so our renderer
-            // shim can intercept them and route file I/O through the main process (which has
-            // real filesystem access). Bundling them inline breaks binary downloads because the
-            // browser renderer cannot do streaming file writes or archive extraction natively.
-            'axios',
-            'tar',
-            'extract-zip',
-            'sha256-file',
-            // Respect extension-defined externals from manifest
-            ...manifestExternal,
-            // Node.js built-ins — stubbed at runtime in the renderer
-            ...nodeBuiltins,
-          ],
-          nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
-          target: 'es2020',
-          jsx: 'automatic',
-          jsxImportSource: 'react',
-          tsconfigRaw: getEsbuildTsconfigRaw(extPath),
-          define: {
-            'process.env.NODE_ENV': '"production"',
-            'global': 'globalThis',
+  const commonOptions = {
+    absWorkingDir: extPath,
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    plugins: [createNativeSchemeExternalPlugin()],
+    external: getExtensionBuildExternals(manifestExternal),
+    nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
+    target: 'es2020',
+    jsx: 'automatic',
+    jsxImportSource: 'react',
+    tsconfigRaw: getEsbuildTsconfigRaw(extPath),
+    define: {
+      'process.env.NODE_ENV': '"production"',
+      'global': 'globalThis',
+    },
+    logLevel: 'warning',
+  };
+
+  let built = 0;
+  try {
+    console.log(`  Building ${buildableCommands.length} commands for ${extName}…`);
+    const entryPoints = Object.fromEntries(
+      buildableCommands.map(({ cmd, entryFile }) => [String(cmd.name), entryFile])
+    );
+    await runEsbuildBuild(
+      esbuild,
+      {
+        ...commonOptions,
+        entryPoints,
+        outdir: buildDir,
+      },
+      extPath,
+      `${extName}/*`
+    );
+
+    for (const { outFile } of buildableCommands) {
+      if (fs.existsSync(outFile)) built++;
+    }
+  } catch (batchError) {
+    console.warn(
+      `  Batched esbuild failed for ${extName}; retrying commands individually:`,
+      (batchError as any)?.message || batchError
+    );
+
+    built = 0;
+    for (const { cmd, entryFile, outFile } of buildableCommands) {
+      try {
+        console.log(`  Building ${extName}/${cmd.name}…`);
+
+        await runEsbuildBuild(
+          esbuild,
+          {
+            ...commonOptions,
+            outfile: outFile,
+            entryPoints: [entryFile],
           },
-          logLevel: 'warning',
-        },
-        extPath,
-        `${extName}/${cmd.name}`
-      );
+          extPath,
+          `${extName}/${cmd.name}`
+        );
 
-      if (fs.existsSync(outFile)) {
-        built++;
+        if (fs.existsSync(outFile)) {
+          built++;
+        }
+      } catch (e) {
+        console.error(`  esbuild failed for ${extName}/${cmd.name}:`, e);
       }
-    } catch (e) {
-      console.error(`  esbuild failed for ${extName}/${cmd.name}:`, e);
     }
   }
 
