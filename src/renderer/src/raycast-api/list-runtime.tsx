@@ -354,7 +354,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     const detailElement = useMemo(() => {
       if (!rawDetail || !React.isValidElement(rawDetail)) return rawDetail;
       if (rawDetail.type !== React.Fragment) return rawDetail;
-      const children = React.Children.toArray((rawDetail.props as { children?: React.ReactNode }).children);
+      const rawDetailElement = rawDetail as React.ReactElement<{ children?: React.ReactNode }>;
+      const children = React.Children.toArray(rawDetailElement.props.children);
       let mergedMarkdown: string | undefined;
       let mergedMetadata: React.ReactElement | undefined;
       let mergedIsLoading: boolean | undefined;
