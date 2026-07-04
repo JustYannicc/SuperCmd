@@ -197,7 +197,10 @@ function loadFsFacade({ nodeAvailable, electron, localStorage }) {
     },
     fileName: EXTENSION_VIEW_PATH,
   });
+  const module = { exports: {} };
   const sandbox = {
+    module,
+    exports: module.exports,
     __REAL_NODE_REQUIRE: nodeAvailable ? require : undefined,
     __REAL_NODE_PROCESS: nodeAvailable ? process : undefined,
     console,
