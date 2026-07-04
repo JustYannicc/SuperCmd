@@ -5716,6 +5716,43 @@ function resolveElevenLabsTtsConfig(selectedModel: string): { modelId: string; v
   return { modelId, voiceId };
 }
 
+type BufferedRequestPart = Buffer;
+
+function getBufferedRequestPartsContentLength(parts: readonly BufferedRequestPart[]): number {
+  return parts.reduce((total, part) => total + part.length, 0);
+}
+
+function writeBufferedRequestParts(req: { write: (chunk: Buffer) => unknown; end: () => unknown }, parts: readonly BufferedRequestPart[]): void {
+  for (const part of parts) {
+    req.write(part);
+  }
+  req.end();
+}
+
+function collectBoundedResponseText(res: any, maxBytes = 1024 * 1024): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const { StringDecoder } = require('string_decoder') as typeof import('string_decoder');
+    const decoder = new StringDecoder('utf8');
+    let remaining = maxBytes;
+    let text = '';
+
+    res.on('data', (chunk: Buffer | string) => {
+      if (remaining <= 0) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      const next = buffer.length > remaining ? buffer.subarray(0, remaining) : buffer;
+      remaining -= next.length;
+      text += decoder.write(next);
+    });
+    res.on('error', reject);
+    res.on('end', () => {
+      if (remaining > 0) {
+        text += decoder.end();
+      }
+      resolve(text);
+    });
+  });
+}
+
 function transcribeAudioWithElevenLabs(opts: {
   audioBuffer: Buffer;
   apiKey: string;
@@ -5756,7 +5793,6 @@ function transcribeAudioWithElevenLabs(opts: {
   }
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
 
   return new Promise<string>((resolve, reject) => {
     try {
@@ -5769,14 +5805,11 @@ function transcribeAudioWithElevenLabs(opts: {
           headers: {
             'xi-api-key': opts.apiKey,
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
+            'Content-Length': getBufferedRequestPartsContentLength(parts),
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
+          collectBoundedResponseText(res).then((responseBody) => {
             if (res.statusCode && res.statusCode >= 400) {
               if (res.statusCode === 401 && responseBody.includes('detected_unusual_activity')) {
                 reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
@@ -5801,12 +5834,11 @@ function transcribeAudioWithElevenLabs(opts: {
               }
               resolve(text);
             }
-          });
+          }).catch(reject);
         }
       );
       req.on('error', reject);
-      req.write(body);
-      req.end();
+      writeBufferedRequestParts(req, parts);
     } catch (error) {
       reject(error);
     }
@@ -5843,7 +5875,6 @@ function transcribeAudioWithMistralVoxtral(opts: {
   }
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
 
   return new Promise<string>((resolve, reject) => {
     try {
@@ -5856,14 +5887,11 @@ function transcribeAudioWithMistralVoxtral(opts: {
           headers: {
             'Authorization': `Bearer ${opts.apiKey}`,
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
+            'Content-Length': getBufferedRequestPartsContentLength(parts),
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
+          collectBoundedResponseText(res).then((responseBody) => {
             if (res.statusCode && res.statusCode >= 400) {
               reject(new Error(`Mistral Voxtral STT HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
               return;
@@ -5890,15 +5918,14 @@ function transcribeAudioWithMistralVoxtral(opts: {
               }
               resolve(text);
             }
-          });
+          }).catch(reject);
         }
       );
       req.on('error', reject);
       req.setTimeout(60000, () => {
         req.destroy(new Error('Mistral Voxtral STT timed out.'));
       });
-      req.write(body);
-      req.end();
+      writeBufferedRequestParts(req, parts);
     } catch (error) {
       reject(error);
     }
@@ -5929,27 +5956,38 @@ function synthesizeElevenLabsToFile(opts: {
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              const responseText = Buffer.concat(chunks).toString('utf-8');
+          if (res.statusCode && res.statusCode >= 400) {
+            collectBoundedResponseText(res).then((responseText) => {
               if (res.statusCode === 401 && responseText.includes('detected_unusual_activity')) {
                 reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
                 return;
               }
               reject(new Error(`ElevenLabs TTS HTTP ${res.statusCode}: ${responseText.slice(0, 500)}`));
               return;
+            }).catch(reject);
+            return;
+          }
+
+          const fileStream = fs.createWriteStream(opts.audioPath);
+          const { pipeline } = require('stream') as typeof import('stream');
+          let audioBytes = 0;
+
+          res.on('data', (chunk: Buffer) => {
+            audioBytes += chunk.length;
+          });
+
+          pipeline(res, fileStream, (err: Error | null) => {
+            if (err) {
+              try { fs.unlink(opts.audioPath, () => {}); } catch {}
+              reject(err);
+              return;
             }
-            const audio = Buffer.concat(chunks);
-            if (!audio.length) {
+            if (!audioBytes) {
+              try { fs.unlink(opts.audioPath, () => {}); } catch {}
               reject(new Error('ElevenLabs TTS returned empty audio.'));
               return;
             }
-            fs.writeFile(opts.audioPath, audio, (err: Error | null) => {
-              if (err) reject(err);
-              else resolve();
-            });
+            resolve();
           });
         }
       );
