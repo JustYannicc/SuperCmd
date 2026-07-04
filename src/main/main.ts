@@ -238,6 +238,21 @@ import {
   createCachedMenuBarNativeImage,
   createMenuBarNativeImageCache,
 } from './menubar-native-image-cache';
+import {
+  createMenuBarNativeUpdateState,
+  getMenuBarNativeItemsKey,
+  getMenuBarNativeTitle,
+  getMenuBarNativeTooltip,
+  isMenuBarNativeIconRefreshNeeded,
+  isMenuBarNativeMenuUpdateNeeded,
+  isMenuBarNativeTitleUpdateNeeded,
+  isMenuBarNativeTooltipUpdateNeeded,
+  rememberMenuBarNativeIcon,
+  rememberMenuBarNativeMenu,
+  rememberMenuBarNativeTitle,
+  rememberMenuBarNativeTooltip,
+  type MenuBarNativeUpdateState,
+} from './menubar-native-update-cache';
 
 import { initialize as initAptabase, trackEvent } from "@aptabase/electron/main";
 
@@ -7478,7 +7493,17 @@ app.on('open-url', (event: any, url: string) => {
 
 const menuBarTrays = new Map<string, InstanceType<typeof Tray>>();
 const menuBarNativeImageCache = createMenuBarNativeImageCache();
+const menuBarNativeUpdateStates = new Map<string, MenuBarNativeUpdateState>();
 let appTray: InstanceType<typeof Tray> | null = null;
+
+function getMenuBarNativeUpdateState(extId: string): MenuBarNativeUpdateState {
+  let state = menuBarNativeUpdateStates.get(extId);
+  if (!state) {
+    state = createMenuBarNativeUpdateState();
+    menuBarNativeUpdateStates.set(extId, state);
+  }
+  return state;
+}
 
 function buildDefaultMacTrayTemplateIcon(): any | null {
   if (process.platform !== 'darwin') return null;
@@ -19114,9 +19139,10 @@ if let tiff = image?.tiffRepresentation {
 
   // Update / create a menu-bar Tray when the renderer sends menu structure
   ipcMain.on('menubar-update', (_event: any, data: any) => {
-    const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, iconBitmapScale, fallbackIconDataUrl, title, tooltip, items } = data;
+    const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, iconBitmapScale, fallbackIconDataUrl, items } = data;
 
     let tray = menuBarTrays.get(extId);
+    const updateState = getMenuBarNativeUpdateState(extId);
 
     let lastResolvedTrayIconOk = false;
     const hasEmojiIcon = typeof iconEmoji === 'string' && iconEmoji.trim().length > 0;
@@ -19163,33 +19189,39 @@ if let tiff = image?.tiffRepresentation {
       const icon = resolveTrayIcon();
       tray = new Tray(icon);
       menuBarTrays.set(extId, tray);
-    } else {
+      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
+    } else if (isMenuBarNativeIconRefreshNeeded(updateState, data)) {
       // Refresh icon on accepted updates after creation (first payload can be incomplete).
       tray.setImage(resolveTrayIcon());
+      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
     }
 
     // Update title: if there's a text title, show it; if only emoji icon, show that
-    if (title) {
-      tray.setTitle(title);
-    } else if (iconEmoji) {
-      tray.setTitle(iconEmoji);
-    } else if (!lastResolvedTrayIconOk) {
-      // Keep tray visible even when extension provides neither icon nor title.
-      tray.setTitle('⏱');
-    } else {
-      tray.setTitle('');
+    const nextTitle = getMenuBarNativeTitle(data, updateState.lastResolvedTrayIconOk);
+    if (isMenuBarNativeTitleUpdateNeeded(updateState, nextTitle)) {
+      tray.setTitle(nextTitle);
+      rememberMenuBarNativeTitle(updateState, nextTitle);
     }
-    if (tooltip) tray.setToolTip(tooltip);
+    const nextTooltip = getMenuBarNativeTooltip(data);
+    if (isMenuBarNativeTooltipUpdateNeeded(updateState, nextTooltip)) {
+      tray.setToolTip(nextTooltip);
+      rememberMenuBarNativeTooltip(updateState, nextTooltip);
+    }
 
     // Build native menu from serialized items
-    const menuTemplate = buildMenuBarTemplate(items, extId);
-    const menu = Menu.buildFromTemplate(menuTemplate);
-    tray.setContextMenu(menu);
+    const nextItemsKey = getMenuBarNativeItemsKey(items);
+    if (isMenuBarNativeMenuUpdateNeeded(updateState, nextItemsKey)) {
+      const menuTemplate = buildMenuBarTemplate(items, extId);
+      const menu = Menu.buildFromTemplate(menuTemplate);
+      tray.setContextMenu(menu);
+      rememberMenuBarNativeMenu(updateState, nextItemsKey);
+    }
   });
 
   ipcMain.on('menubar-remove', (_event: any, data: any) => {
     const extId = String(data?.extId || '').trim();
     if (!extId) return;
+    menuBarNativeUpdateStates.delete(extId);
     const tray = menuBarTrays.get(extId);
     if (!tray) return;
     try {
@@ -19467,4 +19499,5 @@ app.on('will-quit', () => {
   }
   menuBarTrays.clear();
   menuBarNativeImageCache.clear();
+  menuBarNativeUpdateStates.clear();
 });
