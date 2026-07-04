@@ -9,7 +9,11 @@ import type {
 import type { BrowserSearchResult, useBrowserSearch } from './useBrowserSearch';
 import type { CalcResult } from '../smart-calculator';
 import { tryCalculate, tryCalculateAsync } from '../smart-calculator';
-import { filterCommands, rankCommands } from '../utils/command-helpers';
+import {
+  createRootCommandScoreIndex,
+  filterCommands,
+  rankCommandsWithIndex,
+} from '../utils/command-helpers';
 import {
   asTildePath,
   buildFileResultCommandId,
@@ -339,9 +343,13 @@ export function useLauncherCommandModel({
   const calcResult = syncCalcResult ?? asyncCalcResult;
   const calcOffset = calcResult ? 1 : 0;
   const contextualCommands = commands;
+  const hasSearchQuery = searchQuery.trim().length > 0;
+  const shouldComputeLegacyCommandList = !hasSearchQuery || Boolean(calcResult);
   const filteredCommands = useMemo(
-    () => filterCommands(contextualCommands, searchQuery, commandAliases),
-    [contextualCommands, searchQuery, commandAliases]
+    () => shouldComputeLegacyCommandList
+      ? filterCommands(contextualCommands, searchQuery, commandAliases)
+      : contextualCommands,
+    [contextualCommands, searchQuery, commandAliases, shouldComputeLegacyCommandList]
   );
 
   // When calculator is showing but no commands match, show unfiltered list below.
@@ -355,7 +363,20 @@ export function useLauncherCommandModel({
     () => new Set(['system-add-to-memory', 'system-cursor-prompt', 'system-emoji-picker']),
     []
   );
-  const hasSearchQuery = searchQuery.trim().length > 0;
+  const shouldIndexRootCommands = hasSearchQuery && !aiMode && rootBangState.mode === 'none';
+  const rootSearchableCommands = useMemo(
+    () => shouldIndexRootCommands
+      ? contextualCommands.filter((cmd) =>
+          cmd.id !== WEB_SEARCH_COMMAND_ID &&
+          (!hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery)
+        )
+      : [],
+    [contextualCommands, hiddenListOnlyCommandIds, hasSearchQuery, shouldIndexRootCommands]
+  );
+  const rootCommandScoreIndex = useMemo(
+    () => createRootCommandScoreIndex(rootSearchableCommands, commandAliases),
+    [rootSearchableCommands, commandAliases]
+  );
   const visibleSourceCommands = useMemo(
     () => sourceCommands
       .filter((cmd) => !hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery)
@@ -521,21 +542,9 @@ export function useLauncherCommandModel({
   const browserSearchResultCommands = useMemo<CommandInfo[]>(() => [], []);
 
   const commandCandidates = useMemo<RootSearchCandidate[]>(() => {
-    if (!hasSearchQuery || aiMode || rootBangState.mode !== 'none') return [];
-    const searchableCommands = contextualCommands.filter((cmd) =>
-      cmd.id !== WEB_SEARCH_COMMAND_ID &&
-      (!hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery)
-    );
-    return rankCommands(searchableCommands, searchQuery, commandAliases)
-      .map(({ command }) => {
-        const alias = commandAliases[command.id] || '';
-        const scored = scoreRootSearchFields(searchQuery, [
-          { value: command.title, kind: 'label', weight: 1 },
-          { value: alias, kind: 'alias', weight: 1.08 },
-          { value: command.subtitle, kind: 'description', weight: 0.74 },
-          ...(command.keywords || []).map((keyword) => ({ value: keyword, kind: 'description' as const, weight: 0.68 })),
-        ]);
-        if (!scored.matched) return null;
+    if (!shouldIndexRootCommands) return [];
+    return rankCommandsWithIndex(rootCommandScoreIndex, searchQuery)
+      .map(({ command, matchKind, matchScore }) => {
         const subtype = inferCommandSubtype(command);
         const stableKey = `command:${command.id}`;
         return scoreRootSearchCandidate({
@@ -551,8 +560,8 @@ export function useLauncherCommandModel({
           label: command.title,
           description: command.subtitle,
           pathOrUrl: command.path,
-          matchKind: scored.matchKind,
-          matchScore: scored.matchScore,
+          matchKind,
+          matchScore,
           sourceQualityBoost: command.alwaysOnTop ? 80 : 0,
           freshnessBoost: 0,
           pathLocationBoost: 0,
@@ -561,7 +570,7 @@ export function useLauncherCommandModel({
         }, searchQuery, rootSearchRanking);
       })
       .filter((candidate): candidate is RootSearchCandidate => Boolean(candidate));
-  }, [hasSearchQuery, aiMode, rootBangState, contextualCommands, hiddenListOnlyCommandIds, searchQuery, commandAliases, rootSearchRanking]);
+  }, [shouldIndexRootCommands, rootCommandScoreIndex, searchQuery, rootSearchRanking]);
 
   const fileCandidates = useMemo<RootSearchCandidate[]>(() => {
     if (!hasSearchQuery || aiMode || rootBangState.mode !== 'none') return [];
@@ -856,41 +865,6 @@ export function useLauncherCommandModel({
     querySearchSectionCommands,
     queryFileSectionCommands,
   } = rootSearchSectionAssembly;
-
-  // TEMP DIAGNOSTIC (SC-RANK2): pinpoint whether the internal>browser comparator
-  // is actually running, and whether Search Notes / Create Note are candidates.
-  // Remove once the override bug is confirmed fixed.
-  useEffect(() => {
-    if (!hasSearchQuery) return;
-    try {
-      const idOf = (c: any) => String(c?.command?.id || c?.stableKey || '');
-      const sn = commandCandidates.find((c) => idOf(c).includes('search-notes'));
-      const cn = commandCandidates.find((c) => idOf(c).includes('create-note'));
-      const internalCount = rootRankedCandidates.filter((c) => !c.isOrganicBrowserResult).length;
-      const browserCount = rootRankedCandidates.filter((c) => c.isOrganicBrowserResult).length;
-      const firstBrowserIdx = rootRankedCandidates.findIndex((c) => c.isOrganicBrowserResult);
-      const snIdx = rootRankedCandidates.findIndex((c) => idOf(c).includes('search-notes'));
-      const cnIdx = rootRankedCandidates.findIndex((c) => idOf(c).includes('create-note'));
-      const describe = (c: any, idx: number) => c
-        ? { score: Math.round(c.finalScore), matchKind: c.matchKind, organic: c.isOrganicBrowserResult, rankIdx: idx }
-        : 'NOT_A_CANDIDATE';
-      (window as any).electron?.whisperDebugLog?.('SC-RANK2', `q="${searchQuery}"`, {
-        cmdCands: commandCandidates.length,
-        browserCands: browserCandidates.length,
-        rootTotal: rootRankedCandidates.length,
-        internalCount,
-        browserCount,
-        // If the comparator works, firstBrowserIdx === internalCount (all internal first).
-        firstBrowserIdx,
-        comparatorWorking: firstBrowserIdx === -1 || firstBrowserIdx >= internalCount,
-        searchNotes: describe(sn, snIdx),
-        createNote: describe(cn, cnIdx),
-        RESULTS: queryResultCommands.map((c) => c.title),
-      });
-    } catch (e) {
-      (window as any).electron?.whisperDebugLog?.('SC-RANK2', 'ERR', String(e));
-    }
-  }, [hasSearchQuery, searchQuery, rootRankedCandidates, queryResultCommands, commandCandidates, browserCandidates]);
 
   const displayCommands = useMemo(() => {
     if (rootBangState.mode === 'selecting') return rootSearchSectionAssembly.displayCommands;
