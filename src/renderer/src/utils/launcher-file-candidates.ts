@@ -4,9 +4,13 @@ import type {
 } from '../../types/electron';
 import {
   normalizeRootSearchStableValue,
-  scoreRootSearchCandidate,
-  scoreRootSearchFields,
+  precompileRootSearchQuery,
+  precompileRootSearchScoringFields,
+  scorePrecompiledRootSearchFields,
+  scoreRootSearchCandidateWithContext,
   type MatchKind,
+  type PrecompiledRootSearchQuery,
+  type RootSearchCandidateScoreContext,
   type RootSearchCandidate,
   type RootSearchRankingState,
   type RootSearchSubtype,
@@ -76,29 +80,39 @@ export function buildLauncherFileCandidates({
   launcherFileResults,
   fileResultCommandByPath,
   searchQuery,
+  compiledQuery,
+  scoreContext,
   rootSearchRanking,
 }: {
   launcherFileResults: readonly IndexedFileSearchResult[];
   fileResultCommandByPath: ReadonlyMap<string, CommandInfo>;
   searchQuery: string;
+  compiledQuery?: PrecompiledRootSearchQuery;
+  scoreContext?: RootSearchCandidateScoreContext;
   rootSearchRanking: RootSearchRankingState;
 }): RootSearchCandidate[] {
+  const activeQuery = compiledQuery || precompileRootSearchQuery(searchQuery);
+  const activeScoreContext = scoreContext || {
+    rawQuery: searchQuery,
+    inputHistoryKey: activeQuery.fullQuery.slice(0, 120),
+    now: Date.now(),
+  };
   return launcherFileResults
     .map((result) => {
       const command = fileResultCommandByPath.get(result.path);
       if (!command) return null;
-      const scored = scoreRootSearchFields(searchQuery, [
+      const scored = scorePrecompiledRootSearchFields(activeQuery, precompileRootSearchScoringFields([
         { value: result.name, kind: 'label', weight: 1 },
         { value: result.parentPath, kind: 'path', weight: 0.72 },
         { value: result.displayPath, kind: 'path', weight: 0.72 },
         { value: result.path, kind: 'path', weight: 0.68 },
-      ]);
+      ]));
       if (!scored.matched) return null;
       const subtype: RootSearchSubtype = result.isDirectory ? 'folder' : 'file';
       const matchKind = coerceRootSearchMatchKind(result.matchKind, scored.matchKind);
       const weakFolderMatch = subtype === 'folder' && (matchKind === 'contains' || matchKind === 'subsequence' || matchKind === 'path');
       const stableKey = `file:${normalizeRootSearchStableValue(result.path)}`;
-      return scoreRootSearchCandidate({
+      return scoreRootSearchCandidateWithContext({
         command: {
           ...command,
           rootSearchStableKey: stableKey,
@@ -118,7 +132,7 @@ export function buildLauncherFileCandidates({
         pathLocationBoost: getFileLocationBoost(result),
         noisePenalty: Math.max(0, Number(result.noisyPathSegmentCount || 0)) * 70,
         depthPenalty: getFileDepthPenalty(result),
-      }, searchQuery, rootSearchRanking);
+      }, activeScoreContext, rootSearchRanking);
     })
     .filter((candidate): candidate is RootSearchCandidate => Boolean(candidate));
 }

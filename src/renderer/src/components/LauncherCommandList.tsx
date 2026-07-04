@@ -43,6 +43,7 @@ type LauncherVirtualEntry =
 
 type LauncherVirtualList = {
   entries: LauncherVirtualEntry[];
+  selectableEntryByAbsoluteIndex: Map<number, LauncherVirtualEntry>;
   totalHeight: number;
 };
 
@@ -52,6 +53,7 @@ function buildVirtualEntries(
   calcOffset: number
 ): LauncherVirtualList {
   const entries: LauncherVirtualEntry[] = [];
+  const selectableEntryByAbsoluteIndex = new Map<number, LauncherVirtualEntry>();
   let top = 0;
   let flatIndexCursor = 0;
 
@@ -63,6 +65,7 @@ function buildVirtualEntries(
       height: CALCULATOR_CARD_HEIGHT,
       absoluteIndex: 0,
     });
+    selectableEntryByAbsoluteIndex.set(0, entries[entries.length - 1]);
     top += CALCULATOR_CARD_HEIGHT;
   }
 
@@ -90,12 +93,13 @@ function buildVirtualEntries(
         top,
         height: COMMAND_ROW_HEIGHT,
       });
+      selectableEntryByAbsoluteIndex.set(flatIndex + calcOffset, entries[entries.length - 1]);
       top += COMMAND_ROW_HEIGHT;
     });
     flatIndexCursor += section.items.length;
   });
 
-  return { entries, totalHeight: top };
+  return { entries, selectableEntryByAbsoluteIndex, totalHeight: top };
 }
 
 function findEntryIndexAtOffset(entries: LauncherVirtualEntry[], offset: number): number {
@@ -150,15 +154,16 @@ function mergeEntryRanges(ranges: Array<{ start: number; end: number }>): Array<
 }
 
 function getVirtualizedEntries(
-  entries: LauncherVirtualEntry[],
+  virtualList: LauncherVirtualList,
   scrollTop: number,
   viewportHeight: number,
   selectedIndex: number
 ): LauncherVirtualEntry[] {
+  const { entries } = virtualList;
   const viewportStart = Math.max(0, scrollTop - VIRTUALIZATION_OVERSCAN_PX);
   const viewportEnd = scrollTop + viewportHeight + VIRTUALIZATION_OVERSCAN_PX;
   const ranges = [getEntryRangeForOffsets(entries, viewportStart, viewportEnd)];
-  const selectedEntry = entries.find((entry) => entry.kind !== 'section' && entry.absoluteIndex === selectedIndex);
+  const selectedEntry = virtualList.selectableEntryByAbsoluteIndex.get(selectedIndex);
 
   if (selectedEntry && (selectedEntry.top < viewportStart || selectedEntry.top + selectedEntry.height > viewportEnd)) {
     ranges.push(
@@ -170,7 +175,18 @@ function getVirtualizedEntries(
     );
   }
 
-  return mergeEntryRanges(ranges).flatMap((range) => entries.slice(range.start, range.end));
+  const mergedRanges = mergeEntryRanges(ranges);
+  let visibleCount = 0;
+  for (const range of mergedRanges) visibleCount += range.end - range.start;
+  const visibleEntries = new Array<LauncherVirtualEntry>(visibleCount);
+  let cursor = 0;
+  for (const range of mergedRanges) {
+    for (let index = range.start; index < range.end; index += 1) {
+      visibleEntries[cursor] = entries[index];
+      cursor += 1;
+    }
+  }
+  return visibleEntries;
 }
 
 function useLatestValue<T>(value: T): React.MutableRefObject<T> {
@@ -231,13 +247,13 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
   const visibleEntries = React.useMemo(
     () =>
       shouldVirtualize
-        ? getVirtualizedEntries(virtualList.entries, scrollTop, viewportHeight, selectedIndex)
+        ? getVirtualizedEntries(virtualList, scrollTop, viewportHeight, selectedIndex)
         : virtualList.entries,
-    [scrollTop, selectedIndex, shouldVirtualize, viewportHeight, virtualList.entries]
+    [scrollTop, selectedIndex, shouldVirtualize, viewportHeight, virtualList]
   );
   const selectedEntry = React.useMemo(
-    () => virtualList.entries.find((entry) => entry.kind !== 'section' && entry.absoluteIndex === selectedIndex),
-    [selectedIndex, virtualList.entries]
+    () => virtualList.selectableEntryByAbsoluteIndex.get(selectedIndex),
+    [selectedIndex, virtualList]
   );
 
   const registerItemRef = React.useCallback(

@@ -621,9 +621,10 @@ function filterBrowserResults(
   filters: BrowserProfileFilters,
   profiles: BrowserProfileSetting[]
 ): BrowserSearchResult[] {
+  const enabledByKind = getEnabledProfileIdSets(filters, profiles);
   return results.filter((result) => {
     if (!result.sourceProfileId) return true;
-    const enabled = new Set(getEnabledProfileIds(result.kind, filters, profiles));
+    const enabled = enabledByKind[result.kind];
     return enabled.has(result.sourceProfileId);
   });
 }
@@ -634,11 +635,30 @@ function filterBrowserResultsForKind(
   filters: BrowserProfileFilters,
   profiles: BrowserProfileSetting[]
 ): BrowserSearchResult[] {
-  const enabled = new Set(getEnabledProfileIds(kind, filters, profiles));
+  const enabled = getEnabledProfileIdSet(kind, filters, profiles);
   return results.filter((result) =>
     !result.sourceProfileId ||
     enabled.has(result.sourceProfileId)
   );
+}
+
+function getEnabledProfileIdSet(
+  kind: BrowserSearchResultKind,
+  filters: BrowserProfileFilters,
+  profiles: BrowserProfileSetting[]
+): Set<string> {
+  return new Set(getEnabledProfileIds(kind, filters, profiles));
+}
+
+function getEnabledProfileIdSets(
+  filters: BrowserProfileFilters,
+  profiles: BrowserProfileSetting[]
+): Record<BrowserSearchResultKind, Set<string>> {
+  return {
+    'open-tab': getEnabledProfileIdSet('open-tab', filters, profiles),
+    bookmark: getEnabledProfileIdSet('bookmark', filters, profiles),
+    history: getEnabledProfileIdSet('history', filters, profiles),
+  };
 }
 
 function decorateBrowserResults(results: BrowserSearchResult[], profiles: BrowserProfileSetting[]): BrowserSearchResult[] {
@@ -667,6 +687,7 @@ type BrowserEntrySearchIndex = {
   normalizedQuery: string;
   normalizedUrl: string;
   searchFields: TokenSearchField[];
+  searchBlob: string;
 };
 
 type BrowserEntryKindIndex = {
@@ -790,14 +811,10 @@ function addBrowserEntryToKindIndex(
 function getEntryIndexTokens(searchIndex: BrowserEntrySearchIndex): string[] {
   const seen = new Set<string>();
   const tokens: string[] = [];
-  for (const field of searchIndex.searchFields) {
-    const value = field.value || '';
-    if (!value) continue;
-    for (const token of value.split(' ')) {
-      if (token.length < BROWSER_ENTRY_INDEX_MIN_PREFIX_LENGTH || seen.has(token)) continue;
-      seen.add(token);
-      tokens.push(token);
-    }
+  for (const token of searchIndex.searchBlob.split(' ')) {
+    if (token.length < BROWSER_ENTRY_INDEX_MIN_PREFIX_LENGTH || seen.has(token)) continue;
+    seen.add(token);
+    tokens.push(token);
   }
   return tokens;
 }
@@ -1018,6 +1035,9 @@ function getBrowserEntryCandidates(
   const queryTokens = getSearchTokens(trimmed);
   const shouldBoundResults = Boolean(options.limit && options.limit > 0 && !options.preserveBookmarkOrder && !options.preserveHistoryChronology);
   const workingLimit = shouldBoundResults ? Math.max(Number(options.limit) * 3, Number(options.limit) + 80) : 0;
+  const nicknameLookup = kind === 'bookmark'
+    ? createBookmarkNicknameLookup(options.nicknames || [])
+    : EMPTY_BOOKMARK_NICKNAME_LOOKUP;
   const results: BrowserSearchResult[] = [];
   if (!hasQuery && options.limit && options.limit > 0 && options.preferredEntryIds) {
     for (const entryId of options.preferredEntryIds) {
@@ -1026,7 +1046,7 @@ function getBrowserEntryCandidates(
       if (entry.type !== entryType) continue;
       if (kind === 'history' && profileFilter && !profileFilter.has(getEntryProfileKey(entry))) continue;
       const savedNickname = kind === 'bookmark'
-        ? findBookmarkNickname(entry, options.nicknames || [])
+        ? findBookmarkNickname(entry, nicknameLookup)
         : '';
       const freshnessFactor = kind === 'history' ? getHistoryFreshnessFactor(entry.lastUsedAt) : 1;
       results.push({
@@ -1077,10 +1097,10 @@ function getBrowserEntryCandidates(
     if (kind === 'history' && profileFilter && !profileFilter.has(getEntryProfileKey(entry))) continue;
     const index = getBrowserEntrySearchIndexForEntry(entry, entryId, options.entryIndex || null);
     const savedNickname = kind === 'bookmark'
-      ? findBookmarkNickname(entry, options.nicknames || [])
+      ? findBookmarkNickname(entry, nicknameLookup)
       : '';
     const nicknameMatch = kind === 'bookmark' && hasQuery && !/\s/.test(trimmed)
-      ? getBookmarkNicknameMatch(entry, trimmed, options.nicknames || [])
+      ? getBookmarkNicknameMatch(entry, trimmed, nicknameLookup)
       : null;
     const searchInput = nicknameMatch ? nicknameMatch.remainingInput : trimmed;
     const hasSearchInput = searchInput.length > 0;
@@ -1088,10 +1108,9 @@ function getBrowserEntryCandidates(
     const activeStrippedInput = nicknameMatch ? activeLowerInput.replace(/^https?:\/\//, '') : strippedInput;
     const activeQueryTokens = nicknameMatch ? getSearchTokens(searchInput) : queryTokens;
     if (!nicknameMatch && hasSearchInput && activeQueryTokens.length > 0) {
-      const searchBlob = index.searchFields.map((f) => f.value).filter(Boolean).join(' ');
       let tokenMatched = true;
       for (const token of activeQueryTokens) {
-        if (!searchBlob.includes(token)) {
+        if (!index.searchBlob.includes(token)) {
           tokenMatched = false;
           break;
         }
@@ -1538,6 +1557,14 @@ type TokenSearchField = {
   weight: number;
 };
 
+type BookmarkNicknameLookup = {
+  byBookmarkKey: Map<string, string>;
+};
+
+const EMPTY_BOOKMARK_NICKNAME_LOOKUP: BookmarkNicknameLookup = {
+  byBookmarkKey: new Map(),
+};
+
 type BookmarkNicknameMatch = {
   nickname: string;
   completion: string;
@@ -1547,7 +1574,7 @@ type BookmarkNicknameMatch = {
 function getBookmarkNicknameMatch(
   entry: BrowserSearchEntry,
   input: string,
-  nicknames: BrowserSearchNicknameSetting[]
+  nicknames: BookmarkNicknameLookup
 ): BookmarkNicknameMatch | null {
   const parsed = parseNicknameQuery(input);
   if (!parsed.firstToken) return null;
@@ -1563,17 +1590,28 @@ function getBookmarkNicknameMatch(
   };
 }
 
-function findBookmarkNickname(entry: BrowserSearchEntry, nicknames: BrowserSearchNicknameSetting[]): string {
+function createBookmarkNicknameLookup(nicknames: BrowserSearchNicknameSetting[]): BookmarkNicknameLookup {
+  if (nicknames.length === 0) return EMPTY_BOOKMARK_NICKNAME_LOOKUP;
+  const byBookmarkKey = new Map<string, string>();
+  for (const item of nicknames) {
+    const source = String(item.source || '');
+    const sourceProfileId = String(item.sourceProfileId || '');
+    const url = normalizeNicknameUrl(item.url);
+    const nickname = String(item.nickname || '').trim();
+    if (!url || !nickname) continue;
+    byBookmarkKey.set(getBookmarkNicknameLookupKey(source, sourceProfileId, url), nickname);
+  }
+  return { byBookmarkKey };
+}
+
+function findBookmarkNickname(entry: BrowserSearchEntry, nicknames: BookmarkNicknameLookup): string {
   const entrySource = String(entry.source || '');
   const entryProfileId = String(entry.sourceProfileId || '');
   const entryFullProfileId = getEntryProfileKey(entry);
   const entryUrl = normalizeNicknameUrl(entry.url);
-  const match = nicknames.find((item) =>
-    String(item.source || '') === entrySource &&
-    (String(item.sourceProfileId || '') === entryProfileId || String(item.sourceProfileId || '') === entryFullProfileId) &&
-    normalizeNicknameUrl(item.url) === entryUrl
-  );
-  return String(match?.nickname || '').trim();
+  return nicknames.byBookmarkKey.get(getBookmarkNicknameLookupKey(entrySource, entryProfileId, entryUrl)) ||
+    nicknames.byBookmarkKey.get(getBookmarkNicknameLookupKey(entrySource, entryFullProfileId, entryUrl)) ||
+    '';
 }
 
 function parseNicknameQuery(input: string): { firstToken: string; remainingInput: string } {
@@ -1632,6 +1670,7 @@ function createBrowserEntrySearchIndex(entry: BrowserSearchEntry): BrowserEntryS
     normalizedQuery: String(entry.query || '').trim().toLowerCase(),
     normalizedUrl: normalizeUrlForCompletion(entry.url || entry.host, BROWSER_ENTRY_INDEX_MAX_URL_CHARS),
     searchFields,
+    searchBlob: searchFields.map((field) => field.value).filter(Boolean).join(' '),
   };
   return index;
 }
@@ -1852,6 +1891,7 @@ function tabToBrowserSearchEntry(tab: BrowserTabEntry): BrowserSearchEntry {
 
 export const __browserSearchTestAccess = {
   buildBrowserEntryIndex,
+  filterBrowserResults,
   getOrderedBrowserResults,
   getRankedBrowserResults,
 };
