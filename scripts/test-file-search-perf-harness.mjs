@@ -136,6 +136,4 @@ test('file search perf CI covers large path-query p95 and event-loop lag budgets
   assert.ok(summary.metrics.eventLoopLag.p95Ms <= summary.thresholds.applied.eventLoopLagP95Ms);
   assert.equal(summary.cleanup.completed, true);
   assert.equal(await pathExists(summary.fixture.tempRoot), false, 'large temp fixture should be cleaned up');
-
-  printFileSearchPerfReport(summary);
 });
