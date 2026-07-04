@@ -3222,6 +3222,7 @@ let emojiPickerWindow: InstanceType<typeof BrowserWindow> | null = null;
 let emojiPickerCurrentQuery = '';
 let emojiPickerCurrentPrefixLen = 1;
 let emojiPickerSelectedIdx = 0;
+let emojiPickerCurrentMatches: EmojiEntry[] = [];
 let nativeSpeechProcess: any = null;
 
 function startActiveAIRequest(requestId: string, sender: { send: (channel: 'ai-stream-chunk', payload: { requestId: string; chunk: string }) => void }): ActiveAIRequest {
@@ -10213,6 +10214,7 @@ async function renderEmojiPicker(query: string, caret: CaretRect | null, prefixL
   emojiPickerCurrentPrefixLen = prefixLen;
   emojiPickerSelectedIdx = 0;
   const matches = searchEmojiTriggerMatches(query);
+  emojiPickerCurrentMatches = matches;
   if (matches.length === 0) {
     hideEmojiPicker();
     return;
@@ -10235,7 +10237,7 @@ async function renderEmojiPicker(query: string, caret: CaretRect | null, prefixL
 
 function updateEmojiPickerSelection(delta: number): void {
   if (!emojiPickerWindow || emojiPickerWindow.isDestroyed() || !emojiPickerWindow.isVisible()) return;
-  const matches = searchEmojiTriggerMatches(emojiPickerCurrentQuery);
+  const matches = emojiPickerCurrentMatches;
   if (matches.length === 0) return;
   emojiPickerSelectedIdx = (emojiPickerSelectedIdx + delta + matches.length) % matches.length;
   const js = `window.__render(${JSON.stringify(matches)}, ${emojiPickerSelectedIdx});`;
@@ -10246,6 +10248,7 @@ function hideEmojiPicker(): void {
   emojiPickerCurrentQuery = '';
   emojiPickerCurrentPrefixLen = 1; // reset so a stale value never corrupts deletion count
   emojiPickerSelectedIdx = 0;
+  emojiPickerCurrentMatches = [];
   writeEmojiTriggerCmd({ cmd: 'intercept', enabled: false });
   if (emojiPickerWindow && !emojiPickerWindow.isDestroyed() && emojiPickerWindow.isVisible()) {
     try { emojiPickerWindow.hide(); } catch {}
@@ -10290,7 +10293,7 @@ async function insertEmojiReplacingTrigger(emoji: string, queryLen: number, pref
 }
 
 function handleEmojiTriggerNav(key: string): void {
-  const matches = searchEmojiTriggerMatches(emojiPickerCurrentQuery);
+  const matches = emojiPickerCurrentMatches;
   if (matches.length === 0) { hideEmojiPicker(); return; }
   if (key === 'left') {
     updateEmojiPickerSelection(-1);

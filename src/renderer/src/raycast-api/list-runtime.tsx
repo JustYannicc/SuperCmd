@@ -270,8 +270,14 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     // ─── Viewport virtualization for list rows and emoji grid rows ─────
     // Emoji-heavy extensions can ship thousands of cells. Both layouts render
     // only the rows in view plus a buffer and use spacers to preserve scroll.
-    const listRows = useMemo(() => buildListVirtualRows(groupedItems), [groupedItems]);
-    const emojiGridRows = useMemo(() => buildEmojiGridVirtualRows(groupedItems), [groupedItems]);
+    const listRows = useMemo(
+      () => shouldUseEmojiGridValue ? [] : buildListVirtualRows(groupedItems),
+      [groupedItems, shouldUseEmojiGridValue]
+    );
+    const emojiGridRows = useMemo(
+      () => shouldUseEmojiGridValue ? buildEmojiGridVirtualRows(groupedItems) : [],
+      [groupedItems, shouldUseEmojiGridValue]
+    );
     const virtualRows = shouldUseEmojiGridValue ? emojiGridRows : listRows;
     const rowMetrics = useMemo(() => measureVirtualRows(virtualRows), [virtualRows]);
 
