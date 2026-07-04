@@ -4,7 +4,7 @@
  * Extracted registry/grouping logic for the grid runtime container.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GridItemRegistration, GridRegistryAPI } from './grid-runtime-items';
 
 export interface GridItemGroup {
@@ -162,14 +162,29 @@ export function useGridRegistry() {
   const registryRef = useRef(new Map<string, GridItemRegistration>());
   const visibleSignatureRef = useRef(new Map<string, string>());
   const [registryVersion, setRegistryVersion] = useState(0);
+  const mountedRef = useRef(true);
   const pendingRef = useRef(false);
+  const queuedUpdateRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingRef.current = false;
+      queuedUpdateRef.current = null;
+    };
+  }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
-    if (pendingRef.current) return;
+    if (!mountedRef.current || pendingRef.current) return;
     pendingRef.current = true;
+    queuedUpdateRef.current = () => setRegistryVersion((value) => value + 1);
     queueMicrotask(() => {
+      const queuedUpdate = queuedUpdateRef.current;
+      queuedUpdateRef.current = null;
       pendingRef.current = false;
-      setRegistryVersion((value) => value + 1);
+      if (!mountedRef.current || !queuedUpdate) return;
+      queuedUpdate();
     });
   }, []);
 

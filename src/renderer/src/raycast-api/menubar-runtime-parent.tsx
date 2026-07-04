@@ -37,7 +37,9 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
 
   const registryRef = useRef(new Map<string, MBItemRegistration>());
   const [registryVersion, setRegistryVersion] = useState(0);
+  const mountedRef = useRef(true);
   const pendingRef = useRef(false);
+  const queuedUpdateRef = useRef<(() => void) | null>(null);
   const visiblePayloadHashCacheRef = useRef(createMenuBarVisiblePayloadHashCache());
   const serializedStaticPayloadRef = useRef<SerializedMenuBarStaticPayload | null>(null);
   const titleTooltipRef = useRef({ title: title || '', tooltip: tooltip || '' });
@@ -49,28 +51,38 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
     if (isMenuBar) initMenuBarClickListener();
   }, [isMenuBar]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingRef.current = false;
+      queuedUpdateRef.current = null;
+    };
+  }, []);
+
+  const scheduleRegistryUpdate = useCallback(() => {
+    if (!mountedRef.current || pendingRef.current) return;
+    pendingRef.current = true;
+    queuedUpdateRef.current = () => setRegistryVersion((v) => v + 1);
+    queueMicrotask(() => {
+      const queuedUpdate = queuedUpdateRef.current;
+      queuedUpdateRef.current = null;
+      pendingRef.current = false;
+      if (!mountedRef.current || !queuedUpdate) return;
+      queuedUpdate();
+    });
+  }, []);
+
   const registryAPI = useMemo<MBRegistryAPI>(() => ({
     register: (item: MBItemRegistration) => {
       registryRef.current.set(item.id, item);
-      if (!pendingRef.current) {
-        pendingRef.current = true;
-        queueMicrotask(() => {
-          pendingRef.current = false;
-          setRegistryVersion((v) => v + 1);
-        });
-      }
+      scheduleRegistryUpdate();
     },
     unregister: (id: string) => {
       registryRef.current.delete(id);
-      if (!pendingRef.current) {
-        pendingRef.current = true;
-        queueMicrotask(() => {
-          pendingRef.current = false;
-          setRegistryVersion((v) => v + 1);
-        });
-      }
+      scheduleRegistryUpdate();
     },
-  }), []);
+  }), [scheduleRegistryUpdate]);
 
   const sendMenuBarVisiblePayload = useCallback((staticPayload: SerializedMenuBarStaticPayload | null): void => {
     if (!isMenuBar || !staticPayload) return;

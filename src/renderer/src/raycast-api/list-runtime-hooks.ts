@@ -4,7 +4,7 @@
  * Extracted list registry/grouping helpers to keep List container module small.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ItemRegistration, ListRegistryAPI } from './list-runtime-types';
 
 export const LIST_ROW_HEIGHT = 36;
@@ -132,14 +132,29 @@ export function useListRegistry() {
   const registryRef = useRef(new Map<string, ItemRegistration>());
   const visibleSignatureRef = useRef(new Map<string, string>());
   const [registryVersion, setRegistryVersion] = useState(0);
+  const mountedRef = useRef(true);
   const pendingRef = useRef(false);
+  const queuedUpdateRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingRef.current = false;
+      queuedUpdateRef.current = null;
+    };
+  }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
-    if (pendingRef.current) return;
+    if (!mountedRef.current || pendingRef.current) return;
     pendingRef.current = true;
+    queuedUpdateRef.current = () => setRegistryVersion((value) => value + 1);
     queueMicrotask(() => {
+      const queuedUpdate = queuedUpdateRef.current;
+      queuedUpdateRef.current = null;
       pendingRef.current = false;
-      setRegistryVersion((value) => value + 1);
+      if (!mountedRef.current || !queuedUpdate) return;
+      queuedUpdate();
     });
   }, []);
 

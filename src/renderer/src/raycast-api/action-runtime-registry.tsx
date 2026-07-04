@@ -348,21 +348,38 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
   function useCollectedActions() {
     const registryRef = useRef(new Map<string, ActionRegistration>());
     const [version, setVersion] = useState(0);
+    const mountedRef = useRef(true);
     const pendingRef = useRef(false);
+    const queuedUpdateRef = useRef<(() => void) | null>(null);
     const lastSnapshotRef = useRef('');
 
+    useEffect(() => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        pendingRef.current = false;
+        queuedUpdateRef.current = null;
+      };
+    }, []);
+
     const scheduleUpdate = useCallback(() => {
-      if (pendingRef.current) return;
+      if (!mountedRef.current || pendingRef.current) return;
 
       pendingRef.current = true;
-      queueMicrotask(() => {
-        pendingRef.current = false;
+      queuedUpdateRef.current = () => {
         const entries = Array.from(registryRef.current.values());
         const snapshot = entries.map((entry) => `${entry.id}:${entry.title}:${entry.sectionTitle || ''}`).join('|');
         if (snapshot !== lastSnapshotRef.current) {
           lastSnapshotRef.current = snapshot;
           setVersion((value) => value + 1);
         }
+      };
+      queueMicrotask(() => {
+        const queuedUpdate = queuedUpdateRef.current;
+        queuedUpdateRef.current = null;
+        pendingRef.current = false;
+        if (!mountedRef.current || !queuedUpdate) return;
+        queuedUpdate();
       });
     }, []);
 
