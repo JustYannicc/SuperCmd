@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { performance } from 'node:perf_hooks';
 import {
   bundleExtensionRunner,
 } from './measure-extension-bundle-cache.mjs';
@@ -57,61 +58,239 @@ function createBuildFixture(commandCount) {
   return { tmpDir, userDataDir, extDir };
 }
 
+async function withBundledRunner(fixture, callback) {
+  let bundledRunner;
+  const esbuild = require('esbuild');
+  const originalBuild = esbuild.build;
+  const originalLoad = Module._load;
+  const buildCalls = [];
+  const patchedBuild = async function patchedBuild(options) {
+    if (options?.absWorkingDir === fixture.extDir) {
+      const entryCount = Array.isArray(options.entryPoints)
+        ? options.entryPoints.length
+        : Object.keys(options.entryPoints || {}).length;
+      buildCalls.push({
+        entryCount,
+        outdir: options.outdir,
+        outfile: options.outfile,
+      });
+    }
+    return originalBuild.call(this, options);
+  };
+  Module._load = function patchedModuleLoad(request, parent, isMain) {
+    if (request === 'esbuild') {
+      return { ...esbuild, build: patchedBuild };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    bundledRunner = await bundleExtensionRunner(fixture.userDataDir);
+    const runner = require(bundledRunner);
+    return await callback({ runner, buildCalls });
+  } finally {
+    Module._load = originalLoad;
+    try {
+      if (bundledRunner) fs.unlinkSync(bundledRunner);
+    } catch {}
+  }
+}
+
+function readManifest(extDir) {
+  return JSON.parse(fs.readFileSync(path.join(extDir, 'package.json'), 'utf-8'));
+}
+
+function writeManifest(extDir, pkg) {
+  fs.writeFileSync(path.join(extDir, 'package.json'), JSON.stringify(pkg, null, 2));
+}
+
+function mutateManifest(extDir, mutator) {
+  const pkg = readManifest(extDir);
+  mutator(pkg);
+  writeManifest(extDir, pkg);
+}
+
 test('buildAllCommands batches 1/5/20 command fixtures into one esbuild call each', async (t) => {
   for (const commandCount of [1, 5, 20]) {
     await t.test(`${commandCount} command fixture`, async () => {
       const fixture = createBuildFixture(commandCount);
-      let bundledRunner;
-      const esbuild = require('esbuild');
-      const originalBuild = esbuild.build;
-      const originalLoad = Module._load;
-      const buildCalls = [];
-      const patchedBuild = async function patchedBuild(options) {
-        if (options?.absWorkingDir === fixture.extDir) {
-          const entryCount = Array.isArray(options.entryPoints)
-            ? options.entryPoints.length
-            : Object.keys(options.entryPoints || {}).length;
-          buildCalls.push({
-            entryCount,
-            outdir: options.outdir,
-            outfile: options.outfile,
-          });
-        }
-        return originalBuild.call(this, options);
-      };
-      Module._load = function patchedModuleLoad(request, parent, isMain) {
-        if (request === 'esbuild') {
-          return { ...esbuild, build: patchedBuild };
-        }
-        return originalLoad.call(this, request, parent, isMain);
-      };
-
       try {
-        bundledRunner = await bundleExtensionRunner(fixture.userDataDir);
-        const runner = require(bundledRunner);
-        const built = await runner.buildAllCommands(`multi-build-fixture-${commandCount}`, fixture.extDir);
+        await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+          const built = await runner.buildAllCommands(`multi-build-fixture-${commandCount}`, fixture.extDir);
 
-        assert.equal(built, commandCount);
-        assert.equal(buildCalls.length, 1, 'expected one esbuild invocation for all commands');
-        assert.equal(buildCalls[0].entryCount, commandCount);
-        assert.equal(buildCalls[0].outdir, path.join(fixture.extDir, '.sc-build'));
-        assert.equal(buildCalls[0].outfile, undefined);
+          assert.equal(built, commandCount);
+          assert.equal(buildCalls.length, 1, 'expected one esbuild invocation for all commands');
+          assert.equal(buildCalls[0].entryCount, commandCount);
+          assert.equal(buildCalls[0].outdir, path.join(fixture.extDir, '.sc-build'));
+          assert.equal(buildCalls[0].outfile, undefined);
 
-        for (let index = 0; index < commandCount; index += 1) {
-          assert.ok(
-            fs.existsSync(path.join(fixture.extDir, '.sc-build', `command-${index}.js`)),
-            `expected command-${index}.js output`
-          );
-        }
+          for (let index = 0; index < commandCount; index += 1) {
+            assert.ok(
+              fs.existsSync(path.join(fixture.extDir, '.sc-build', `command-${index}.js`)),
+              `expected command-${index}.js output`
+            );
+          }
+        });
       } finally {
-        Module._load = originalLoad;
-        try {
-          if (bundledRunner) fs.unlinkSync(bundledRunner);
-        } catch {}
         try {
           fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
         } catch {}
       }
     });
+  }
+});
+
+test('buildAllCommands reuses unchanged command bundles', async () => {
+  const fixture = createBuildFixture(5);
+  try {
+    await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-5', fixture.extDir), 5);
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-5', fixture.extDir), 5);
+
+      assert.equal(buildCalls.length, 1, 'expected unchanged rebuild to skip esbuild');
+      assert.ok(
+        fs.existsSync(path.join(fixture.extDir, '.sc-build', '.sc-build-stamp.json')),
+        'expected build stamp'
+      );
+    });
+  } finally {
+    fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildAllCommands rebuilds only stale commands in a multi-command extension', async () => {
+  const fixture = createBuildFixture(5);
+  try {
+    await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-5', fixture.extDir), 5);
+      const untouchedOutFile = path.join(fixture.extDir, '.sc-build', 'command-1.js');
+      const untouchedBefore = fs.statSync(untouchedOutFile).mtimeMs;
+
+      fs.appendFileSync(path.join(fixture.extDir, 'src', 'command-0.ts'), '\nexport const changed = true;\n');
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-5', fixture.extDir), 5);
+
+      assert.equal(buildCalls.length, 2, 'expected one initial build and one partial rebuild');
+      assert.equal(buildCalls[1].entryCount, 1, 'expected only the stale command to be rebuilt');
+      assert.equal(
+        fs.statSync(untouchedOutFile).mtimeMs,
+        untouchedBefore,
+        'expected unchanged command output to be reused'
+      );
+    });
+  } finally {
+    fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildAllCommands rebuilds when source, manifest, tsconfig, externals, or deps change', async (t) => {
+  const cases = [
+    {
+      name: 'source',
+      mutate(fixture) {
+        fs.appendFileSync(path.join(fixture.extDir, 'src', 'command-0.ts'), '\nexport const changed = true;\n');
+      },
+    },
+    {
+      name: 'manifest command metadata',
+      mutate(fixture) {
+        mutateManifest(fixture.extDir, (pkg) => {
+          pkg.commands[0].title = 'Updated Command Title';
+        });
+      },
+    },
+    {
+      name: 'tsconfig',
+      mutate(fixture) {
+        fs.writeFileSync(
+          path.join(fixture.extDir, 'tsconfig.json'),
+          JSON.stringify({ compilerOptions: { jsx: 'react-jsx' } }, null, 2)
+        );
+      },
+    },
+    {
+      name: 'manifest externals',
+      mutate(fixture) {
+        mutateManifest(fixture.extDir, (pkg) => {
+          pkg.external = ['@example/native-helper'];
+        });
+      },
+    },
+    {
+      name: 'dependency manifest',
+      mutate(fixture) {
+        fs.mkdirSync(path.join(fixture.extDir, 'node_modules'), { recursive: true });
+        mutateManifest(fixture.extDir, (pkg) => {
+          pkg.dependencies = { 'left-pad': '1.3.0' };
+        });
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const fixture = createBuildFixture(1);
+      try {
+        await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+          assert.equal(await runner.buildAllCommands('multi-build-fixture-1', fixture.extDir), 1);
+          testCase.mutate(fixture);
+          assert.equal(await runner.buildAllCommands('multi-build-fixture-1', fixture.extDir), 1);
+
+          assert.equal(buildCalls.length, 2, `expected ${testCase.name} change to rebuild`);
+        });
+      } finally {
+        fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('buildAllCommands keeps pre-built output when source files are missing', async () => {
+  const fixture = createBuildFixture(1);
+  try {
+    await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-1', fixture.extDir), 1);
+      const outFile = path.join(fixture.extDir, '.sc-build', 'command-0.js');
+      assert.ok(fs.existsSync(outFile), 'expected initial output');
+
+      fs.rmSync(path.join(fixture.extDir, 'src'), { recursive: true, force: true });
+      assert.equal(await runner.buildAllCommands('multi-build-fixture-1', fixture.extDir), 1);
+
+      assert.ok(fs.existsSync(outFile), 'expected pre-built output to be preserved');
+      assert.equal(buildCalls.length, 1, 'expected no rebuild when only pre-built output is available');
+    });
+  } finally {
+    fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildAllCommands reports repeated build measurements for 1/5/20 command fixtures', async (t) => {
+  const enabled = process.env.SUPERCMD_EXTENSION_BUILD_MEASURE === '1';
+  if (!enabled) {
+    t.skip('set SUPERCMD_EXTENSION_BUILD_MEASURE=1 to print local timing evidence');
+    return;
+  }
+
+  for (const commandCount of [1, 5, 20]) {
+    const fixture = createBuildFixture(commandCount);
+    try {
+      await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+        const timingsMs = [];
+        for (let index = 0; index < 3; index += 1) {
+          const started = performance.now();
+          assert.equal(
+            await runner.buildAllCommands(`multi-build-fixture-${commandCount}`, fixture.extDir),
+            commandCount
+          );
+          timingsMs.push(Number((performance.now() - started).toFixed(2)));
+        }
+        console.log(JSON.stringify({
+          commandCount,
+          timingsMs,
+          esbuildCalls: buildCalls.length,
+        }));
+      });
+    } finally {
+      fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+    }
   }
 });
