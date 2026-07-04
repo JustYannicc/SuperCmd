@@ -2,12 +2,18 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadScriptCommandRunner } from './lib/script-command-runner-harness.mjs';
 
-async function withScriptCommandRunner(t, files, { instrumentFs = false } = {}) {
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+async function withScriptCommandRunner(t, files, {
+  instrumentFs = false,
+  mockChildProcess = false,
+} = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-script-runner-test-'));
   const scriptsDir = path.join(tempRoot, 'script-commands');
   const userDataDir = path.join(tempRoot, 'user-data');
@@ -35,9 +41,58 @@ async function withScriptCommandRunner(t, files, { instrumentFs = false } = {}) 
     userDataDir,
     scriptCommandFolders: [],
     instrumentFs,
+    mockChildProcess,
   });
 
   return { ...loaded, scriptsDir, tempRoot };
+}
+
+function createTimerHarness() {
+  let nextId = 1;
+  const active = new Map();
+  const cleared = [];
+
+  return {
+    setTimeout(callback, ms) {
+      const id = nextId++;
+      active.set(id, { callback, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      cleared.push(id);
+      active.delete(id);
+    },
+    get activeCount() {
+      return active.size;
+    },
+    get cleared() {
+      return cleared;
+    },
+  };
+}
+
+function createFakeProc() {
+  const proc = new EventEmitter();
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.killCount = 0;
+  proc.kill = () => {
+    proc.killCount += 1;
+  };
+  return proc;
+}
+
+async function withFakeGlobalTimers(timer, callback) {
+  const previousSetTimeout = globalThis.setTimeout;
+  const previousClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = timer.setTimeout;
+  globalThis.clearTimeout = timer.clearTimeout;
+  try {
+    return await callback();
+  } finally {
+    globalThis.setTimeout = previousSetTimeout;
+    globalThis.clearTimeout = previousClearTimeout;
+  }
 }
 
 function scriptHeader({
@@ -144,6 +199,50 @@ echo "fallback:$RAYCAST_MODE"
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout.trim(), 'fallback:fullOutput');
   });
+
+  for (const streamName of ['stdout', 'stderr']) {
+    await t.test(`clears timeout handle when ${streamName} exceeds output limit`, async (t) => {
+      const timer = createTimerHarness();
+      await withFakeGlobalTimers(timer, async () => {
+        const { module: runner, childProcess } = await withScriptCommandRunner(t, {
+          'overflow.sh': `#!/bin/bash
+${scriptHeader({ title: 'Overflow Command' })}
+echo "overflow"
+`,
+        }, { mockChildProcess: true });
+        const spawned = [];
+        childProcess.spawn = (command, args, options) => {
+          const proc = createFakeProc();
+          spawned.push({ command, args, options, proc });
+          return proc;
+        };
+
+        const [command] = runner.discoverScriptCommands();
+        const promise = runner.executeScriptCommand(command.id, undefined, 60_000);
+        const activeBeforeOverflow = timer.activeCount;
+        assert.equal(activeBeforeOverflow, 1);
+        assert.equal(spawned.length, 1);
+
+        const { proc } = spawned[0];
+        proc[streamName].emit('data', Buffer.alloc(MAX_OUTPUT_BYTES + 1, 'x'));
+
+        const result = await promise;
+        assert.equal(result.exitCode, 1);
+        assert.match(
+          result.stderr,
+          streamName === 'stdout'
+            ? /Output exceeded 2MB limit\./
+            : /Error output exceeded 2MB limit\./,
+        );
+        assert.equal(proc.killCount, 1);
+        assert.equal(timer.activeCount, 0);
+        assert.equal(timer.cleared.length, 1);
+        t.diagnostic(
+          `${streamName} overflow timeout handles: before=${activeBeforeOverflow} after=${timer.activeCount} cleared=${timer.cleared.length}`,
+        );
+      });
+    });
+  }
 
   await t.test('discovers metadata in large scripts with bounded prefix reads', async (t) => {
     const body = `# ${'x'.repeat(1022)}\n`.repeat(2048);

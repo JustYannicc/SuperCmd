@@ -577,6 +577,7 @@ export async function executeScriptCommand(
     let settled = false;
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
 
     const proc = spawn(spawnCommand, spawnArgs, {
       cwd,
@@ -587,6 +588,10 @@ export async function executeScriptCommand(
     const finalize = (payload: { stdout: string; stderr: string; exitCode: number }) => {
       if (settled) return;
       settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
       resolve(payload);
     };
 
@@ -622,7 +627,7 @@ export async function executeScriptCommand(
       }
     });
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       if (settled) return;
       try { proc.kill(); } catch {}
       finalize({
@@ -633,7 +638,6 @@ export async function executeScriptCommand(
     }, timeoutMs);
 
     proc.on('close', (code: number | null) => {
-      clearTimeout(timeout);
       finalize({
         stdout,
         stderr,
@@ -642,7 +646,6 @@ export async function executeScriptCommand(
     });
 
     proc.on('error', (error: Error) => {
-      clearTimeout(timeout);
       finalize({
         stdout,
         stderr: `${stderr}\n${error.message}`,
