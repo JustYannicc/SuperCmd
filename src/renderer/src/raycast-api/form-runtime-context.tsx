@@ -28,17 +28,37 @@ export const FormContext = createContext<FormContextType>({
 let currentFormValues: Record<string, any> = {};
 let currentFormErrors: Record<string, string> = {};
 let currentFormPlaceholders: Record<string, string> = {};
+let currentFormSnapshotOwner: symbol | null = null;
 
-export function setCurrentFormValues(values: Record<string, any>) {
+export function createFormSnapshotOwner(): symbol {
+  return Symbol('FormSnapshotOwner');
+}
+
+function setCurrentFormSnapshotOwner(owner?: symbol) {
+  if (owner) currentFormSnapshotOwner = owner;
+}
+
+export function setCurrentFormValues(values: Record<string, any>, owner?: symbol) {
+  setCurrentFormSnapshotOwner(owner);
   currentFormValues = values;
 }
 
-export function setCurrentFormErrors(errors: Record<string, string>) {
+export function setCurrentFormErrors(errors: Record<string, string>, owner?: symbol) {
+  setCurrentFormSnapshotOwner(owner);
   currentFormErrors = errors;
 }
 
-export function setCurrentFormPlaceholders(placeholders: Record<string, string>) {
+export function setCurrentFormPlaceholders(placeholders: Record<string, string>, owner?: symbol) {
+  setCurrentFormSnapshotOwner(owner);
   currentFormPlaceholders = placeholders;
+}
+
+export function clearCurrentFormSnapshots(owner?: symbol) {
+  if (owner && currentFormSnapshotOwner !== owner) return;
+  currentFormValues = {};
+  currentFormErrors = {};
+  currentFormPlaceholders = {};
+  currentFormSnapshotOwner = null;
 }
 
 export function getFormValues(): Record<string, any> {
@@ -65,4 +85,24 @@ export function getFormValues(): Record<string, any> {
 
 export function getFormErrors(): Record<string, string> {
   return { ...currentFormErrors };
+}
+
+export function getFormSnapshotMetrics() {
+  const valuesBytes = JSON.stringify(currentFormValues).length;
+  const errorsBytes = JSON.stringify(currentFormErrors).length;
+  const placeholdersBytes = JSON.stringify(currentFormPlaceholders).length;
+
+  return {
+    valuesKeys: Object.keys(currentFormValues).length,
+    errorsKeys: Object.keys(currentFormErrors).length,
+    placeholdersKeys: Object.keys(currentFormPlaceholders).length,
+    totalKeys:
+      Object.keys(currentFormValues).length +
+      Object.keys(currentFormErrors).length +
+      Object.keys(currentFormPlaceholders).length,
+    valuesBytes,
+    errorsBytes,
+    placeholdersBytes,
+    totalBytes: valuesBytes + errorsBytes + placeholdersBytes,
+  };
 }
