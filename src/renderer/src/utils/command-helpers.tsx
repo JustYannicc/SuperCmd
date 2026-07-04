@@ -32,6 +32,7 @@ import {
   precompileRootSearchScoringFields,
   scorePrecompiledRootSearchFields,
   type MatchKind,
+  type PrecompiledRootSearchQuery,
   type PrecompiledRootSearchScoringField,
   type RootSearchScoringField,
 } from './root-search-ranking';
@@ -191,9 +192,22 @@ function scoreTokenMatch(term: string, candidate: string): number {
   return 0;
 }
 
-type SearchCandidate = {
+export type SearchCandidate = {
   token: string;
   weight: number;
+};
+
+export type CommandFilterIndexEntry = {
+  command: CommandInfo;
+  title: string;
+  subtitle: string;
+  normalizedAlias: string;
+  candidates: SearchCandidate[];
+  keywordTokens: string[];
+};
+
+export type CommandFilterIndex = {
+  entries: CommandFilterIndexEntry[];
 };
 
 export type RankedCommand = {
@@ -226,6 +240,34 @@ function getRootSearchCommandRankingFields(command: CommandInfo, alias: string):
     { value: command.subtitle, kind: 'description', weight: 0.74 },
     ...(command.keywords || []).map((keyword) => ({ value: keyword, kind: 'description' as const, weight: 0.7 })),
   ];
+}
+
+export function createCommandFilterIndex(
+  commands: CommandInfo[],
+  aliasLookup: Record<string, string> = {}
+): CommandFilterIndex {
+  return {
+    entries: commands.map((command) => {
+      const normalizedAlias = normalizeSearchText(aliasLookup[command.id] || '');
+      const aliasTokens = normalizedAlias ? tokenizeSearchText(normalizedAlias) : [];
+      const keywordTokens = (command.keywords || []).flatMap((keyword) => tokenizeSearchText(keyword));
+      const titleTokens = tokenizeSearchText(command.title);
+      const subtitleTokens = tokenizeSearchText(String(command.subtitle || ''));
+      return {
+        command,
+        title: normalizeSearchText(command.title),
+        subtitle: normalizeSearchText(String(command.subtitle || '')),
+        normalizedAlias,
+        candidates: [
+          ...aliasTokens.map((token) => ({ token, weight: 1.08 })),
+          ...titleTokens.map((token) => ({ token, weight: 1 })),
+          ...keywordTokens.map((token) => ({ token, weight: 0.92 })),
+          ...subtitleTokens.map((token) => ({ token, weight: 0.76 })),
+        ],
+        keywordTokens,
+      };
+    }),
+  };
 }
 
 export function createRootCommandScoreIndex(
@@ -326,16 +368,23 @@ export function filterCommands(
   query: string,
   aliasLookup: Record<string, string> = {}
 ): CommandInfo[] {
+  return filterCommandsWithIndex(createCommandFilterIndex(commands, aliasLookup), query);
+}
+
+export function filterCommandsWithIndex(
+  index: CommandFilterIndex,
+  query: string
+): CommandInfo[] {
   const normalizedQuery = normalizeSearchText(query);
 
   // Always-on-top commands (e.g. update banner) are pinned above the list
   // when there is no active query. With a query they are scored normally and
   // only shown if they match — but always sorted before other results.
-  const alwaysOnTop = commands.filter((c) => c.alwaysOnTop);
-  const rest = commands.filter((c) => !c.alwaysOnTop);
+  const alwaysOnTop = index.entries.filter((entry) => entry.command.alwaysOnTop);
+  const rest = index.entries.filter((entry) => !entry.command.alwaysOnTop);
 
   if (!normalizedQuery) {
-    return [...alwaysOnTop, ...rest];
+    return [...alwaysOnTop, ...rest].map((entry) => entry.command);
   }
 
   const queryTerms = tokenizeSearchText(normalizedQuery);
@@ -346,40 +395,42 @@ export function filterCommands(
   const translitVariant = getTranslitVariant(query, normalizedQuery);
   const transliteratedTerms = translitVariant.isVariant ? tokenizeSearchText(translitVariant.query) : [];
 
-  const scored = commands
-    .map((cmd) => {
-      const title = normalizeSearchText(cmd.title);
-      const subtitle = normalizeSearchText(String(cmd.subtitle || ''));
-      const normalizedAlias = normalizeSearchText(aliasLookup[cmd.id] || '');
-      const aliasTokens = normalizedAlias ? tokenizeSearchText(normalizedAlias) : [];
-      const keywordTokens = (cmd.keywords || []).flatMap((keyword) => tokenizeSearchText(keyword));
-      const titleTokens = tokenizeSearchText(cmd.title);
-      const subtitleTokens = tokenizeSearchText(String(cmd.subtitle || ''));
-      const hasExactAliasMatch = Boolean(normalizedAlias) && normalizedAlias === normalizedQuery;
+  const scored = index.entries
+    .map((entry) => {
+      const hasExactAliasMatch = Boolean(entry.normalizedAlias) && entry.normalizedAlias === normalizedQuery;
 
-      const candidates: SearchCandidate[] = [
-        ...aliasTokens.map((token) => ({ token, weight: 1.08 })),
-        ...titleTokens.map((token) => ({ token, weight: 1 })),
-        ...keywordTokens.map((token) => ({ token, weight: 0.92 })),
-        ...subtitleTokens.map((token) => ({ token, weight: 0.76 })),
-      ];
-
-      if (candidates.length === 0) {
+      if (entry.candidates.length === 0) {
         return null;
       }
 
-      const primaryScore = computeCommandScore(normalizedQuery, queryTerms, title, subtitle, normalizedAlias, candidates, keywordTokens);
+      const primaryScore = computeCommandScore(
+        normalizedQuery,
+        queryTerms,
+        entry.title,
+        entry.subtitle,
+        entry.normalizedAlias,
+        entry.candidates,
+        entry.keywordTokens
+      );
       const translitScore = translitVariant.isVariant
-        ? computeCommandScore(translitVariant.query, transliteratedTerms, title, subtitle, normalizedAlias, candidates, keywordTokens)
+        ? computeCommandScore(
+            translitVariant.query,
+            transliteratedTerms,
+            entry.title,
+            entry.subtitle,
+            entry.normalizedAlias,
+            entry.candidates,
+            entry.keywordTokens
+          )
         : 0;
       const score = Math.max(primaryScore, translitScore);
 
       if (score <= 0) return null;
 
-      return { cmd, score, title, hasExactAliasMatch };
+      return { command: entry.command, score, title: entry.title, hasExactAliasMatch };
     })
     .filter(
-      (entry): entry is { cmd: CommandInfo; score: number; title: string; hasExactAliasMatch: boolean } =>
+      (entry): entry is { command: CommandInfo; score: number; title: string; hasExactAliasMatch: boolean } =>
         entry !== null
     )
     .sort((a, b) => {
@@ -390,8 +441,8 @@ export function filterCommands(
       return a.title.localeCompare(b.title);
     });
 
-  const matchedTop = scored.filter(({ cmd }) => cmd.alwaysOnTop).map(({ cmd }) => cmd);
-  const matchedRest = scored.filter(({ cmd }) => !cmd.alwaysOnTop).map(({ cmd }) => cmd);
+  const matchedTop = scored.filter(({ command }) => command.alwaysOnTop).map(({ command }) => command);
+  const matchedRest = scored.filter(({ command }) => !command.alwaysOnTop).map(({ command }) => command);
   return [...matchedTop, ...matchedRest];
 }
 
@@ -399,7 +450,11 @@ type RankedCommandSortEntry = IndexedRankedCommand & {
   hasExactAliasMatch: boolean;
 };
 
-export function rankCommandsWithIndex(index: RootCommandScoreIndex, query: string): IndexedRankedCommand[] {
+export function rankCommandsWithIndex(
+  index: RootCommandScoreIndex,
+  query: string,
+  compiledQuery?: PrecompiledRootSearchQuery
+): IndexedRankedCommand[] {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) {
     return index.entries.map(({ command }) => ({
@@ -410,13 +465,13 @@ export function rankCommandsWithIndex(index: RootCommandScoreIndex, query: strin
     }));
   }
 
-  const compiledQuery = precompileRootSearchQuery(query);
+  const activeQuery = compiledQuery || precompileRootSearchQuery(query);
 
   return index.entries
     .map((entry): RankedCommandSortEntry | null => {
-      const ranked = scorePrecompiledRootSearchFields(compiledQuery, entry.rankingFields);
+      const ranked = scorePrecompiledRootSearchFields(activeQuery, entry.rankingFields);
       if (!ranked.matched) return null;
-      const scored = scorePrecompiledRootSearchFields(compiledQuery, entry.scoringFields);
+      const scored = scorePrecompiledRootSearchFields(activeQuery, entry.scoringFields);
       return {
         command: entry.command,
         score: ranked.matchScore,

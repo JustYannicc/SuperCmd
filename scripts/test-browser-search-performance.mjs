@@ -208,6 +208,10 @@ test('browser search indexed harness preserves full-scan result order', () => {
   const { buildBrowserEntryIndex, getOrderedBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
   const { entries, tabs, nicknames } = buildSyntheticBrowserData();
   const entryIndex = buildBrowserEntryIndex(entries);
+  assert.ok(
+    entryIndex.entrySearchIndexes.some((item) => item?.searchBlob?.includes('github')),
+    'entry index should store reusable prejoined search blobs'
+  );
   const groups = [
     { kind: 'bookmark', limit: 2 },
     { kind: 'open-tab', limit: 2 },
@@ -237,6 +241,41 @@ test('browser search indexed harness preserves full-scan result order', () => {
       `ordered results should match the full scan for ${query}`
     );
   }
+});
+
+test('browser search indexed harness preserves profile filtering', () => {
+  const { __browserSearchTestAccess } = loadTsModule('src/renderer/src/hooks/useBrowserSearch.ts');
+  const { buildBrowserEntryIndex, filterBrowserResults, getRankedBrowserResults } = __browserSearchTestAccess;
+  const { entries, tabs, nicknames } = buildSyntheticBrowserData();
+  const entryIndex = buildBrowserEntryIndex(entries);
+  const groups = [
+    { kind: 'bookmark', limit: 4 },
+    { kind: 'open-tab', limit: 4 },
+    { kind: 'history', limit: 4 },
+  ];
+  const profiles = [
+    { id: 'chrome:Default', displayName: 'Chrome Default', detectedName: 'Default', profileId: 'Default', browserId: 'chrome', browserName: 'Chrome', order: 0 },
+    { id: 'chrome:Work', displayName: 'Chrome Work', detectedName: 'Work', profileId: 'Work', browserId: 'chrome', browserName: 'Chrome', order: 1 },
+    { id: 'arc:Default', displayName: 'Arc Default', detectedName: 'Default', profileId: 'Default', browserId: 'arc', browserName: 'Arc', order: 2 },
+    { id: 'brave:Default', displayName: 'Brave Default', detectedName: 'Default', profileId: 'Default', browserId: 'brave', browserName: 'Brave', order: 3 },
+  ];
+  const filters = {
+    'open-tab': ['chrome:Default'],
+    bookmark: ['chrome:Default'],
+    history: ['chrome:Default'],
+  };
+
+  const filtered = filterBrowserResults(
+    getRankedBrowserResults('github', groups, entries, entryIndex, tabs, nicknames, 60),
+    filters,
+    profiles
+  );
+
+  assert.ok(filtered.length > 0, 'profile-filtered search should keep matching results');
+  assert.ok(
+    filtered.every((result) => !result.sourceProfileId || result.sourceProfileId === 'chrome:Default'),
+    'profile filtering should only keep enabled profile IDs'
+  );
 });
 
 test('browser search indexed harness stays under generous query thresholds', () => {

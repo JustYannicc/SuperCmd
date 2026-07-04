@@ -105,7 +105,14 @@ function loadTsModule(filePath) {
 const commandHelpers = loadTsModule('src/renderer/src/utils/command-helpers.tsx');
 const ranking = loadTsModule('src/renderer/src/utils/root-search-ranking.ts');
 
-const { createRootCommandScoreIndex, filterCommands, rankCommands, rankCommandsWithIndex } = commandHelpers;
+const {
+  createCommandFilterIndex,
+  createRootCommandScoreIndex,
+  filterCommands,
+  filterCommandsWithIndex,
+  rankCommands,
+  rankCommandsWithIndex,
+} = commandHelpers;
 const { scoreRootSearchFields } = ranking;
 
 const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 2000);
@@ -273,7 +280,13 @@ function signature(matches) {
 
 function assertSameRootCommandMatches(commands, aliases) {
   const index = createRootCommandScoreIndex(commands, aliases);
+  const filterIndex = createCommandFilterIndex(commands, aliases);
   for (const query of QUERIES) {
+    assert.deepEqual(
+      filterCommandsWithIndex(filterIndex, query).map((command) => command.id),
+      filterCommands(commands, query, aliases).map((command) => command.id),
+      `indexed contextual command filter changed order for query "${query}"`
+    );
     const legacySignature = signature(legacyRootCommandMatches(commands, query, aliases));
     assert.deepEqual(
       signature(optimizedRootCommandMatches(commands, query, aliases)),
@@ -338,6 +351,7 @@ function measureSingle(label, fn) {
 const { commands, aliases } = makeCommands(COMMAND_COUNT);
 
 assertSameRootCommandMatches(commands, aliases);
+const commandFilterIndex = createCommandFilterIndex(commands, aliases);
 const commandScoreIndex = createRootCommandScoreIndex(commands, aliases);
 
 const legacy = measure('legacy filter + two-pass command scoring', (query) => {
@@ -351,6 +365,11 @@ const optimized = measure('optimized command scoring path', (query) => {
   return matches.length;
 });
 
+const indexedFilter = measure('indexed contextual filter path', (query) => {
+  const filtered = filterCommandsWithIndex(commandFilterIndex, query);
+  return filtered.length;
+});
+
 const indexed = measure('indexed command scoring path', (query) => {
   const matches = indexedRootCommandMatches(commandScoreIndex, query);
   return matches.length;
@@ -361,6 +380,7 @@ const compile = measureSingle('command scoring index compile', () => {
 });
 
 const optimizedSpeedup = legacy.median > 0 ? legacy.median / optimized.median : 0;
+const indexedFilterSpeedup = legacy.median > 0 ? legacy.median / indexedFilter.median : 0;
 const indexedSpeedup = legacy.median > 0 ? legacy.median / indexed.median : 0;
 const indexedVsOptimizedSpeedup = optimized.median > 0 ? optimized.median / indexed.median : 0;
 
@@ -368,8 +388,10 @@ console.log('Root search perf harness');
 console.log(`commands=${COMMAND_COUNT} queries=${QUERIES.length} iterations=${ITERATIONS} warmups=${WARMUP_ITERATIONS}`);
 console.log(`${legacy.label}: median=${legacy.median.toFixed(2)}ms min=${legacy.min.toFixed(2)}ms max=${legacy.max.toFixed(2)}ms total=${legacy.total}`);
 console.log(`${optimized.label}: median=${optimized.median.toFixed(2)}ms min=${optimized.min.toFixed(2)}ms max=${optimized.max.toFixed(2)}ms total=${optimized.total}`);
+console.log(`${indexedFilter.label}: median=${indexedFilter.median.toFixed(2)}ms min=${indexedFilter.min.toFixed(2)}ms max=${indexedFilter.max.toFixed(2)}ms total=${indexedFilter.total}`);
 console.log(`${indexed.label}: median=${indexed.median.toFixed(2)}ms min=${indexed.min.toFixed(2)}ms max=${indexed.max.toFixed(2)}ms total=${indexed.total}`);
 console.log(`${compile.label}: median=${compile.median.toFixed(2)}ms min=${compile.min.toFixed(2)}ms max=${compile.max.toFixed(2)}ms total=${compile.total}`);
 console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
+console.log(`legacy-vs-indexed-filter-speedup=${indexedFilterSpeedup.toFixed(2)}x`);
 console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
 console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);

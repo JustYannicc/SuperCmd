@@ -10,8 +10,9 @@ import type { BrowserSearchResult, useBrowserSearch } from './useBrowserSearch';
 import type { CalcResult } from '../smart-calculator';
 import { tryCalculate, tryCalculateAsync } from '../smart-calculator';
 import {
+  createCommandFilterIndex,
   createRootCommandScoreIndex,
-  filterCommands,
+  filterCommandsWithIndex,
   rankCommandsWithIndex,
 } from '../utils/command-helpers';
 import {
@@ -44,9 +45,12 @@ import {
   getRootSearchFrecencyBoost,
   normalizeRootSearchStableValue,
   normalizeRootSearchUrl,
+  precompileRootSearchQuery,
+  precompileRootSearchScoringFields,
   rankRootSearchCandidates,
-  scoreRootSearchCandidate,
-  scoreRootSearchFields,
+  scorePrecompiledRootSearchFields,
+  scoreRootSearchCandidateWithContext,
+  createRootSearchCandidateScoreContext,
   type RootSearchCandidate,
   type RootSearchRankingState,
   type RootSearchSubtype,
@@ -301,12 +305,24 @@ export function useLauncherCommandModel({
   const calcOffset = calcResult ? 1 : 0;
   const contextualCommands = commands;
   const hasSearchQuery = searchQuery.trim().length > 0;
+  const rootSearchQuery = useMemo(
+    () => hasSearchQuery ? precompileRootSearchQuery(searchQuery) : null,
+    [hasSearchQuery, searchQuery]
+  );
+  const rootSearchScoreContext = useMemo(
+    () => hasSearchQuery ? createRootSearchCandidateScoreContext(searchQuery) : null,
+    [hasSearchQuery, searchQuery]
+  );
+  const commandFilterIndex = useMemo(
+    () => createCommandFilterIndex(contextualCommands, commandAliases),
+    [contextualCommands, commandAliases]
+  );
   const shouldComputeLegacyCommandList = !hasSearchQuery || Boolean(calcResult);
   const filteredCommands = useMemo(
     () => shouldComputeLegacyCommandList
-      ? filterCommands(contextualCommands, searchQuery, commandAliases)
+      ? filterCommandsWithIndex(commandFilterIndex, searchQuery)
       : contextualCommands,
-    [contextualCommands, searchQuery, commandAliases, shouldComputeLegacyCommandList]
+    [contextualCommands, searchQuery, commandFilterIndex, shouldComputeLegacyCommandList]
   );
 
   // When calculator is showing but no commands match, show unfiltered list below.
@@ -503,12 +519,12 @@ export function useLauncherCommandModel({
   const browserSearchResultCommands = useMemo<CommandInfo[]>(() => [], []);
 
   const commandCandidates = useMemo<RootSearchCandidate[]>(() => {
-    if (!shouldIndexRootCommands) return [];
-    return rankCommandsWithIndex(rootCommandScoreIndex, searchQuery)
+    if (!shouldIndexRootCommands || !rootSearchQuery || !rootSearchScoreContext) return [];
+    return rankCommandsWithIndex(rootCommandScoreIndex, searchQuery, rootSearchQuery)
       .map(({ command, matchKind, matchScore }) => {
         const subtype = inferCommandSubtype(command);
         const stableKey = `command:${command.id}`;
-        return scoreRootSearchCandidate({
+        return scoreRootSearchCandidateWithContext({
           command: {
             ...command,
             rootSearchStableKey: stableKey,
@@ -528,23 +544,25 @@ export function useLauncherCommandModel({
           pathLocationBoost: 0,
           noisePenalty: 0,
           depthPenalty: 0,
-        }, searchQuery, rootSearchRanking);
+        }, rootSearchScoreContext, rootSearchRanking);
       })
       .filter((candidate): candidate is RootSearchCandidate => Boolean(candidate));
-  }, [shouldIndexRootCommands, rootCommandScoreIndex, searchQuery, rootSearchRanking]);
+  }, [shouldIndexRootCommands, rootCommandScoreIndex, searchQuery, rootSearchQuery, rootSearchScoreContext, rootSearchRanking]);
 
   const fileCandidates = useMemo<RootSearchCandidate[]>(() => {
-    if (!hasSearchQuery || aiMode || rootBangState.mode !== 'none') return [];
+    if (!hasSearchQuery || !rootSearchQuery || !rootSearchScoreContext || aiMode || rootBangState.mode !== 'none') return [];
     return buildLauncherFileCandidates({
       launcherFileResults,
       fileResultCommandByPath,
       searchQuery,
+      compiledQuery: rootSearchQuery,
+      scoreContext: rootSearchScoreContext,
       rootSearchRanking,
     });
-  }, [hasSearchQuery, aiMode, rootBangState, launcherFileResults, fileResultCommandByPath, searchQuery, rootSearchRanking]);
+  }, [hasSearchQuery, rootSearchQuery, rootSearchScoreContext, aiMode, rootBangState, launcherFileResults, fileResultCommandByPath, searchQuery, rootSearchRanking]);
 
   const browserCandidates = useMemo<RootSearchCandidate[]>(() => {
-    if (!browserSearch.enabled || !browserSearch.alphaChromiumRootSearchEnabled || !hasSearchQuery || aiMode || rootBangState.mode !== 'none') return [];
+    if (!browserSearch.enabled || !browserSearch.alphaChromiumRootSearchEnabled || !hasSearchQuery || !rootSearchQuery || !rootSearchScoreContext || aiMode || rootBangState.mode !== 'none') return [];
     return browserSearch.getAllResults(searchQuery, browserSearchResultGroups)
       .map((result, index) => {
         const defaultProfile = getDefaultBrowserProfile(browserSearch);
@@ -566,7 +584,7 @@ export function useLauncherCommandModel({
               { value: result.url, kind: 'url' as const, weight: 0.82 },
               { value: result.subtitle, kind: 'description' as const, weight: 0.62 },
             ];
-        const scored = scoreRootSearchFields(searchQuery, fields);
+        const scored = scorePrecompiledRootSearchFields(rootSearchQuery, precompileRootSearchScoringFields(fields));
         if (!scored.matched) return null;
         const subtype: RootSearchSubtype = nicknameMatched ? 'nickname' : result.kind;
         const stableKey = command.rootSearchStableKey || `browser:${normalizeRootSearchUrl(result.url) || result.id}`;
@@ -600,7 +618,7 @@ export function useLauncherCommandModel({
         let noisePenalty = 0;
         if (result.kind === 'history' && (matchKind === 'contains' || matchKind === 'subsequence')) noisePenalty += 120;
         if (result.kind === 'bookmark' && !nicknameMatched && (matchKind === 'contains' || matchKind === 'subsequence')) noisePenalty += 60;
-        return scoreRootSearchCandidate({
+        return scoreRootSearchCandidateWithContext({
           command: {
             ...command,
             rootSearchScore: result.score,
@@ -618,10 +636,10 @@ export function useLauncherCommandModel({
           pathLocationBoost: 0,
           noisePenalty,
           depthPenalty: 0,
-        }, searchQuery, rootSearchRanking);
+        }, rootSearchScoreContext, rootSearchRanking);
       })
       .filter((candidate): candidate is RootSearchCandidate => Boolean(candidate));
-  }, [browserSearch, browserSearchResultGroups, hasSearchQuery, searchQuery, aiMode, rootBangState, rootSearchRanking, browserAppIconDataUrls]);
+  }, [browserSearch, browserSearchResultGroups, hasSearchQuery, rootSearchQuery, rootSearchScoreContext, searchQuery, aiMode, rootBangState, rootSearchRanking, browserAppIconDataUrls]);
 
   const rootRankedCandidates = useMemo<RootSearchCandidate[]>(
     () => rankRootSearchCandidates([...commandCandidates, ...fileCandidates, ...browserCandidates]),

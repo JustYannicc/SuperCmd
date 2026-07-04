@@ -100,6 +100,12 @@ export type PrecompiledRootSearchQuery = {
   terms: PrecompiledRootSearchQueryTerm[];
 };
 
+export type RootSearchCandidateScoreContext = {
+  rawQuery: string;
+  inputHistoryKey: string;
+  now: number;
+};
+
 export type PrecompiledRootSearchScoringField = {
   raw: string;
   normalized: string;
@@ -192,6 +198,17 @@ export function normalizeRootSearchUrl(value: string): string {
 
 export function normalizeQueryForInputHistory(query: string): string {
   return normalizeRootSearchText(query).slice(0, 120);
+}
+
+export function createRootSearchCandidateScoreContext(
+  query: string,
+  now = Date.now()
+): RootSearchCandidateScoreContext {
+  return {
+    rawQuery: String(query || ''),
+    inputHistoryKey: normalizeQueryForInputHistory(query),
+    now,
+  };
 }
 
 function isSubsequenceMatch(needle: string, haystack: string): boolean {
@@ -355,10 +372,14 @@ export function getRootSearchFrecencyBoost(stableKey: string, ranking: RootSearc
   return getFrecencyBoost(stableKey, ranking, now);
 }
 
-function getAdaptiveInputBoost(stableKey: string, query: string, ranking: RootSearchRankingState | undefined, now: number): number {
+function getAdaptiveInputBoostForInputKey(
+  stableKey: string,
+  currentKey: string,
+  ranking: RootSearchRankingState | undefined,
+  now: number
+): number {
   const entry = ranking?.[stableKey];
   const inputHistory = entry?.inputHistory;
-  const currentKey = normalizeQueryForInputHistory(query);
   if (!inputHistory || !currentKey) return 0;
   let best = 0;
   for (const [inputKey, input] of Object.entries(inputHistory)) {
@@ -368,6 +389,15 @@ function getAdaptiveInputBoost(stableKey: string, query: string, ranking: RootSe
     best = Math.max(best, Math.min(260, 95 * decayed));
   }
   return best;
+}
+
+function getAdaptiveInputBoost(stableKey: string, query: string, ranking: RootSearchRankingState | undefined, now: number): number {
+  return getAdaptiveInputBoostForInputKey(
+    stableKey,
+    normalizeQueryForInputHistory(query),
+    ranking,
+    now
+  );
 }
 
 export function isProtectedRootIntentMatch(subtype: RootSearchSubtype, matchKind: MatchKind): boolean {
@@ -391,9 +421,21 @@ export function scoreRootSearchCandidate(
   ranking?: RootSearchRankingState,
   now = Date.now()
 ): RootSearchCandidate {
+  return scoreRootSearchCandidateWithContext(
+    candidate,
+    createRootSearchCandidateScoreContext(query, now),
+    ranking
+  );
+}
+
+export function scoreRootSearchCandidateWithContext(
+  candidate: Omit<RootSearchCandidate, 'tierBoost' | 'frecencyBoost' | 'adaptiveInputBoost' | 'finalScore' | 'isProtectedIntentMatch' | 'isNicknameMatch' | 'isOrganicBrowserResult'>,
+  context: RootSearchCandidateScoreContext,
+  ranking?: RootSearchRankingState
+): RootSearchCandidate {
   const tierBoost = TIER_BOOST[candidate.subtype] || 0;
-  const frecencyBoost = getFrecencyBoost(candidate.stableKey, ranking, now);
-  const adaptiveInputBoost = getAdaptiveInputBoost(candidate.stableKey, query, ranking, now);
+  const frecencyBoost = getFrecencyBoost(candidate.stableKey, ranking, context.now);
+  const adaptiveInputBoost = getAdaptiveInputBoostForInputKey(candidate.stableKey, context.inputHistoryKey, ranking, context.now);
   const finalScore =
     candidate.matchScore +
     tierBoost +
