@@ -77,6 +77,7 @@ import {
   mergeAiChatSnapshot,
   upsertAiChatConversation,
 } from './ai-chat-store';
+import { decodeHttpResponseBodyBuffer } from './http-response-decode';
 import {
   getExtensionPreferences,
   getExtensionPreferencesSnapshot,
@@ -15475,8 +15476,16 @@ app.whenReady().then(async () => {
 
       const doRequest = (url: string, method: string, headers: Record<string, string>, body: string | undefined, redirectsLeft: number): Promise<any> => {
         return new Promise((resolve) => {
+          let settled = false;
+          const settle = (value: any) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+          const settleCanceled = () => settle(resolveCanceled(url));
+
           if (canceled) {
-            resolve(resolveCanceled(url));
+            settleCanceled();
             return;
           }
 
@@ -15498,7 +15507,7 @@ app.whenReady().then(async () => {
             const req = transport.request(reqOptions, (res: any) => {
               if (canceled) {
                 res.resume();
-                resolve(resolveCanceled(url));
+                settleCanceled();
                 return;
               }
 
@@ -15508,7 +15517,7 @@ app.whenReady().then(async () => {
                 const redirectUrl = new URL(res.headers.location, url).toString();
                 const redirectMethod = (res.statusCode === 303) ? 'GET' : method;
                 const redirectBody = (res.statusCode === 303) ? undefined : body;
-                resolve(doRequest(redirectUrl, redirectMethod, headers, redirectBody, redirectsLeft - 1));
+                settle(doRequest(redirectUrl, redirectMethod, headers, redirectBody, redirectsLeft - 1));
                 return;
               }
 
@@ -15516,33 +15525,24 @@ app.whenReady().then(async () => {
               res.on('data', (chunk: Buffer) => {
                 if (!canceled) chunks.push(chunk);
               });
-              res.on('end', () => {
+              res.on('end', async () => {
                 if (canceled) {
-                  resolve(resolveCanceled(url));
+                  settleCanceled();
                   return;
                 }
 
                 const bodyBuffer = Buffer.concat(chunks);
                 const contentEncoding = String(res.headers['content-encoding'] || '').toLowerCase();
-                let decodedBuffer = bodyBuffer;
-                try {
-                  const zlib = require('zlib');
-                  if (contentEncoding.includes('br')) {
-                    decodedBuffer = zlib.brotliDecompressSync(bodyBuffer);
-                  } else if (contentEncoding.includes('gzip')) {
-                    decodedBuffer = zlib.gunzipSync(bodyBuffer);
-                  } else if (contentEncoding.includes('deflate')) {
-                    decodedBuffer = zlib.inflateSync(bodyBuffer);
-                  }
-                } catch {
-                  // If decompression fails, keep raw buffer to avoid hard-failing requests.
-                  decodedBuffer = bodyBuffer;
+                const decodedBuffer = await decodeHttpResponseBodyBuffer(bodyBuffer, contentEncoding);
+                if (canceled) {
+                  settleCanceled();
+                  return;
                 }
                 const responseHeaders: Record<string, string> = {};
                 for (const [key, val] of Object.entries(res.headers)) {
                   responseHeaders[key] = Array.isArray(val) ? val.join(', ') : String(val);
                 }
-                resolve({
+                settle({
                   status: res.statusCode,
                   statusText: res.statusMessage || '',
                   headers: responseHeaders,
@@ -15554,11 +15554,11 @@ app.whenReady().then(async () => {
 
             req.on('error', (err: Error) => {
               if (canceled) {
-                resolve(resolveCanceled(url));
+                settleCanceled();
                 return;
               }
 
-              resolve({
+              settle({
                 status: 0,
                 statusText: err.message,
                 headers: {},
@@ -15568,8 +15568,9 @@ app.whenReady().then(async () => {
             });
 
             req.setTimeout(30000, () => {
+              if (settled) return;
               req.destroy();
-              resolve({
+              settle({
                 status: 0,
                 statusText: 'Request timed out',
                 headers: {},
@@ -15581,11 +15582,13 @@ app.whenReady().then(async () => {
             if (requestId) {
               activeHttpRequests.set(requestId, () => {
                 canceled = true;
+                if (settled) return;
                 try {
                   req.destroy(new Error('Request canceled'));
                 } catch {
                   req.destroy();
                 }
+                settleCanceled();
               });
             }
 
@@ -15594,7 +15597,7 @@ app.whenReady().then(async () => {
             }
             req.end();
           } catch (e: any) {
-            resolve({
+            settle({
               status: 0,
               statusText: e?.message || 'Request failed',
               headers: {},
