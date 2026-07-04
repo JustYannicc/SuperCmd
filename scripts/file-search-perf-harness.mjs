@@ -90,6 +90,7 @@ function getUsage() {
     '  --threshold-index-ms <n>               Fail if initial indexing exceeds n ms',
     '  --threshold-normal-query-p95-ms <n>    Fail if normal query p95 exceeds n ms',
     '  --threshold-path-query-p95-ms <n>      Fail if path-like query p95 exceeds n ms',
+    '  --threshold-event-loop-lag-p95-ms <n> Fail if measured event-loop lag p95 exceeds n ms',
     '  --threshold-watch-update-ms <n>        Fail if watcher-style batch exceeds n ms',
     '  --threshold-delete-ms <n>              Fail if delete batch exceeds n ms',
   ].join('\n');
@@ -112,6 +113,7 @@ export function parseFileSearchPerfHarnessArgs(args = process.argv.slice(2)) {
       initialIndexMs: readOptionalNumber(getArgValue(args, '--threshold-index-ms')),
       normalQueryP95Ms: readOptionalNumber(getArgValue(args, '--threshold-normal-query-p95-ms')),
       pathQueryP95Ms: readOptionalNumber(getArgValue(args, '--threshold-path-query-p95-ms')),
+      eventLoopLagP95Ms: readOptionalNumber(getArgValue(args, '--threshold-event-loop-lag-p95-ms')),
       watchUpdateBatchMs: readOptionalNumber(getArgValue(args, '--threshold-watch-update-ms')),
       deleteBatchMs: readOptionalNumber(getArgValue(args, '--threshold-delete-ms')),
     },
@@ -220,12 +222,51 @@ function summarizeDurations(samples) {
   };
 }
 
+function summarizeLag(samples) {
+  if (samples.length === 0) {
+    return {
+      samples: 0,
+      p95Ms: 0,
+      maxMs: 0,
+    };
+  }
+  return {
+    samples: samples.length,
+    p95Ms: Number(percentile(samples, 95).toFixed(3)),
+    maxMs: Number(Math.max(...samples).toFixed(3)),
+  };
+}
+
+async function measureEventLoopLagDuring(fn, intervalMs = 10) {
+  const samples = [];
+  let expectedAt = performance.now() + intervalMs;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    samples.push(Math.max(0, now - expectedAt));
+    expectedAt = now + intervalMs;
+  }, intervalMs);
+  timer.unref?.();
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await fn();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return {
+      result,
+      eventLoopLag: summarizeLag(samples),
+    };
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 async function measureDuration(fn) {
   const startedAt = performance.now();
-  const result = await fn();
+  const measured = await measureEventLoopLagDuring(fn);
   return {
     durationMs: performance.now() - startedAt,
-    result,
+    result: measured.result,
+    eventLoopLag: measured.eventLoopLag,
   };
 }
 
@@ -252,19 +293,23 @@ async function measureDurationWithEventLoopDelay(fn) {
 
 async function measureQueries(searchIndexedFiles, queries, config) {
   const samples = [];
-  for (let run = 0; run < config.queryRuns; run += 1) {
-    for (const query of queries) {
-      const measured = await measureDuration(() => searchIndexedFiles(query, { limit: config.limit }));
-      samples.push({
-        query,
-        run,
-        durationMs: measured.durationMs,
-        resultCount: measured.result.length,
-      });
+  const lagMeasured = await measureEventLoopLagDuring(async () => {
+    for (let run = 0; run < config.queryRuns; run += 1) {
+      for (const query of queries) {
+        const measured = await measureDuration(() => searchIndexedFiles(query, { limit: config.limit }));
+        samples.push({
+          query,
+          run,
+          durationMs: measured.durationMs,
+          resultCount: measured.result.length,
+          eventLoopLagP95Ms: measured.eventLoopLag.p95Ms,
+        });
+      }
     }
-  }
+  });
   return {
     ...summarizeDurations(samples),
+    eventLoopLag: lagMeasured.eventLoopLag,
     samples: samples.map((sample) => ({
       ...sample,
       durationMs: Number(sample.durationMs.toFixed(3)),
@@ -319,6 +364,7 @@ function evaluateThresholds(metrics, thresholds = {}) {
     ['initialIndexMs', metrics.initialIndexMs, thresholds.initialIndexMs],
     ['normalQueryP95Ms', metrics.normalQueries.p95Ms, thresholds.normalQueryP95Ms],
     ['pathQueryP95Ms', metrics.pathLikeQueries.p95Ms, thresholds.pathQueryP95Ms],
+    ['eventLoopLagP95Ms', metrics.eventLoopLag.p95Ms, thresholds.eventLoopLagP95Ms],
     ['watchUpdateBatchMs', metrics.watchUpdateBatchMs, thresholds.watchUpdateBatchMs],
     ['deleteBatchMs', metrics.deleteBatchMs, thresholds.deleteBatchMs],
   ];
@@ -355,6 +401,7 @@ function toDisplayLines(summary) {
     `Initial indexing: ${summary.metrics.initialIndexMs.toFixed(3)}ms (event-loop delay p95 ${summary.metrics.initialIndexEventLoopDelay.p95Ms.toFixed(3)}ms, max ${summary.metrics.initialIndexEventLoopDelay.maxMs.toFixed(3)}ms)`,
     `Normal queries: mean ${summary.metrics.normalQueries.meanMs.toFixed(3)}ms, p95 ${summary.metrics.normalQueries.p95Ms.toFixed(3)}ms, results ${summary.metrics.normalQueries.totalResults}`,
     `Path-like queries: mean ${summary.metrics.pathLikeQueries.meanMs.toFixed(3)}ms, p95 ${summary.metrics.pathLikeQueries.p95Ms.toFixed(3)}ms, results ${summary.metrics.pathLikeQueries.totalResults}`,
+    `Event-loop lag: p95 ${summary.metrics.eventLoopLag.p95Ms.toFixed(3)}ms, max ${summary.metrics.eventLoopLag.maxMs.toFixed(3)}ms`,
     `Watcher-style updates: ${summary.metrics.watchUpdateBatchMs.toFixed(3)}ms for ${summary.fixture.updateCount} paths`,
     `Delete batch: ${summary.metrics.deleteBatchMs.toFixed(3)}ms for ${summary.fixture.deleteCount} paths`,
     `Post-update query: ${summary.metrics.postUpdateQueryMs.toFixed(3)}ms (${summary.verification.postUpdateResultCount} results)`,
@@ -423,6 +470,20 @@ export async function runFileSearchPerfHarness(overrides = {}) {
       postUpdateQueryMs: roundMetric(postUpdateQuery.durationMs),
       deleteBatchMs: roundMetric(deleteBatch.durationMs),
       postDeleteQueryMs: roundMetric(postDeleteQuery.durationMs),
+    };
+    const eventLoopLagSamples = [
+      initialIndex.eventLoopLag,
+      normalQueries.eventLoopLag,
+      pathLikeQueries.eventLoopLag,
+      watchUpdate.eventLoopLag,
+      postUpdateQuery.eventLoopLag,
+      deleteBatch.eventLoopLag,
+      postDeleteQuery.eventLoopLag,
+    ];
+    metrics.eventLoopLag = {
+      p95Ms: Math.max(...eventLoopLagSamples.map((sample) => sample.p95Ms)),
+      maxMs: Math.max(...eventLoopLagSamples.map((sample) => sample.maxMs)),
+      samples: eventLoopLagSamples.reduce((sum, sample) => sum + sample.samples, 0),
     };
     const realTempDir = await fs.realpath(os.tmpdir());
 

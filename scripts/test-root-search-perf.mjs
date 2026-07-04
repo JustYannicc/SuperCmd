@@ -118,6 +118,7 @@ const { scoreRootSearchFields } = ranking;
 const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 2000);
 const ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS || 1);
 const WARMUP_ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_WARMUPS || 0);
+const JSON_OUTPUT = process.env.SUPERCMD_ROOT_SEARCH_PERF_JSON === '1' || process.argv.includes('--json');
 
 const QUERIES = [
   'notes',
@@ -129,6 +130,48 @@ const QUERIES = [
   'gh',
   'cmd 42',
 ];
+
+function readOptionalNumber(value) {
+  if (value === undefined || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readBudgets() {
+  return {
+    legacyMedianMs: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_LEGACY_MEDIAN_MS),
+    optimizedMedianMs: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_OPTIMIZED_MEDIAN_MS),
+    indexedMedianMs: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_INDEXED_MEDIAN_MS),
+    compileMedianMs: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMPILE_MEDIAN_MS),
+    indexedSpeedupMin: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN),
+    indexedVsOptimizedSpeedupMin: readOptionalNumber(process.env.SUPERCMD_ROOT_SEARCH_PERF_INDEXED_VS_OPTIMIZED_SPEEDUP_MIN),
+  };
+}
+
+function evaluateBudgets(summary, budgets) {
+  const checks = [
+    ['legacyMedianMs', summary.metrics.legacy.median, budgets.legacyMedianMs, '<='],
+    ['optimizedMedianMs', summary.metrics.optimized.median, budgets.optimizedMedianMs, '<='],
+    ['indexedMedianMs', summary.metrics.indexed.median, budgets.indexedMedianMs, '<='],
+    ['compileMedianMs', summary.metrics.compile.median, budgets.compileMedianMs, '<='],
+    ['indexedSpeedupMin', summary.speedups.legacyVsIndexed, budgets.indexedSpeedupMin, '>='],
+    ['indexedVsOptimizedSpeedupMin', summary.speedups.optimizedVsIndexed, budgets.indexedVsOptimizedSpeedupMin, '>='],
+  ];
+  const failures = checks
+    .filter(([, , budget]) => typeof budget === 'number')
+    .filter(([, actual, budget, operator]) => operator === '<=' ? actual > budget : actual < budget)
+    .map(([name, actual, budget, operator]) => `${name} expected ${operator} ${budget}, got ${actual.toFixed(3)}`);
+
+  return {
+    passed: failures.length === 0,
+    failures,
+    applied: Object.fromEntries(
+      checks
+        .filter(([, , budget]) => typeof budget === 'number')
+        .map(([name, , budget]) => [name, budget])
+    ),
+  };
+}
 
 const WORDS = [
   'Notes',
@@ -383,15 +426,48 @@ const optimizedSpeedup = legacy.median > 0 ? legacy.median / optimized.median : 
 const indexedFilterSpeedup = legacy.median > 0 ? legacy.median / indexedFilter.median : 0;
 const indexedSpeedup = legacy.median > 0 ? legacy.median / indexed.median : 0;
 const indexedVsOptimizedSpeedup = optimized.median > 0 ? optimized.median / indexed.median : 0;
+const summary = {
+  config: {
+    commands: COMMAND_COUNT,
+    queries: QUERIES.length,
+    iterations: ITERATIONS,
+    warmups: WARMUP_ITERATIONS,
+  },
+  metrics: {
+    legacy,
+    optimized,
+    indexedFilter,
+    indexed,
+    compile,
+  },
+  speedups: {
+    legacyVsOptimized: optimizedSpeedup,
+    legacyVsIndexedFilter: indexedFilterSpeedup,
+    legacyVsIndexed: indexedSpeedup,
+    optimizedVsIndexed: indexedVsOptimizedSpeedup,
+  },
+};
+summary.budgets = evaluateBudgets(summary, readBudgets());
 
-console.log('Root search perf harness');
-console.log(`commands=${COMMAND_COUNT} queries=${QUERIES.length} iterations=${ITERATIONS} warmups=${WARMUP_ITERATIONS}`);
-console.log(`${legacy.label}: median=${legacy.median.toFixed(2)}ms min=${legacy.min.toFixed(2)}ms max=${legacy.max.toFixed(2)}ms total=${legacy.total}`);
-console.log(`${optimized.label}: median=${optimized.median.toFixed(2)}ms min=${optimized.min.toFixed(2)}ms max=${optimized.max.toFixed(2)}ms total=${optimized.total}`);
-console.log(`${indexedFilter.label}: median=${indexedFilter.median.toFixed(2)}ms min=${indexedFilter.min.toFixed(2)}ms max=${indexedFilter.max.toFixed(2)}ms total=${indexedFilter.total}`);
-console.log(`${indexed.label}: median=${indexed.median.toFixed(2)}ms min=${indexed.min.toFixed(2)}ms max=${indexed.max.toFixed(2)}ms total=${indexed.total}`);
-console.log(`${compile.label}: median=${compile.median.toFixed(2)}ms min=${compile.min.toFixed(2)}ms max=${compile.max.toFixed(2)}ms total=${compile.total}`);
-console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
-console.log(`legacy-vs-indexed-filter-speedup=${indexedFilterSpeedup.toFixed(2)}x`);
-console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
-console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);
+if (JSON_OUTPUT) {
+  console.log(JSON.stringify(summary, null, 2));
+} else {
+  console.log('Root search perf harness');
+  console.log(`commands=${COMMAND_COUNT} queries=${QUERIES.length} iterations=${ITERATIONS} warmups=${WARMUP_ITERATIONS}`);
+  console.log(`${legacy.label}: median=${legacy.median.toFixed(2)}ms min=${legacy.min.toFixed(2)}ms max=${legacy.max.toFixed(2)}ms total=${legacy.total}`);
+  console.log(`${optimized.label}: median=${optimized.median.toFixed(2)}ms min=${optimized.min.toFixed(2)}ms max=${optimized.max.toFixed(2)}ms total=${optimized.total}`);
+  console.log(`${indexedFilter.label}: median=${indexedFilter.median.toFixed(2)}ms min=${indexedFilter.min.toFixed(2)}ms max=${indexedFilter.max.toFixed(2)}ms total=${indexedFilter.total}`);
+  console.log(`${indexed.label}: median=${indexed.median.toFixed(2)}ms min=${indexed.min.toFixed(2)}ms max=${indexed.max.toFixed(2)}ms total=${indexed.total}`);
+  console.log(`${compile.label}: median=${compile.median.toFixed(2)}ms min=${compile.min.toFixed(2)}ms max=${compile.max.toFixed(2)}ms total=${compile.total}`);
+  console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
+  console.log(`legacy-vs-indexed-filter-speedup=${indexedFilterSpeedup.toFixed(2)}x`);
+  console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
+  console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);
+  if (Object.keys(summary.budgets.applied).length > 0) {
+    console.log(summary.budgets.passed
+      ? 'Thresholds: passed'
+      : `Thresholds: failed (${summary.budgets.failures.join('; ')})`);
+  }
+}
+
+assert.equal(summary.budgets.passed, true, summary.budgets.failures.join('\n'));

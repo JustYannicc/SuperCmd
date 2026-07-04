@@ -46,6 +46,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run perf regression budgets
+        run: npm run test:perf:ci
+
       - name: Check i18n
         run: npm run check:i18n
 
