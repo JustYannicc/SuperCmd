@@ -22,6 +22,7 @@ import { createAerospaceWorkspaceMover } from './aerospace-workspace';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
 import { createLocalAsrHelperStatusProbeCache } from './local-model-status-probe';
 import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow, applyCommandMetadataUpdate } from './commands';
+import { createLauncherCommandPayloadCache } from './launcher-command-payload';
 import {
   loadSettings,
   saveSettings,
@@ -12803,12 +12804,56 @@ function broadcastExtensionUninstalled(extensionName: string): void {
 }
 
 function broadcastCommandsUpdated(): void {
+  clearLauncherCommandPayloadCache();
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed()) continue;
     try {
       window.webContents.send('commands-updated');
     } catch {}
   }
+}
+
+const launcherCommandPayloadCache = createLauncherCommandPayloadCache();
+
+function getUpdateBannerCommandVisibilityKey(): string {
+  return [
+    appUpdaterStatusSnapshot.state,
+    appUpdaterStatusSnapshot.latestVersion || '',
+    autoUpdateDownloadedVersion || '',
+    isUpdateBannerDismissed() ? 'dismissed' : 'visible',
+  ].join('|');
+}
+
+function clearLauncherCommandPayloadCache(): void {
+  launcherCommandPayloadCache.clear();
+}
+
+function getUpdateBannerCommand(): any | undefined {
+  if (appUpdaterStatusSnapshot.state !== 'downloaded' || isUpdateBannerDismissed()) return undefined;
+  const version = appUpdaterStatusSnapshot.latestVersion || autoUpdateDownloadedVersion || app.getVersion();
+  const tadaIconDataUrl = `data:image/svg+xml;base64,${Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="tdBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#86efac" stop-opacity="0.7"/><stop offset="1" stop-color="#16a34a" stop-opacity="0.9"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#tdBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.95)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M5.8 11.3 2 22l10.7-3.8"/><path d="M4 3h.01M22 8h.01M15 2h.01M22 20h.01M22 2l-2.5 2.5M8 8l-2.5 2.5"/><path d="m15 7-6.5 6.5"/><path d="m9 13 1.5 1.5"/></g></svg>',
+    'utf8'
+  ).toString('base64')}`;
+  return {
+      id: 'system-update-and-reopen',
+      title: 'Update and Restart',
+      subtitle: `Version ${version} downloaded and ready to install`,
+      keywords: ['update', 'reopen', 'restart', 'install', 'version', version],
+      category: 'system',
+      iconDataUrl: tadaIconDataUrl,
+      alwaysOnTop: true,
+  };
+}
+
+function buildLauncherCommandPayload(commands: Awaited<ReturnType<typeof getAvailableCommands>>, settings: AppSettings): any[] {
+  return launcherCommandPayloadCache.build(commands, settings, {
+    isAIDisabled: isAIDisabledInSettings,
+    isAIDependentSystemCommand,
+    isAISectionDisabledForCommand,
+    updateBannerCommand: getUpdateBannerCommand(),
+    updateBannerSignature: getUpdateBannerCommandVisibilityKey(),
+  });
 }
 
 function broadcastExtensionPreferencesUpdated(extensionName: string): void {
@@ -13968,38 +14013,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-commands', async () => {
     const s = loadSettings();
     const commands = await getAvailableCommands();
-    const disabled = new Set(s.disabledCommands || []);
-    const enabled = new Set((s as any).enabledCommands || []);
-    const aiDisabled = isAIDisabledInSettings(s);
-    const filtered = commands.filter((c: any) => {
-      const commandId = String(c?.id || '');
-      if (aiDisabled && isAIDependentSystemCommand(commandId)) return false;
-      if (isAISectionDisabledForCommand(commandId, s)) return false;
-      if (disabled.has(c.id)) return false;
-      if (c?.disabledByDefault && !enabled.has(c.id)) return false;
-      return true;
-    });
-
-    // Prepend the update banner command whenever an update is downloaded and ready —
-    // regardless of whether it came from the background auto-check or a manual trigger.
-    if (appUpdaterStatusSnapshot.state === 'downloaded' && !isUpdateBannerDismissed()) {
-      const version = appUpdaterStatusSnapshot.latestVersion || autoUpdateDownloadedVersion || app.getVersion();
-      const tadaIconDataUrl = `data:image/svg+xml;base64,${Buffer.from(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="tdBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#86efac" stop-opacity="0.7"/><stop offset="1" stop-color="#16a34a" stop-opacity="0.9"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#tdBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.95)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M5.8 11.3 2 22l10.7-3.8"/><path d="M4 3h.01M22 8h.01M15 2h.01M22 20h.01M22 2l-2.5 2.5M8 8l-2.5 2.5"/><path d="m15 7-6.5 6.5"/><path d="m9 13 1.5 1.5"/></g></svg>',
-        'utf8'
-      ).toString('base64')}`;
-      filtered.unshift({
-        id: 'system-update-and-reopen',
-        title: 'Update and Restart',
-        subtitle: `Version ${version} downloaded and ready to install`,
-        keywords: ['update', 'reopen', 'restart', 'install', 'version', version],
-        category: 'system',
-        iconDataUrl: tadaIconDataUrl,
-        alwaysOnTop: true,
-      });
-    }
-
-    return filtered;
+    return buildLauncherCommandPayload(commands, s);
   });
 
   ipcMain.handle('dismiss-update-banner', () => {

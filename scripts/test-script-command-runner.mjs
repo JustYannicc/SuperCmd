@@ -95,6 +95,16 @@ async function withFakeGlobalTimers(timer, callback) {
   }
 }
 
+async function withFakeDateNow(now, callback) {
+  const previousDateNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await callback();
+  } finally {
+    Date.now = previousDateNow;
+  }
+}
+
 function scriptHeader({
   title = 'Test Command',
   mode = 'fullOutput',
@@ -163,6 +173,37 @@ console.log('ok');
         ],
       },
     ]);
+  });
+
+  await t.test('reuses cached discovery after TTL when script file signatures are unchanged', async (t) => {
+    const { module: runner, metrics, resetMetrics, scriptsDir } = await withScriptCommandRunner(t, {
+      'ttl-command.sh': `#!/bin/bash
+${scriptHeader({ title: 'TTL Command' })}
+echo "ok"
+`,
+    }, { instrumentFs: true });
+
+    const firstCommands = await withFakeDateNow(1_000_000, () => runner.discoverScriptCommands());
+    assert.equal(firstCommands.length, 1);
+    assert.equal(firstCommands[0].title, 'TTL Command');
+
+    resetMetrics();
+    const secondCommands = await withFakeDateNow(1_020_000, () => runner.discoverScriptCommands());
+    assert.equal(secondCommands, firstCommands);
+    assert.equal(metrics.readSyncCalls, 0);
+    assert.equal(metrics.readSyncBytes, 0);
+
+    const scriptPath = path.join(scriptsDir, 'ttl-command.sh');
+    fs.writeFileSync(scriptPath, `#!/bin/bash
+${scriptHeader({ title: 'TTL Command Updated' })}
+echo "updated"
+`, { mode: 0o755 });
+
+    resetMetrics();
+    const thirdCommands = await withFakeDateNow(1_040_000, () => runner.discoverScriptCommands());
+    assert.notEqual(thirdCommands, firstCommands);
+    assert.equal(thirdCommands[0].title, 'TTL Command Updated');
+    assert.ok(metrics.readSyncCalls > 0);
   });
 
   await t.test('executes shebang scripts without rereading the full script for interpreter lookup', async (t) => {

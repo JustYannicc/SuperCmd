@@ -61,7 +61,7 @@ const SCRIPT_COMMAND_HEADER_MAX_LINES = 120;
 const SCRIPT_COMMAND_HEADER_MAX_BYTES = 256 * 1024;
 const SCRIPT_COMMAND_HEADER_READ_CHUNK_BYTES = 8 * 1024;
 
-let cache: { fetchedAt: number; commands: ScriptCommandInfo[] } | null = null;
+let cache: { fetchedAt: number; commands: ScriptCommandInfo[]; signature: string } | null = null;
 const iconDataUrlCache = new Map<string, { signature: string; dataUrl?: string }>();
 
 function getSuperCmdScriptsDir(): string {
@@ -334,6 +334,23 @@ function discoverScriptFiles(rootDir: string): string[] {
   return out;
 }
 
+function getScriptFileSignature(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return `${filePath}:missing`;
+    return `${filePath}:${stat.size}:${stat.mtimeMs}:${stat.mode}`;
+  } catch {
+    return `${filePath}:missing`;
+  }
+}
+
+function getScriptDiscoverySignature(files: string[]): string {
+  return files
+    .map((filePath) => getScriptFileSignature(filePath))
+    .sort()
+    .join('\n');
+}
+
 function countLineBreaks(buffer: Buffer, length: number): number {
   let count = 0;
   for (let i = 0; i < length; i += 1) {
@@ -485,17 +502,21 @@ export function discoverScriptCommands(): ScriptCommandInfo[] {
     return cache.commands;
   }
 
+  const files = getScriptCommandDirectories().flatMap((dir) => discoverScriptFiles(dir));
+  const signature = getScriptDiscoverySignature(files);
+  if (cache && cache.signature === signature) {
+    cache = { ...cache, fetchedAt: now };
+    return cache.commands;
+  }
+
   const results: ScriptCommandInfo[] = [];
-  for (const dir of getScriptCommandDirectories()) {
-    const files = discoverScriptFiles(dir);
-    for (const filePath of files) {
-      const parsed = parseScriptCommandFile(filePath);
-      if (parsed) results.push(parsed);
-    }
+  for (const filePath of files) {
+    const parsed = parseScriptCommandFile(filePath);
+    if (parsed) results.push(parsed);
   }
 
   results.sort((a, b) => a.title.localeCompare(b.title));
-  cache = { fetchedAt: now, commands: results };
+  cache = { fetchedAt: now, commands: results, signature };
   return results;
 }
 

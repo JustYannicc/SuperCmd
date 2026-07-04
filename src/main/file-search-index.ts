@@ -69,7 +69,11 @@ const WATCH_EVENT_DEBOUNCE_MS = 500;
 const MAX_SPOTLIGHT_CANDIDATES = 10_000;
 const SPOTLIGHT_SEARCH_TIMEOUT_MS = 2_400;
 const INDEX_SCAN_YIELD_EVERY_DIRECTORIES = 80;
+const INDEX_SCAN_YIELD_EVERY_ENTRIES = 2_000;
 const INDEX_SCAN_PAUSE_MS = 6;
+const PATH_QUERY_MAX_UNFILTERED_SCAN_ENTRIES = 80_000;
+const PATH_QUERY_SELECTIVE_TERM_MIN_LENGTH = 3;
+const SPOTLIGHT_MIN_NAME_QUERY_LENGTH = 2;
 
 const execFileAsync = promisify(execFile);
 
@@ -158,6 +162,10 @@ type DirectoryQueueEntry = {
   displayPath: string;
   resolvedPath?: string;
 };
+
+async function yieldIndexScan(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, INDEX_SCAN_PAUSE_MS));
+}
 
 function normalizeSearchText(value: string): string {
   return String(value || '')
@@ -351,6 +359,7 @@ async function buildIndexSnapshot(homeDir: string): Promise<IndexSnapshot> {
   const visitedRealDirectories = new Set<string>();
   let queueIndex = 0;
   let scannedDirectories = 0;
+  let scannedDirentsSinceYield = 0;
 
   while (queueIndex < walkQueue.length) {
     if (snapshot.entries.length >= MAX_INDEX_ENTRIES) {
@@ -380,6 +389,12 @@ async function buildIndexSnapshot(homeDir: string): Promise<IndexSnapshot> {
     }
 
     for (const dirent of dirents) {
+      scannedDirentsSinceYield += 1;
+      if (scannedDirentsSinceYield >= INDEX_SCAN_YIELD_EVERY_ENTRIES) {
+        scannedDirentsSinceYield = 0;
+        await yieldIndexScan();
+      }
+
       const name = dirent.name;
       const absoluteScanPath = path.join(currentDir, name);
       const absoluteDisplayPath = path.join(currentDisplayPath, name);
@@ -452,7 +467,7 @@ async function buildIndexSnapshot(homeDir: string): Promise<IndexSnapshot> {
 
     scannedDirectories += 1;
     if (scannedDirectories % INDEX_SCAN_YIELD_EVERY_DIRECTORIES === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, INDEX_SCAN_PAUSE_MS));
+      await yieldIndexScan();
     }
   }
 
@@ -627,6 +642,14 @@ function getPathLikeBoundaryTerms(needle: string): string[] {
   return [...new Set(terms)];
 }
 
+function getSelectivePathLikeBoundaryTerms(...needles: string[]): string[] {
+  return [...new Set(
+    needles
+      .flatMap((needle) => getPathLikeBoundaryTerms(needle))
+      .filter((term) => term.length >= PATH_QUERY_SELECTIVE_TERM_MIN_LENGTH)
+  )];
+}
+
 function resolvePathLikeCandidateIds(
   snapshot: IndexSnapshot,
   rawNeedle: string,
@@ -640,16 +663,35 @@ function resolvePathLikeCandidateIds(
   }
   if (terms.length === 0) return null;
 
+  const indexedLists: number[][] = [];
   let smallestBucket: number[] | null = null;
   for (const term of terms) {
     const key = term.slice(0, Math.min(MAX_PREFIX_LENGTH, term.length));
     const matches = snapshot.prefixToEntryIds.get(key);
     if (!matches || matches.length === 0) return [];
+    indexedLists.push(matches);
     if (!smallestBucket || matches.length < smallestBucket.length) {
       smallestBucket = matches;
     }
   }
-  return smallestBucket ? [...smallestBucket] : null;
+  if (snapshot.entries.length <= PATH_QUERY_MAX_UNFILTERED_SCAN_ENTRIES) {
+    return smallestBucket ? [...smallestBucket] : [];
+  }
+  return intersectCandidates(indexedLists);
+}
+
+function shouldScanAllPathEntriesForQuery(snapshot: IndexSnapshot, rawNeedle: string, expandedNeedle: string): boolean {
+  if (snapshot.entries.length <= PATH_QUERY_MAX_UNFILTERED_SCAN_ENTRIES) return true;
+  return getSelectivePathLikeBoundaryTerms(rawNeedle, expandedNeedle).length > 0;
+}
+
+function shouldUseSpotlightFallback(spotlightTerm: string, pathLikeQuery: boolean): boolean {
+  const term = String(spotlightTerm || '').trim();
+  if (term.length < SPOTLIGHT_MIN_NAME_QUERY_LENGTH) return false;
+  if (pathLikeQuery) {
+    return /[a-z0-9]/i.test(term) && term.replace(/[^a-z0-9]/gi, '').length >= SPOTLIGHT_MIN_NAME_QUERY_LENGTH;
+  }
+  return tokenizeSearchText(term).some((token) => token.length >= SPOTLIGHT_MIN_NAME_QUERY_LENGTH);
 }
 
 function resolveHomeDir(inputHomeDir?: string): string {
@@ -999,8 +1041,15 @@ async function walkAddedDirectory(snapshot: IndexSnapshot, dirPath: string): Pro
     return;
   }
 
+  let scannedDirentsSinceYield = 0;
   for (const dirent of dirents) {
     if (snapshot.entries.length >= MAX_INDEX_ENTRIES) return;
+    scannedDirentsSinceYield += 1;
+    if (scannedDirentsSinceYield >= INDEX_SCAN_YIELD_EVERY_ENTRIES) {
+      scannedDirentsSinceYield = 0;
+      await yieldIndexScan();
+    }
+
     const name = dirent.name;
     const childPath = path.join(dirPath, name);
     if (!isWatchablePath(childPath)) continue;
@@ -1134,7 +1183,9 @@ export async function searchIndexedFiles(
           : rawNeedle;
         const candidateIds = resolvePathLikeCandidateIds(snapshot, rawNeedle, expandedNeedle, trimmedQuery);
         const candidateEntries = candidateIds === null
-          ? snapshot.entries
+          ? shouldScanAllPathEntriesForQuery(snapshot, rawNeedle, expandedNeedle)
+            ? snapshot.entries
+            : []
           : candidateIds.map((entryId) => snapshot.entries[entryId]).filter(Boolean);
 
         const scored: Array<{ entry: IndexedEntry; score: number }> = [];
@@ -1230,6 +1281,7 @@ export async function searchIndexedFiles(
 
   const spotlightTerm = String(spotlightSearchTerm || '').trim();
   if (!spotlightTerm) return indexedResults;
+  if (!shouldUseSpotlightFallback(spotlightTerm, pathLikeQuery)) return indexedResults;
 
   let spotlightStdout = '';
   try {
