@@ -398,18 +398,7 @@ async function* streamGeminiChat(
     useHttps: true,
   });
 
-  yield* parseSSE(response, (data) => {
-    try {
-      const parsed = JSON.parse(data);
-      const parts = parsed?.candidates?.[0]?.content?.parts;
-      if (Array.isArray(parts)) {
-        return parts.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('') || null;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
+  yield* streamGeminiSSE(response);
 }
 
 async function* streamOllamaChat(
@@ -608,7 +597,7 @@ async function* streamGemini(
 
   const response = await httpRequest({
     hostname: 'generativelanguage.googleapis.com',
-    path: `/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    path: `/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -616,21 +605,54 @@ async function* streamGemini(
     useHttps: true,
   });
 
-  const parsed = JSON.parse(await readResponseBody(response) || '{}');
-  const text = Array.isArray(parsed?.candidates?.[0]?.content?.parts)
-    ? parsed.candidates[0].content.parts
-        .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
-        .join('')
-    : '';
+  yield* streamGeminiSSE(response, { throwOnNoText: true });
+}
 
-  if (text) {
-    yield text;
-    return;
+function extractGeminiResponseText(parsed: any): string {
+  const parts = parsed?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+
+  return parts
+    .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+    .join('');
+}
+
+function extractGeminiNoTextReason(parsed: any): string {
+  return String(parsed?.candidates?.[0]?.finishReason || parsed?.promptFeedback?.blockReason || '').trim();
+}
+
+function createGeminiNoTextError(reason: string): Error {
+  if (reason) return new Error(`Gemini returned no text (${reason}).`);
+  return new Error('Gemini returned no text.');
+}
+
+async function* streamGeminiSSE(
+  response: http.IncomingMessage,
+  options: { throwOnNoText?: boolean } = {}
+): AsyncGenerator<string> {
+  let yieldedText = false;
+  let noTextReason = '';
+
+  yield* parseSSE(response, (data) => {
+    try {
+      const parsed = JSON.parse(data);
+      const text = extractGeminiResponseText(parsed);
+      if (text) {
+        yieldedText = true;
+        return text;
+      }
+
+      const reason = extractGeminiNoTextReason(parsed);
+      if (reason && !noTextReason) noTextReason = reason;
+      return null;
+    } catch {
+      return null;
+    }
+  });
+
+  if (options.throwOnNoText && !yieldedText) {
+    throw createGeminiNoTextError(noTextReason);
   }
-
-  const reason = String(parsed?.candidates?.[0]?.finishReason || parsed?.promptFeedback?.blockReason || '').trim();
-  if (reason) throw new Error(`Gemini returned no text (${reason}).`);
-  throw new Error('Gemini returned no text.');
 }
 
 // ─── Ollama ──────────────────────────────────────────────────────────
@@ -725,14 +747,6 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
     req.write(opts.body);
     req.end();
   });
-}
-
-async function readResponseBody(response: http.IncomingMessage): Promise<string> {
-  let body = '';
-  for await (const rawChunk of response) {
-    body += rawChunk.toString();
-  }
-  return body;
 }
 
 async function* parseSSE(
