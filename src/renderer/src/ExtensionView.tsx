@@ -2070,7 +2070,8 @@ const childProcessStub = {
     return childProcessStub._isGitInvocation(commandOrFile, execArgs)
       && childProcessStub._isBenignMissingPathError(message);
   },
-  exec: (...args: any[]) => {
+  exec: (...args: any[]) => childProcessStub._execWithRegistry(undefined, ...args),
+  _execWithRegistry: (registry: TimerRegistry | undefined, ...args: any[]) => {
     // Parse arguments: exec(command[, options][, callback])
     const command = args[0];
     let options: any = {};
@@ -2085,7 +2086,7 @@ const childProcessStub = {
       const { file, args: execArgs } = resolveExecShellLaunch(normalizedCommand, options?.shell);
       let stdout = '';
       let stderr = '';
-      const spawned = childProcessStub.spawn(file, execArgs, {
+      const spawned = childProcessStub._spawnWithRegistry(registry, file, execArgs, {
         shell: false,
         env: options?.env,
         cwd: options?.cwd,
@@ -2164,7 +2165,8 @@ const childProcessStub = {
     }
     return BufferPolyfill.from(result?.stdout || '');
   },
-  execFile: (...args: any[]) => {
+  execFile: (...args: any[]) => childProcessStub._execFileWithRegistry(undefined, ...args),
+  _execFileWithRegistry: (registry: TimerRegistry | undefined, ...args: any[]) => {
     // Parse arguments: execFile(file[, args][, options][, callback])
     const file = resolveExecutablePath(args[0]);
     let execArgs: string[] = [];
@@ -2187,7 +2189,7 @@ const childProcessStub = {
     if ((window as any).electron?.spawnProcess) {
       let stdout = '';
       let stderr = '';
-      const spawned = childProcessStub.spawn(file, execArgs, { shell: false, env: options?.env, cwd: options?.cwd });
+      const spawned = childProcessStub._spawnWithRegistry(registry, file, execArgs, { shell: false, env: options?.env, cwd: options?.cwd });
       cp.stdin = spawned.stdin;
       cp.stdout = spawned.stdout;
       cp.stderr = spawned.stderr;
@@ -2275,7 +2277,8 @@ const childProcessStub = {
     if (options?.encoding) return result.stdout || '';
     return BufferPolyfill.from(result.stdout || '');
   },
-  spawn: (...args: any[]) => {
+  spawn: (...args: any[]) => childProcessStub._spawnWithRegistry(undefined, ...args),
+  _spawnWithRegistry: (registry: TimerRegistry | undefined, ...args: any[]) => {
     const file = resolveExecutablePath(args[0]);
     const spawnArgs = Array.isArray(args[1]) ? args[1] : [];
     const options = (typeof args[2] === 'object' && args[2]) ? args[2] : {};
@@ -2286,7 +2289,18 @@ const childProcessStub = {
       // This is the generic solution for all extensions using child_process.spawn with progressive output.
       let pid: number | null = null;
       const cleanups: Array<() => void> = [];
-      const cleanup = () => { cleanups.forEach(fn => fn()); cleanups.length = 0; };
+      let untrackLifecycleChildProcess: (() => void) | null = null;
+      let killWhenPidArrives = false;
+      let disposedByLifecycle = false;
+      const cleanup = () => {
+        if (untrackLifecycleChildProcess) {
+          const untrack = untrackLifecycleChildProcess;
+          untrackLifecycleChildProcess = null;
+          untrack();
+        }
+        cleanups.forEach(fn => fn());
+        cleanups.length = 0;
+      };
       let didHandleTerminalEvent = false;
       type PendingSpawnEvent =
         | { kind: 'stdout'; p: number; data: any; seq?: number }
@@ -2333,6 +2347,7 @@ const childProcessStub = {
         cp.emit('exit', 1, null);
       };
       const queueOrProcess = (event: PendingSpawnEvent) => {
+        if (disposedByLifecycle) return;
         if (pid === null) {
           pendingEvents.push(event);
           return;
@@ -2386,8 +2401,19 @@ const childProcessStub = {
       cp.kill = (signal?: string | number) => {
         cp.killed = true;
         if (pid !== null) electron.killSpawnProcess?.(pid, signal);
+        else killWhenPidArrives = true;
         return pid !== null;
       };
+      if (registry) {
+        untrackLifecycleChildProcess = trackChildProcess(registry, {
+          cleanup,
+          kill: () => {
+            disposedByLifecycle = true;
+            cp.kill('SIGTERM');
+          },
+          getPid: () => pid,
+        });
+      }
 
       // Wire up stdin forwarding to the main process
       const stdinQueue: Array<{ data?: any; end?: boolean }> = [];
@@ -2428,10 +2454,15 @@ const childProcessStub = {
       }).then((result: { pid: number }) => {
         pid = result.pid;
         cp.pid = pid;
+        if (killWhenPidArrives) {
+          cp.kill('SIGTERM');
+          return;
+        }
         flushStdinQueue();
         flushPendingEvents();
       }).catch((err: any) => {
         cleanup();
+        if (disposedByLifecycle) return;
         const message = String(err?.message || err || 'spawn failed');
         cp.stderr.emit('data', BufferPolyfill.from(message));
         cp.emit('error', new Error(message));
@@ -2507,6 +2538,16 @@ const childProcessStub = {
   },
   fork: () => createStubChildProcess(),
 };
+
+function createExtensionChildProcessStub(registry: TimerRegistry | undefined): any {
+  if (!registry) return childProcessStub;
+  return {
+    ...childProcessStub,
+    exec: (...args: any[]) => childProcessStub._execWithRegistry(registry, ...args),
+    execFile: (...args: any[]) => childProcessStub._execFileWithRegistry(registry, ...args),
+    spawn: (...args: any[]) => childProcessStub._spawnWithRegistry(registry, ...args),
+  };
+}
 
 // ── timers stubs ────────────────────────────────────────────────
 const timersStub = {
@@ -3649,6 +3690,12 @@ interface TrackedEventListener {
   capture: boolean;
 }
 
+interface TrackedChildProcess {
+  cleanup: () => void;
+  kill: () => void;
+  getPid?: () => number | null;
+}
+
 /**
  * Per-ExtensionView registry of lifecycle handles created by the extension's
  * sandboxed timers and scoped event targets. Cleared on unmount so a buggy
@@ -3663,6 +3710,7 @@ export interface TimerRegistry {
   timeoutClearers: Map<ExtensionTimerHandle, (id: ExtensionTimerHandle) => void>;
   rafClearers: Map<ExtensionTimerHandle, (id: ExtensionTimerHandle) => void>;
   eventListeners: Set<TrackedEventListener>;
+  childProcesses: Set<TrackedChildProcess>;
 }
 
 export function createTimerRegistry(): TimerRegistry {
@@ -3674,10 +3722,19 @@ export function createTimerRegistry(): TimerRegistry {
     timeoutClearers: new Map(),
     rafClearers: new Map(),
     eventListeners: new Set(),
+    childProcesses: new Set(),
   };
 }
 
 export function clearTimerRegistry(registry: TimerRegistry): void {
+  Array.from(registry.childProcesses).forEach((entry) => {
+    try {
+      entry.cleanup();
+    } catch {}
+    try {
+      entry.kill();
+    } catch {}
+  });
   Array.from(registry.eventListeners).forEach((entry) => {
     try {
       entry.target.removeEventListener(entry.type, entry.listener, entry.options);
@@ -3702,6 +3759,18 @@ export function clearTimerRegistry(registry: TimerRegistry): void {
   registry.intervalClearers.clear();
   registry.timeoutClearers.clear();
   registry.rafClearers.clear();
+  registry.childProcesses.clear();
+}
+
+export function trackChildProcess(
+  registry: TimerRegistry | undefined,
+  childProcess: TrackedChildProcess
+): () => void {
+  if (!registry) return () => {};
+  registry.childProcesses.add(childProcess);
+  return () => {
+    registry.childProcesses.delete(childProcess);
+  };
 }
 
 function getEventListenerCapture(options?: boolean | AddEventListenerOptions): boolean {
@@ -4364,6 +4433,10 @@ function loadExtensionExport(
       // has Node enabled. Falls back to the stub if the module isn't a
       // recognised built-in, or if real require throws.
       if (shouldUseSuperCmdBuiltinFacade(name)) {
+        const normalizedBuiltinName = name.startsWith('node:') ? name.slice(5) : name;
+        if (normalizedBuiltinName === 'child_process') {
+          return createExtensionChildProcessStub(timerRegistry);
+        }
         const facade = nodeBuiltinStubs[name] || nodeBuiltinStubs[`node:${name}`];
         if (facade) return facade;
       }

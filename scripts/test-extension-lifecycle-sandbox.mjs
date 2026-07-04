@@ -175,6 +175,7 @@ function loadLifecycleHarness() {
       clearTimerRegistry,
       createExtensionLifecycleScope,
       createTimerRegistry,
+      trackChildProcess,
     };
   `;
   const transpiled = ts.transpileModule(source, {
@@ -198,6 +199,7 @@ const {
   clearTimerRegistry,
   createExtensionLifecycleScope,
   createTimerRegistry,
+  trackChildProcess,
 } = loadLifecycleHarness();
 
 const extensionCode = `
@@ -385,6 +387,56 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     assert.equal(afterClear.total, 0);
 
     console.log('extension lifecycle cleanup after fix:', { beforeClear, registryBeforeClear, afterClear });
+  });
+
+  await t.test('cleans active extension child_process handles on unmount', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    let activeSpawnIpcListeners = 1;
+    let cleanupCalls = 0;
+    let killCalls = 0;
+
+    trackChildProcess(registry, {
+      cleanup: () => {
+        cleanupCalls += 1;
+        activeSpawnIpcListeners = 0;
+      },
+      kill: () => {
+        killCalls += 1;
+      },
+      getPid: () => 4242,
+    });
+
+    const beforeClear = {
+      activeSpawnIpcListeners,
+      trackedChildProcesses: registry.childProcesses.size,
+      cleanupCalls,
+      killCalls,
+    };
+
+    clearTimerRegistry(registry);
+
+    const afterClear = {
+      activeSpawnIpcListeners,
+      trackedChildProcesses: registry.childProcesses.size,
+      cleanupCalls,
+      killCalls,
+    };
+
+    assert.deepEqual(beforeClear, {
+      activeSpawnIpcListeners: 1,
+      trackedChildProcesses: 1,
+      cleanupCalls: 0,
+      killCalls: 0,
+    });
+    assert.deepEqual(afterClear, {
+      activeSpawnIpcListeners: 0,
+      trackedChildProcesses: 0,
+      cleanupCalls: 1,
+      killCalls: 1,
+    });
+
+    console.log('extension child_process lifecycle cleanup after fix:', { beforeClear, afterClear });
   });
 
   await t.test('prunes fired scoped one-shot timers and rafs', () => {
