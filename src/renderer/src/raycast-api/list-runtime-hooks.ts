@@ -4,7 +4,7 @@
  * Extracted list registry/grouping helpers to keep List container module small.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ItemRegistration, ListRegistryAPI } from './list-runtime-types';
 
 export const LIST_ROW_HEIGHT = 36;
@@ -133,11 +133,27 @@ export function useListRegistry() {
   const visibleSignatureRef = useRef(new Map<string, string>());
   const [registryVersion, setRegistryVersion] = useState(0);
   const pendingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingRef.current = false;
+      registryRef.current.clear();
+      visibleSignatureRef.current.clear();
+    };
+  }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
+    if (!mountedRef.current) return;
     if (pendingRef.current) return;
     pendingRef.current = true;
     queueMicrotask(() => {
+      if (!mountedRef.current) {
+        pendingRef.current = false;
+        return;
+      }
       pendingRef.current = false;
       setRegistryVersion((value) => value + 1);
     });
@@ -145,6 +161,7 @@ export function useListRegistry() {
 
   const registryAPI = useMemo<ListRegistryAPI>(() => ({
     set(id, data) {
+      if (!mountedRef.current) return;
       const existing = registryRef.current.get(id);
       if (existing) {
         const visibleInputsChanged = listItemVisibleInputsChanged(existing, data);
@@ -167,6 +184,7 @@ export function useListRegistry() {
       if (!registryRef.current.has(id)) return;
       registryRef.current.delete(id);
       visibleSignatureRef.current.delete(id);
+      if (!mountedRef.current) return;
       scheduleRegistryUpdate();
     },
   }), [scheduleRegistryUpdate]);

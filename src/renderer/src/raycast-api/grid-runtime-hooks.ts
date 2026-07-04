@@ -4,7 +4,7 @@
  * Extracted registry/grouping logic for the grid runtime container.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GridItemRegistration, GridRegistryAPI } from './grid-runtime-items';
 
 export interface GridItemGroup {
@@ -163,11 +163,27 @@ export function useGridRegistry() {
   const visibleSignatureRef = useRef(new Map<string, string>());
   const [registryVersion, setRegistryVersion] = useState(0);
   const pendingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingRef.current = false;
+      registryRef.current.clear();
+      visibleSignatureRef.current.clear();
+    };
+  }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
+    if (!mountedRef.current) return;
     if (pendingRef.current) return;
     pendingRef.current = true;
     queueMicrotask(() => {
+      if (!mountedRef.current) {
+        pendingRef.current = false;
+        return;
+      }
       pendingRef.current = false;
       setRegistryVersion((value) => value + 1);
     });
@@ -176,6 +192,7 @@ export function useGridRegistry() {
   const registryAPI = useMemo<GridRegistryAPI>(
     () => ({
       set(id, data) {
+        if (!mountedRef.current) return;
         const existing = registryRef.current.get(id);
         if (existing) {
           const visibleInputsChanged = gridItemVisibleInputsChanged(existing, data);
@@ -198,6 +215,7 @@ export function useGridRegistry() {
         if (!registryRef.current.has(id)) return;
         registryRef.current.delete(id);
         visibleSignatureRef.current.delete(id);
+        if (!mountedRef.current) return;
         scheduleRegistryUpdate();
       },
     }),
