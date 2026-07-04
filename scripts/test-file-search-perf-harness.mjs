@@ -7,6 +7,7 @@ import os from 'node:os';
 import { runFileSearchPerfHarness } from './file-search-perf-harness.mjs';
 
 const IS_PERF_CI = process.env.SUPERCMD_PERF_CI === '1';
+const IS_PERF_REPORT = IS_PERF_CI || process.env.SUPERCMD_PERF_REPORT === '1';
 
 async function pathExists(filePath) {
   try {
@@ -15,6 +16,36 @@ async function pathExists(filePath) {
   } catch {
     return false;
   }
+}
+
+function pickBudgetEvidence(summary) {
+  return {
+    config: summary.config,
+    fixture: {
+      initialEntryCount: summary.fixture.initialEntryCount,
+      updateCount: summary.fixture.updateCount,
+      deleteCount: summary.fixture.deleteCount,
+    },
+    metrics: {
+      initialIndexMs: summary.metrics.initialIndexMs,
+      initialIndexEventLoopDelayP95Ms: summary.metrics.initialIndexEventLoopDelay.p95Ms,
+      normalQueryP95Ms: summary.metrics.normalQueries.p95Ms,
+      pathQueryP95Ms: summary.metrics.pathLikeQueries.p95Ms,
+      eventLoopLagP95Ms: summary.metrics.eventLoopLag.p95Ms,
+      eventLoopLagMaxMs: summary.metrics.eventLoopLag.maxMs,
+      watchUpdateBatchMs: summary.metrics.watchUpdateBatchMs,
+      deleteBatchMs: summary.metrics.deleteBatchMs,
+      postUpdateQueryMs: summary.metrics.postUpdateQueryMs,
+      postDeleteQueryMs: summary.metrics.postDeleteQueryMs,
+    },
+    thresholds: summary.thresholds,
+    cleanup: summary.cleanup,
+  };
+}
+
+function printFileSearchPerfReport(summary) {
+  if (!IS_PERF_REPORT) return;
+  console.log(JSON.stringify({ fileSearchPerf: pickBudgetEvidence(summary) }, null, 2));
 }
 
 test('file search perf harness covers deterministic temp-home scenarios', async () => {
@@ -83,4 +114,6 @@ test('file search perf CI covers large path-query p95 and event-loop lag budgets
   assert.ok(summary.metrics.eventLoopLag.p95Ms <= summary.thresholds.applied.eventLoopLagP95Ms);
   assert.equal(summary.cleanup.completed, true);
   assert.equal(await pathExists(summary.fixture.tempRoot), false, 'large temp fixture should be cleaned up');
+
+  printFileSearchPerfReport(summary);
 });
