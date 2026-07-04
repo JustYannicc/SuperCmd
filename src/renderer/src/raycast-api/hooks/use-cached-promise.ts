@@ -47,13 +47,8 @@ export function useCachedPromise<T>(
   const [isPaginated, setIsPaginated] = useState(false);
 
   const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const abortableRefRef = useRef<React.MutableRefObject<AbortController | null | undefined> | undefined>(undefined);
   const fnRef = useRef(fn);
   const argsRef = useRef(args || []);
   const optionsRef = useRef(options);
@@ -63,30 +58,68 @@ export function useCachedPromise<T>(
   optionsRef.current = options;
   runtimeCtxRef.current = snapshotExtensionContext();
 
+  const clearAbortController = useCallback((controller: AbortController) => {
+    const abortableRef = abortableRefRef.current;
+    if (abortableRef?.current === controller) {
+      abortableRef.current = null;
+    }
+    if (abortControllerRef.current === controller) {
+      abortControllerRef.current = null;
+      if (abortableRefRef.current === abortableRef) {
+        abortableRefRef.current = undefined;
+      }
+    }
+  }, []);
+
+  const abortCurrentRun = useCallback(() => {
+    const controller = abortControllerRef.current;
+    if (!controller) return;
+    controller.abort();
+    clearAbortController(controller);
+  }, [clearAbortController]);
+
+  const prepareAbortController = useCallback((abortable?: React.MutableRefObject<AbortController | null | undefined>) => {
+    abortCurrentRun();
+    if (!abortable) return null;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    abortableRefRef.current = abortable;
+    abortable.current = controller;
+    return controller;
+  }, [abortCurrentRun]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortCurrentRun();
+    };
+  }, [abortCurrentRun]);
+
   const fetchPage = useCallback(async (pageNum: number, currentCursor?: string) => {
     const opts = optionsRef.current;
     if (opts?.execute === false || !mountedRef.current) return;
 
+    const runController = prepareAbortController(opts?.abortable);
+    const runCtx = runtimeCtxRef.current;
+    const isCurrentRun = () => !runController || abortControllerRef.current === runController;
+
     setIsLoading(true);
     setError(undefined);
 
-    if (opts?.abortable) {
-      const controller = new AbortController();
-      opts.abortable.current = controller;
-    }
-
-    withExtensionContext(runtimeCtxRef.current, () => {
+    withExtensionContext(runCtx, () => {
       opts?.onWillExecute?.(argsRef.current);
     });
 
     try {
-      const outerResult = withExtensionContext(runtimeCtxRef.current, () => fnRef.current(...argsRef.current));
+      const outerResult = withExtensionContext(runCtx, () => fnRef.current(...argsRef.current));
 
       if (typeof outerResult === 'function') {
         setIsPaginated(true);
         const paginationOptions = { page: pageNum, cursor: currentCursor, lastItem: undefined };
-        const innerResult = await withExtensionContext(runtimeCtxRef.current, () => outerResult(paginationOptions));
-        if (!mountedRef.current) return;
+        const innerResult = await withExtensionContext(runCtx, () => outerResult(paginationOptions));
+        if (!mountedRef.current || !isCurrentRun()) return;
 
         if (innerResult && typeof innerResult === 'object' && 'data' in innerResult) {
           const { data: pageData, hasMore: more, cursor: nextCursor } = innerResult;
@@ -96,14 +129,14 @@ export function useCachedPromise<T>(
           if (pageNum === 0) {
             setAccumulatedData(Array.isArray(pageData) ? pageData : []);
           } else {
-            setAccumulatedData((prev) => {
+            setAccumulatedData((prev: any) => {
               const prevArr = Array.isArray(prev) ? prev : [];
               const newArr = Array.isArray(pageData) ? pageData : [];
               return [...prevArr, ...newArr];
             });
           }
 
-          withExtensionContext(runtimeCtxRef.current, () => {
+          withExtensionContext(runCtx, () => {
             opts?.onData?.((innerResult as any).data);
           });
         } else {
@@ -112,7 +145,7 @@ export function useCachedPromise<T>(
         }
       } else {
         const result = await outerResult;
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || !isCurrentRun()) return;
 
         if (result && typeof result === 'object' && 'data' in result && 'hasMore' in result) {
           setIsPaginated(true);
@@ -123,35 +156,40 @@ export function useCachedPromise<T>(
           if (pageNum === 0) {
             setAccumulatedData(Array.isArray(pageData) ? pageData : []);
           } else {
-            setAccumulatedData((prev) => {
+            setAccumulatedData((prev: any) => {
               const prevArr = Array.isArray(prev) ? prev : [];
               const newArr = Array.isArray(pageData) ? pageData : [];
               return [...prevArr, ...newArr];
             });
           }
 
-          withExtensionContext(runtimeCtxRef.current, () => {
+          withExtensionContext(runCtx, () => {
             opts?.onData?.(pageData as T);
           });
         } else {
           setAccumulatedData(result as any);
           setHasMore(false);
-          withExtensionContext(runtimeCtxRef.current, () => {
+          withExtensionContext(runCtx, () => {
             opts?.onData?.(result as T);
           });
         }
       }
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || !isCurrentRun()) return;
       const e = err instanceof Error ? err : new Error(String(err));
       setError(e);
-      withExtensionContext(runtimeCtxRef.current, () => {
+      withExtensionContext(runCtx, () => {
         opts?.onError?.(e);
       });
     } finally {
-      if (mountedRef.current) setIsLoading(false);
+      if (mountedRef.current && isCurrentRun()) {
+        setIsLoading(false);
+      }
+      if (runController) {
+        clearAbortController(runController);
+      }
     }
-  }, []);
+  }, [prepareAbortController, clearAbortController]);
 
   const argsKey = JSON.stringify(args || []);
   useEffect(() => {
