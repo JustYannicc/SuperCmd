@@ -111,6 +111,7 @@ import {
   MAX_INLINE_QUICK_LINK_ARGUMENTS,
   getQuickLinkIdFromCommandId,
 } from './utils/launcher-misc';
+import { enqueueBackgroundNoViewRun } from './utils/background-no-view-runs';
 import {
   WEB_SEARCH_ROOT_BANG_PREFIX,
   buildBangSearchUrl,
@@ -310,8 +311,9 @@ const App: React.FC = () => {
     launchType: 'userInitiated' | 'background' = 'userInitiated',
     reportStatus = false
   ) => {
-    const runId = `${bundle.extensionName || bundle.extName}/${bundle.commandName || bundle.cmdName}/${Date.now()}`;
-    setBackgroundNoViewRuns((prev) => [...prev, { runId, bundle, launchType, reportStatus }]);
+    setBackgroundNoViewRuns((prev) =>
+      enqueueBackgroundNoViewRun(prev, bundle, launchType, reportStatus).runs
+    );
   }, [setBackgroundNoViewRuns]);
 
   const onExitAiMode = useCallback(() => {
