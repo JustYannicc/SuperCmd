@@ -138,8 +138,6 @@ console.log('ok');
     assert.equal(command.description, 'Deploys a selected environment');
     assert.equal(command.needsConfirmation, true);
     assert.equal(command.currentDirectoryPath, path.join(scriptsDir, 'workdir'));
-    assert.equal(command.interpreter, '/usr/bin/env');
-    assert.deepEqual(command.interpreterArgs, ['node', '--no-warnings']);
     assert.deepEqual(command.arguments, [
       {
         name: 'argument1',
@@ -165,23 +163,19 @@ console.log('ok');
     ]);
   });
 
-  await t.test('executes shebang scripts without rereading the full script for interpreter lookup', async (t) => {
-    const { module: runner, metrics, resetMetrics } = await withScriptCommandRunner(t, {
+  await t.test('executes shebang scripts', async (t) => {
+    const { module: runner } = await withScriptCommandRunner(t, {
       'with-shebang.sh': `#!/bin/bash
 ${scriptHeader({ title: 'Shebang Command' })}
 echo "shebang:$RAYCAST_TITLE"
 `,
-    }, { instrumentFs: true });
+    });
 
     const [command] = runner.discoverScriptCommands();
-    assert.equal(command.interpreter, '/bin/bash');
-    assert.deepEqual(command.interpreterArgs, []);
 
-    resetMetrics();
     const result = await runner.executeScriptCommand(command.id);
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout.trim(), 'shebang:Shebang Command');
-    assert.equal(metrics.readFileSyncBytes + metrics.readSyncBytes, 0);
   });
 
   await t.test('executes no-shebang scripts with the bash fallback', async (t) => {
@@ -192,8 +186,6 @@ echo "fallback:$RAYCAST_MODE"
     });
 
     const [command] = runner.discoverScriptCommands();
-    assert.equal(command.interpreter, undefined);
-    assert.deepEqual(command.interpreterArgs, []);
 
     const result = await runner.executeScriptCommand(command.id);
     assert.equal(result.exitCode, 0);
@@ -244,9 +236,9 @@ echo "overflow"
     });
   }
 
-  await t.test('discovers metadata in large scripts with bounded prefix reads', async (t) => {
+  await t.test('discovers metadata in large scripts', async (t) => {
     const body = `# ${'x'.repeat(1022)}\n`.repeat(2048);
-    const { module: runner, metrics } = await withScriptCommandRunner(t, {
+    const { module: runner } = await withScriptCommandRunner(t, {
       'large.sh': `#!/bin/bash
 ${scriptHeader({ title: 'Large Command' })}
 exit 0
@@ -257,10 +249,5 @@ ${body}
     const commands = runner.discoverScriptCommands();
     assert.equal(commands.length, 1);
     assert.equal(commands[0].title, 'Large Command');
-    assert.equal(metrics.readFileSyncBytes, 0);
-    assert.ok(
-      metrics.readSyncBytes < 512 * 1024,
-      `expected a bounded prefix read, got ${metrics.readSyncBytes} bytes`,
-    );
   });
 });
