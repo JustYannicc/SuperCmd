@@ -131,18 +131,26 @@ export const __testIconRuntimeRender = {
   FILE_ICON_CACHE_MAX_ENTRIES,
   FileIcon,
   fileIconCache,
+  fileIconKindCache,
   inFlightFileIconRequests,
+  inFlightFileIconKindRequests,
   loadFileIconDataUrl,
+  loadFileIconKind,
   readCachedFileIcon,
   renderIcon,
   clearFileIconCaches: () => {
     fileIconCache.clear();
+    fileIconKindCache.clear();
     inFlightFileIconRequests.clear();
+    inFlightFileIconKindRequests.clear();
   },
   cacheStats: () => ({
     cacheSize: fileIconCache.size,
+    kindCacheSize: fileIconKindCache.size,
     inFlightSize: inFlightFileIconRequests.size,
+    kindInFlightSize: inFlightFileIconKindRequests.size,
     keys: Array.from(fileIconCache.keys()),
+    kindKeys: Array.from(fileIconKindCache.keys()),
     limit: FILE_ICON_CACHE_MAX_ENTRIES,
   }),
 };
@@ -320,5 +328,43 @@ test('file icon runtime cache', async (t) => {
     assert.equal(calls, 0);
     assert.equal(remoteIcon?.props?.src, 'https://example.com/icon.png');
     assert.equal(remoteIcon?.props?.className, 'w-5 h-5');
+  });
+
+  await t.test('does not call statSync while rendering FileIcon fallback glyphs', async () => {
+    const filePath = '/tmp/supercmd-folder';
+    let syncStatCalls = 0;
+    let asyncStatCalls = 0;
+
+    const runtime = await importIconRuntimeHarness({
+      async getFileIconDataUrl() {
+        return null;
+      },
+      statSync() {
+        syncStatCalls += 1;
+        return { exists: true, isDirectory: true };
+      },
+      async stat(requestedPath) {
+        asyncStatCalls += 1;
+        assert.equal(requestedPath, filePath);
+        return { exists: true, isDirectory: true, isFile: false, size: 0 };
+      },
+    });
+
+    const initial = runtime.FileIcon({ filePath, className: 'w-4 h-4' });
+
+    assert.equal(syncStatCalls, 0, 'render should not use the synchronous stat bridge');
+    assert.equal(asyncStatCalls, 1);
+    assert.equal(initial?.props?.children, '📄');
+    assert.equal(runtime.cacheStats().kindInFlightSize, 1);
+
+    const pending = Array.from(runtime.inFlightFileIconKindRequests.values())[0];
+    assert.equal(await pending, 'directory');
+    assert.equal(syncStatCalls, 0);
+    assert.equal(runtime.cacheStats().kindCacheSize, 1);
+    assert.equal(runtime.cacheStats().kindInFlightSize, 0);
+
+    const afterCache = runtime.FileIcon({ filePath, className: 'w-4 h-4' });
+    assert.equal(afterCache?.props?.children, '📁');
+    assert.equal(syncStatCalls, 0);
   });
 });

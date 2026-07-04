@@ -580,6 +580,8 @@ const electronAPI = {
     ipcRenderer.sendSync('file-exists-sync', filePath),
   statSync: (filePath: string): { exists: boolean; isDirectory: boolean; isFile: boolean; size: number } =>
     ipcRenderer.sendSync('stat-sync', filePath),
+  stat: (filePath: string): Promise<{ exists: boolean; isDirectory: boolean; isFile: boolean; size: number }> =>
+    ipcRenderer.invoke('stat', filePath),
 
   // Write file
   writeFile: (filePath: string, content: string): Promise<void> =>
