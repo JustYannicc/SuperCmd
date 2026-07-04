@@ -3851,30 +3851,59 @@ export function createExtensionLifecycleScope(
     }
     nativeClearInterval(id);
   };
+  const untrackTimeout = (id?: ExtensionTimerHandle) => {
+    if (id != null) {
+      registry?.timeouts.delete(id);
+      registry?.timeoutClearers.delete(id);
+    }
+  };
+  const runTimeoutHandler = (handler: TimerHandler, thisArg: any, callbackArgs: any[]) => {
+    if (typeof handler === 'function') {
+      return handler.apply(thisArg, callbackArgs);
+    }
+    const source = String(handler);
+    if (typeof hostWindow.eval === 'function') {
+      return hostWindow.eval(source);
+    }
+    return Function(source).call(thisArg);
+  };
   const trackTimeout = (handler: TimerHandler, timeout?: number, ...args: any[]) => {
-    const id = nativeSetTimeout(handler as any, timeout as any, ...args);
+    let id: ExtensionTimerHandle | undefined;
+    const wrappedHandler = function (this: any, ...callbackArgs: any[]) {
+      untrackTimeout(id);
+      return runTimeoutHandler(handler, this, callbackArgs);
+    };
+    id = nativeSetTimeout(wrappedHandler as any, timeout as any, ...args);
     registry?.timeouts.add(id);
     registry?.timeoutClearers.set(id, nativeClearTimeout);
     return id;
   };
   const trackClearTimeout = (id?: ExtensionTimerHandle) => {
-    if (id != null) {
-      registry?.timeouts.delete(id);
-      registry?.timeoutClearers.delete(id);
-    }
+    untrackTimeout(id);
     nativeClearTimeout(id);
   };
+  const untrackRaf = (id?: ExtensionTimerHandle) => {
+    if (id != null) {
+      registry?.rafs.delete(id);
+      registry?.rafClearers.delete(id);
+    }
+  };
   const trackRaf = (callback: FrameRequestCallback) => {
-    const id = nativeRequestAnimationFrame(callback);
+    if (typeof callback !== 'function') {
+      return nativeRequestAnimationFrame(callback as any);
+    }
+    let id: ExtensionTimerHandle | undefined;
+    const wrappedCallback = function (this: any, timestamp: DOMHighResTimeStamp) {
+      untrackRaf(id);
+      callback.call(this, timestamp);
+    };
+    id = nativeRequestAnimationFrame(wrappedCallback);
     registry?.rafs.add(id);
     registry?.rafClearers.set(id, nativeCancelAnimationFrame);
     return id;
   };
   const trackCancelRaf = (id?: ExtensionTimerHandle) => {
-    if (id != null) {
-      registry?.rafs.delete(id);
-      registry?.rafClearers.delete(id);
-    }
+    untrackRaf(id);
     nativeCancelAnimationFrame(id);
   };
   const trackSetImmediate = (callback: Function, ...args: any[]) =>

@@ -55,8 +55,8 @@ function createFakeEventTarget(label) {
 function createHostWindow() {
   let nextTimerId = 1;
   const intervals = new Set();
-  const timeouts = new Set();
-  const rafs = new Set();
+  const timeouts = new Map();
+  const rafs = new Map();
   const windowTarget = createFakeEventTarget('window');
   const documentTarget = createFakeEventTarget('document');
 
@@ -73,17 +73,17 @@ function createHostWindow() {
     clearInterval(id) {
       intervals.delete(id);
     },
-    setTimeout() {
+    setTimeout(handler, _timeout, ...args) {
       const id = nextTimerId++;
-      timeouts.add(id);
+      timeouts.set(id, { handler, args });
       return id;
     },
     clearTimeout(id) {
       timeouts.delete(id);
     },
-    requestAnimationFrame() {
+    requestAnimationFrame(callback) {
       const id = nextTimerId++;
-      rafs.add(id);
+      rafs.set(id, { callback });
       return id;
     },
     cancelAnimationFrame(id) {
@@ -125,6 +125,24 @@ function createHostWindow() {
       rafs.clear();
       windowTarget.listeners.clear();
       documentTarget.listeners.clear();
+    },
+    flushTimeouts() {
+      const pending = Array.from(timeouts.entries());
+      for (const [id, { handler, args }] of pending) {
+        if (!timeouts.has(id)) continue;
+        timeouts.delete(id);
+        if (typeof handler === 'function') {
+          handler.call(hostWindow, ...args);
+        }
+      }
+    },
+    flushRafs(timestamp = 16.7) {
+      const pending = Array.from(rafs.entries());
+      for (const [id, { callback }] of pending) {
+        if (!rafs.has(id)) continue;
+        rafs.delete(id);
+        callback.call(hostWindow, timestamp);
+      }
     },
   };
 }
@@ -367,6 +385,176 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     assert.equal(afterClear.total, 0);
 
     console.log('extension lifecycle cleanup after fix:', { beforeClear, registryBeforeClear, afterClear });
+  });
+
+  await t.test('prunes fired scoped one-shot timers and rafs', () => {
+    const oneShotCount = 1000;
+
+    host.reset();
+    const staleTimeoutRegistry = createTimerRegistry();
+    const staleTimeoutApi = createBareTimerApi(staleTimeoutRegistry);
+    for (let i = 0; i < oneShotCount; i += 1) {
+      staleTimeoutApi.setTimeout(() => {}, 0);
+    }
+    host.flushTimeouts();
+    const staleTimeoutEntries = staleTimeoutRegistry.timeouts.size;
+    clearTimerRegistry(staleTimeoutRegistry);
+
+    host.reset();
+    const staleRafRegistry = createTimerRegistry();
+    const staleRafApi = createBareTimerApi(staleRafRegistry);
+    for (let i = 0; i < oneShotCount; i += 1) {
+      staleRafApi.requestAnimationFrame(() => {});
+    }
+    host.flushRafs();
+    const staleRafEntries = staleRafRegistry.rafs.size;
+    clearTimerRegistry(staleRafRegistry);
+
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+    const intervalId = lifecycleScope.setInterval(() => {}, 60000);
+    let timeoutCalls = 0;
+    let timeoutThis = null;
+    let timeoutArgs = null;
+    for (let i = 0; i < oneShotCount; i += 1) {
+      lifecycleScope.setTimeout(function (...args) {
+        timeoutCalls += 1;
+        if (timeoutCalls === 1) {
+          timeoutThis = this;
+          timeoutArgs = args;
+        }
+      }, 0, i, 'timeout-arg');
+    }
+
+    assert.equal(registry.intervals.size, 1);
+    assert.equal(registry.timeouts.size, oneShotCount);
+    assert.equal(registry.timeoutClearers.size, oneShotCount);
+
+    host.flushTimeouts();
+
+    assert.equal(timeoutCalls, oneShotCount);
+    assert.equal(timeoutThis, host.hostWindow);
+    assert.deepEqual(timeoutArgs, [0, 'timeout-arg']);
+    assert.equal(registry.timeouts.size, 0);
+    assert.equal(registry.timeoutClearers.size, 0);
+    assert.equal(registry.intervals.size, 1, 'interval remains tracked after one-shot timeouts fire');
+    assert.equal(registry.intervalClearers.size, 1);
+
+    let rafCalls = 0;
+    let rafThis = null;
+    let rafTimestamp = null;
+    for (let i = 0; i < oneShotCount; i += 1) {
+      lifecycleScope.requestAnimationFrame(function (timestamp) {
+        rafCalls += 1;
+        if (rafCalls === 1) {
+          rafThis = this;
+          rafTimestamp = timestamp;
+        }
+      });
+    }
+
+    assert.equal(registry.rafs.size, oneShotCount);
+    assert.equal(registry.rafClearers.size, oneShotCount);
+
+    host.flushRafs(123.4);
+
+    assert.equal(rafCalls, oneShotCount);
+    assert.equal(rafThis, host.hostWindow);
+    assert.equal(rafTimestamp, 123.4);
+    assert.equal(registry.rafs.size, 0);
+    assert.equal(registry.rafClearers.size, 0);
+    assert.equal(registry.intervals.size, 1, 'interval remains tracked after one-shot rafs fire');
+    assert.equal(registry.intervalClearers.size, 1);
+
+    lifecycleScope.clearInterval(intervalId);
+    assert.equal(registry.intervals.size, 0);
+    assert.equal(registry.intervalClearers.size, 0);
+
+    console.log(`${oneShotCount} fired timeouts: before stale registry entries=${staleTimeoutEntries}, after=${registry.timeouts.size}`);
+    console.log(`${oneShotCount} fired RAFs: before stale registry entries=${staleRafEntries}, after=${registry.rafs.size}`);
+  });
+
+  await t.test('cleared one-shot handles do not fire or stay registered', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+    let timeoutCalls = 0;
+    let rafCalls = 0;
+
+    const timeoutId = lifecycleScope.setTimeout(() => {
+      timeoutCalls += 1;
+    }, 0);
+    lifecycleScope.clearTimeout(timeoutId);
+    host.flushTimeouts();
+
+    const rafId = lifecycleScope.requestAnimationFrame(() => {
+      rafCalls += 1;
+    });
+    lifecycleScope.cancelAnimationFrame(rafId);
+    host.flushRafs();
+
+    assert.equal(timeoutCalls, 0);
+    assert.equal(rafCalls, 0);
+    assert.equal(registry.timeouts.size, 0);
+    assert.equal(registry.timeoutClearers.size, 0);
+    assert.equal(registry.rafs.size, 0);
+    assert.equal(registry.rafClearers.size, 0);
+  });
+
+  await t.test('clears pending scoped one-shots on unmount', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+    let callbackCalls = 0;
+
+    lifecycleScope.setTimeout(() => {
+      callbackCalls += 1;
+    }, 0);
+    lifecycleScope.requestAnimationFrame(() => {
+      callbackCalls += 1;
+    });
+
+    assert.equal(registry.timeouts.size, 1);
+    assert.equal(registry.rafs.size, 1);
+    assert.equal(host.snapshot().timeouts, 1);
+    assert.equal(host.snapshot().rafs, 1);
+
+    clearTimerRegistry(registry);
+    host.flushTimeouts();
+    host.flushRafs();
+
+    assert.equal(callbackCalls, 0);
+    assert.equal(registry.timeouts.size, 0);
+    assert.equal(registry.timeoutClearers.size, 0);
+    assert.equal(registry.rafs.size, 0);
+    assert.equal(registry.rafClearers.size, 0);
+    assert.equal(host.snapshot().timeouts, 0);
+    assert.equal(host.snapshot().rafs, 0);
+  });
+
+  await t.test('prunes one-shot handles when callbacks throw', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+
+    lifecycleScope.setTimeout(() => {
+      throw new Error('timeout boom');
+    }, 0);
+
+    assert.equal(registry.timeouts.size, 1);
+    assert.throws(() => host.flushTimeouts(), /timeout boom/);
+    assert.equal(registry.timeouts.size, 0);
+    assert.equal(registry.timeoutClearers.size, 0);
+
+    lifecycleScope.requestAnimationFrame(() => {
+      throw new Error('raf boom');
+    });
+
+    assert.equal(registry.rafs.size, 1);
+    assert.throws(() => host.flushRafs(), /raf boom/);
+    assert.equal(registry.rafs.size, 0);
+    assert.equal(registry.rafClearers.size, 0);
   });
 
   await t.test('cleans prior scoped handles before re-evaluation', () => {
