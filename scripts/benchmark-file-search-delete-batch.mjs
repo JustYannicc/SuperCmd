@@ -67,7 +67,7 @@ function addEntry(api, snapshot, filePath, isDirectory = false) {
   });
 }
 
-function buildScenario(api) {
+function buildDirectoryScenario(api) {
   const homeDir = '/tmp/supercmd-file-index-bench';
   const snapshot = api.makeSnapshot();
   const deletedRoot = path.join(homeDir, 'deleted-root');
@@ -100,31 +100,71 @@ function buildScenario(api) {
     deletePaths,
     deletedRoot,
     expectedDeletedCount: 1 + (40 * 100) + 40 + (40 * 100),
+    name: 'directory-tree-batch',
     snapshot,
     survivorPath: path.join(survivorRoot, 'dir-119', 'survivor-119-499.txt'),
   };
 }
 
-const api = loadFileSearchIndexInternals();
-const scenario = buildScenario(api);
-const started = performance.now();
-api.tombstoneDeletedPaths(scenario.snapshot, scenario.deletePaths);
-const elapsedMs = performance.now() - started;
+function buildDirectFileScenario(api) {
+  const homeDir = '/tmp/supercmd-file-index-bench-direct';
+  const snapshot = api.makeSnapshot();
+  const rootDir = path.join(homeDir, 'projects');
+  const deletePaths = [];
 
-let deletedCount = 0;
-for (const entry of scenario.snapshot.entries) {
-  if (entry.deleted) deletedCount += 1;
+  addEntry(api, snapshot, rootDir, true);
+  for (let dir = 0; dir < 160; dir += 1) {
+    const dirPath = path.join(rootDir, `dir-${dir}`);
+    addEntry(api, snapshot, dirPath, true);
+    for (let file = 0; file < 500; file += 1) {
+      const filePath = path.join(dirPath, `file-${dir}-${file}.txt`);
+      addEntry(api, snapshot, filePath);
+      if (deletePaths.length < 500 && file % 8 === 0) {
+        deletePaths.push(filePath);
+      }
+    }
+  }
+
+  return {
+    deletePaths,
+    expectedDeletedCount: deletePaths.length,
+    name: 'direct-file-batch',
+    snapshot,
+    survivorPath: path.join(rootDir, 'dir-159', 'file-159-499.txt'),
+  };
 }
 
-const survivorId = scenario.snapshot.pathToEntryId.get(scenario.survivorPath);
-assert.equal(deletedCount, scenario.expectedDeletedCount);
-assert.notEqual(survivorId, undefined);
-assert.equal(scenario.snapshot.entries[survivorId].deleted, undefined);
+function measureScenario(api, scenario) {
+  const started = performance.now();
+  api.tombstoneDeletedPaths(scenario.snapshot, scenario.deletePaths);
+  const elapsedMs = performance.now() - started;
+
+  let deletedCount = 0;
+  for (const entry of scenario.snapshot.entries) {
+    if (entry.deleted) deletedCount += 1;
+  }
+
+  const survivorId = scenario.snapshot.pathToEntryId.get(scenario.survivorPath);
+  assert.equal(deletedCount, scenario.expectedDeletedCount);
+  assert.notEqual(survivorId, undefined);
+  assert.equal(scenario.snapshot.entries[survivorId].deleted, undefined);
+
+  return {
+    name: scenario.name,
+    entries: scenario.snapshot.entries.length,
+    deletePaths: scenario.deletePaths.length,
+    deletedCount,
+    elapsedMs: Number(elapsedMs.toFixed(3)),
+  };
+}
+
+const api = loadFileSearchIndexInternals();
+const scenarios = [
+  measureScenario(api, buildDirectFileScenario(api)),
+  measureScenario(api, buildDirectoryScenario(api)),
+];
 
 console.log(JSON.stringify({
   benchmark: 'file-search-delete-batch',
-  entries: scenario.snapshot.entries.length,
-  deletePaths: scenario.deletePaths.length,
-  deletedCount,
-  elapsedMs: Number(elapsedMs.toFixed(2)),
+  scenarios,
 }, null, 2));

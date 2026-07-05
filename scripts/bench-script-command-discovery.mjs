@@ -8,6 +8,7 @@ import { loadScriptCommandRunner } from './lib/script-command-runner-harness.mjs
 
 const fileCount = Number(process.env.SUPERCMD_BENCH_SCRIPT_COUNT || 40);
 const bodyBytesPerFile = Number(process.env.SUPERCMD_BENCH_SCRIPT_BODY_BYTES || 1024 * 1024);
+const iconBytesPerFile = Number(process.env.SUPERCMD_BENCH_SCRIPT_ICON_BYTES || 0);
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -15,7 +16,7 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function makeLargeScript(title, bodyBytes) {
+function makeLargeScript(title, bodyBytes, icon = '⚡') {
   const header = `#!/bin/bash
 # Required parameters:
 # @raycast.schemaVersion 1
@@ -24,7 +25,7 @@ function makeLargeScript(title, bodyBytes) {
 
 # Optional parameters:
 # @raycast.packageName Benchmark
-# @raycast.icon ⚡
+# @raycast.icon ${icon}
 # @raycast.description Large script command fixture
 # @raycast.needsConfirmation false
 
@@ -60,9 +61,19 @@ fs.mkdirSync(scriptsDir, { recursive: true });
 fs.mkdirSync(userDataDir, { recursive: true });
 
 try {
+  const iconsDir = path.join(scriptsDir, '.icons');
+  if (iconBytesPerFile > 0) {
+    fs.mkdirSync(iconsDir, { recursive: true });
+  }
+
   for (let i = 0; i < fileCount; i += 1) {
     const scriptPath = path.join(scriptsDir, `large-command-${String(i + 1).padStart(3, '0')}.sh`);
-    fs.writeFileSync(scriptPath, makeLargeScript(`Large Command ${i + 1}`, bodyBytesPerFile), {
+    let icon = '⚡';
+    if (iconBytesPerFile > 0) {
+      icon = `.icons/icon-${String(i + 1).padStart(3, '0')}.png`;
+      fs.writeFileSync(path.join(scriptsDir, icon), Buffer.alloc(iconBytesPerFile, i % 251));
+    }
+    fs.writeFileSync(scriptPath, makeLargeScript(`Large Command ${i + 1}`, bodyBytesPerFile, icon), {
       mode: 0o755,
     });
   }
@@ -90,11 +101,32 @@ try {
   const executeMs = performance.now() - executeStart;
   const executeMetrics = snapshot(metrics);
 
+  resetMetrics();
+  runner.invalidateScriptCommandsCache();
+  const invalidatedDiscoveryStart = performance.now();
+  const rediscoveredCommands = runner.discoverScriptCommands();
+  const invalidatedDiscoveryMs = performance.now() - invalidatedDiscoveryStart;
+  const invalidatedDiscoveryMetrics = snapshot(metrics);
+
+  if (rediscoveredCommands.length !== fileCount) {
+    throw new Error(`Expected ${fileCount} commands after invalidation, discovered ${rediscoveredCommands.length}`);
+  }
+
+  resetMetrics();
+  runner.invalidateScriptCommandsCache();
+  const invalidatedExecuteStart = performance.now();
+  await runner.executeScriptCommand(commands[0].id);
+  const invalidatedExecuteMs = performance.now() - invalidatedExecuteStart;
+  const invalidatedExecuteMetrics = snapshot(metrics);
+
   console.log('Script command discovery benchmark');
   console.log(`files: ${fileCount}`);
   console.log(`body bytes per file: ${formatBytes(bodyBytesPerFile)}`);
+  console.log(`icon bytes per file: ${iconBytesPerFile > 0 ? formatBytes(iconBytesPerFile) : 'emoji'}`);
   printMetric('discovery', discoveryMs, discoveryMetrics);
   printMetric('cached execution shebang lookup', executeMs, executeMetrics);
+  printMetric('invalidated discovery', invalidatedDiscoveryMs, invalidatedDiscoveryMetrics);
+  printMetric('invalidated execution lookup', invalidatedExecuteMs, invalidatedExecuteMetrics);
 } finally {
   delete process.env.SUPERCMD_SCRIPT_COMMAND_PATHS;
   fs.rmSync(tempRoot, { recursive: true, force: true });
