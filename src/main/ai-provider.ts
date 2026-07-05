@@ -6,7 +6,10 @@
 
 import * as https from 'https';
 import * as http from 'http';
+import { TextDecoder } from 'util';
 import type { AISettings } from './settings-store';
+
+export const AI_STREAM_PARSER_MAX_BUFFER_CHARS = 4 * 1024 * 1024;
 
 export interface AIRequestOptions {
   prompt: string;
@@ -783,13 +786,15 @@ async function* parseSSE(
   extractChunk: (data: string) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
+  const decoder = new TextDecoder('utf-8');
 
-  for await (const rawChunk of response) {
-    buffer += rawChunk.toString();
+  const assertBufferWithinLimit = () => {
+    if (buffer.length > AI_STREAM_PARSER_MAX_BUFFER_CHARS) {
+      throw new Error(`AI stream parser exceeded ${AI_STREAM_PARSER_MAX_BUFFER_CHARS} buffered characters without a line break`);
+    }
+  };
 
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // keep incomplete line
-
+  function* processCompleteLines(lines: string[]): Generator<string> {
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || !trimmed.startsWith('data: ')) continue;
@@ -797,6 +802,27 @@ async function* parseSSE(
       const text = extractChunk(data);
       if (text) yield text;
     }
+  }
+
+  for await (const rawChunk of response) {
+    buffer += typeof rawChunk === 'string'
+      ? rawChunk
+      : decoder.decode(rawChunk as Uint8Array, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // keep incomplete line
+    assertBufferWithinLimit();
+
+    yield* processCompleteLines(lines);
+  }
+
+  const remainingDecoded = decoder.decode();
+  if (remainingDecoded) {
+    buffer += remainingDecoded;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    assertBufferWithinLimit();
+    yield* processCompleteLines(lines);
   }
 
   // Process remaining buffer
@@ -815,13 +841,15 @@ async function* parseNDJSON(
   extractChunk: (obj: any) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
+  const decoder = new TextDecoder('utf-8');
 
-  for await (const rawChunk of response) {
-    buffer += rawChunk.toString();
+  const assertBufferWithinLimit = () => {
+    if (buffer.length > AI_STREAM_PARSER_MAX_BUFFER_CHARS) {
+      throw new Error(`AI stream parser exceeded ${AI_STREAM_PARSER_MAX_BUFFER_CHARS} buffered characters without a line break`);
+    }
+  };
 
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
+  function* processCompleteLines(lines: string[]): Generator<string> {
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -833,6 +861,27 @@ async function* parseNDJSON(
         // skip malformed lines
       }
     }
+  }
+
+  for await (const rawChunk of response) {
+    buffer += typeof rawChunk === 'string'
+      ? rawChunk
+      : decoder.decode(rawChunk as Uint8Array, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    assertBufferWithinLimit();
+
+    yield* processCompleteLines(lines);
+  }
+
+  const remainingDecoded = decoder.decode();
+  if (remainingDecoded) {
+    buffer += remainingDecoded;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    assertBufferWithinLimit();
+    yield* processCompleteLines(lines);
   }
 
   if (buffer.trim()) {
