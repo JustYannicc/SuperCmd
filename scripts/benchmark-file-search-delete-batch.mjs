@@ -16,6 +16,7 @@ function loadFileSearchIndexInternals() {
 
 exports.__test = {
   indexEntry,
+  searchIndexedFiles,
   tombstoneDeletedPaths,
   makeSnapshot() {
     return {
@@ -24,6 +25,14 @@ exports.__test = {
       pathToEntryId: new Map(),
       builtAt: Date.now(),
     };
+  },
+  setActiveIndex(snapshot, homeDir) {
+    activeIndex = snapshot;
+    configuredHomeDir = homeDir;
+    includeRoots = [homeDir];
+    includeProtectedHomeRoots = true;
+    lastBuildStartedAt = 0;
+    lastIndexError = null;
   },
 };
 `;
@@ -100,7 +109,10 @@ function buildDirectoryScenario(api) {
     deletePaths,
     deletedRoot,
     expectedDeletedCount: 1 + (40 * 100) + 40 + (40 * 100),
+    homeDir,
     name: 'directory-tree-batch',
+    postDeleteQuery: 'deleted 39 99',
+    postDeleteQueryBucket: 'deleted',
     snapshot,
     survivorPath: path.join(survivorRoot, 'dir-119', 'survivor-119-499.txt'),
   };
@@ -128,16 +140,21 @@ function buildDirectFileScenario(api) {
   return {
     deletePaths,
     expectedDeletedCount: deletePaths.length,
+    homeDir,
     name: 'direct-file-batch',
+    postDeleteQuery: path.basename(deletePaths[0] || ''),
+    postDeleteQueryBucket: 'file',
     snapshot,
     survivorPath: path.join(rootDir, 'dir-159', 'file-159-499.txt'),
   };
 }
 
-function measureScenario(api, scenario) {
+async function measureScenario(api, scenario) {
+  const bucketBefore = scenario.snapshot.prefixToEntryIds.get(scenario.postDeleteQueryBucket)?.length || 0;
   const started = performance.now();
   api.tombstoneDeletedPaths(scenario.snapshot, scenario.deletePaths);
   const elapsedMs = performance.now() - started;
+  const bucketAfter = scenario.snapshot.prefixToEntryIds.get(scenario.postDeleteQueryBucket)?.length || 0;
 
   let deletedCount = 0;
   for (const entry of scenario.snapshot.entries) {
@@ -149,19 +166,29 @@ function measureScenario(api, scenario) {
   assert.notEqual(survivorId, undefined);
   assert.equal(scenario.snapshot.entries[survivorId].deleted, undefined);
 
+  api.setActiveIndex(scenario.snapshot, scenario.homeDir);
+  const queryStarted = performance.now();
+  const postDeleteResults = await api.searchIndexedFiles(scenario.postDeleteQuery, { limit: 20 });
+  const postDeleteQueryMs = performance.now() - queryStarted;
+  assert.equal(postDeleteResults.some((result) => result.path && result.path.includes('deleted-root')), false);
+
   return {
     name: scenario.name,
     entries: scenario.snapshot.entries.length,
     deletePaths: scenario.deletePaths.length,
     deletedCount,
     elapsedMs: Number(elapsedMs.toFixed(3)),
+    postDeleteQueryMs: Number(postDeleteQueryMs.toFixed(3)),
+    postDeleteResultCount: postDeleteResults.length,
+    touchedBucketSizeBefore: bucketBefore,
+    touchedBucketSizeAfter: bucketAfter,
   };
 }
 
 const api = loadFileSearchIndexInternals();
 const scenarios = [
-  measureScenario(api, buildDirectFileScenario(api)),
-  measureScenario(api, buildDirectoryScenario(api)),
+  await measureScenario(api, buildDirectFileScenario(api)),
+  await measureScenario(api, buildDirectoryScenario(api)),
 ];
 
 console.log(JSON.stringify({

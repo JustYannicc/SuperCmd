@@ -238,3 +238,34 @@ test('non-matching delete paths do not tombstone prefix-like neighbors', async (
   assert.equal(results.length, 1);
   assert.equal(results[0].path, searchable);
 });
+
+test('large tombstone batches compact deleted-heavy prefix buckets before post-delete queries', async () => {
+  const snapshot = api.makeSnapshot();
+  const deletedFiles = [];
+  const deletedDir = path.join(homeDir, 'deleted-heavy');
+  const survivorDir = path.join(homeDir, 'survivors');
+  const survivor = path.join(survivorDir, 'launch-plan-alpha-survivor.md');
+
+  addEntry(snapshot, deletedDir, true);
+  for (let index = 0; index < 5000; index += 1) {
+    const filePath = path.join(deletedDir, `launch-plan-alpha-deleted-${index}.md`);
+    deletedFiles.push(filePath);
+    addEntry(snapshot, filePath);
+  }
+  addEntry(snapshot, survivorDir, true);
+  addEntry(snapshot, survivor);
+
+  const bucketBefore = snapshot.prefixToEntryIds.get('launch') || [];
+  assert.ok(bucketBefore.length > 5000, 'fixture should create a deleted-heavy launch bucket');
+
+  api.tombstoneDeletedPaths(snapshot, deletedFiles);
+
+  const bucketAfter = snapshot.prefixToEntryIds.get('launch') || [];
+  assert.equal(bucketAfter.length, 1);
+  assert.equal(snapshot.entries[bucketAfter[0]].path, survivor);
+
+  api.setActiveIndex(snapshot, homeDir);
+  const results = await api.searchIndexedFiles('launch plan alpha survivor', { limit: 3 });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].path, survivor);
+});
