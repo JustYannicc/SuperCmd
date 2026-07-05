@@ -192,7 +192,7 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
     }, [filteredItems.length, selectedIdx]);
 
     useEffect(() => {
-      gridRef.current?.querySelector(`[data-idx="${selectedIdx}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      gridRef.current?.querySelector(`[data-idx="${selectedIdx}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
     }, [selectedIdx]);
 
     useEffect(() => {

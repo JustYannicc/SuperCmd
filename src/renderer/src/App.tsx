@@ -1640,9 +1640,9 @@ const App: React.FC = () => {
       const elementRect = selectedElement.getBoundingClientRect();
 
       if (elementRect.top < containerRect.top) {
-        selectedElement.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        selectedElement.scrollIntoView({ block: 'start', behavior: 'auto' });
       } else if (elementRect.bottom > containerRect.bottom) {
-        selectedElement.scrollIntoView({ block: 'end', behavior: 'smooth' });
+        selectedElement.scrollIntoView({ block: 'end', behavior: 'auto' });
       }
     }
   }, [selectedIndex]);
