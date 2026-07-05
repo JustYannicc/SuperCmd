@@ -49,6 +49,9 @@ function reactStubPlugin() {
           export function isValidElement(value) {
             return Boolean(value && value.$$typeof === Symbol.for('react.element'));
           }
+          export function memo(type, compare) {
+            return { $$typeof: Symbol.for('react.memo'), type, compare };
+          }
           export function useContext(context) {
             return context?._currentValue;
           }
@@ -74,6 +77,7 @@ function reactStubPlugin() {
             createContext,
             createElement,
             isValidElement,
+            memo,
             useContext,
             useEffect,
             useLayoutEffect,

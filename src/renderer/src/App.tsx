@@ -348,7 +348,7 @@ const App: React.FC = () => {
   } = useCursorPrompt({
     showCursorPrompt,
     setShowCursorPrompt,
-    setAiAvailable,
+    setAiAvailable: setAiAvailable as React.Dispatch<React.SetStateAction<boolean>>,
   });
 
   const acceptCursorPrompt = applyCursorPromptResultToEditor;
@@ -756,7 +756,7 @@ const App: React.FC = () => {
     openSchedule,
     openCamera,
     openOnboarding,
-    setAiAvailable,
+    setAiAvailable: setAiAvailable as React.Dispatch<React.SetStateAction<boolean>>,
     setSelectedTextSnapshot,
     setMemoryFeedback,
     setMemoryActionLoading,
