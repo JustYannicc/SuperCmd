@@ -9,6 +9,7 @@ import { importTs } from './lib/ts-import.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
   createMenuBarNativeUpdateState,
+  getMenuBarNativeFileIconIdentityKey,
   getMenuBarNativeItemsKey,
   getMenuBarNativeTitle,
   getMenuBarNativeTooltip,
@@ -85,6 +86,22 @@ function makeCounters() {
     buildMenuBarTemplate: 0,
     buildFromTemplate: 0,
     setContextMenu: 0,
+    statSync: 0,
+  };
+}
+
+function makeFs(counters, files) {
+  return {
+    statSync(pathValue) {
+      counters.statSync += 1;
+      const file = files.get(pathValue);
+      if (!file) throw new Error(`ENOENT: ${pathValue}`);
+      return {
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        isFile: () => true,
+      };
+    },
   };
 }
 
@@ -111,21 +128,30 @@ function runUncachedNativeWork(payloads) {
   return counters;
 }
 
-function runCachedNativeWork(payloads, { iconResolvesOk = true } = {}) {
+function runCachedNativeWork(payloads, {
+  files = new Map([['/tmp/supercmd-timer.png', { size: 64, mtimeMs: 10 }]]),
+  iconResolvesOk = true,
+  onBeforePayload,
+} = {}) {
   const counters = makeCounters();
   const state = createMenuBarNativeUpdateState();
+  const fs = makeFs(counters, files);
   let trayExists = false;
 
-  for (const payload of payloads) {
+  for (let index = 0; index < payloads.length; index += 1) {
+    onBeforePayload?.(index, files);
+    const payload = payloads[index];
+    const nextFileIdentityKey = getMenuBarNativeFileIconIdentityKey(payload, fs);
+
     if (!trayExists) {
       counters.resolveTrayIcon += 1;
       counters.createTray += 1;
       trayExists = true;
-      rememberMenuBarNativeIcon(state, payload, iconResolvesOk);
-    } else if (isMenuBarNativeIconRefreshNeeded(state, payload)) {
+      rememberMenuBarNativeIcon(state, payload, iconResolvesOk, nextFileIdentityKey);
+    } else if (isMenuBarNativeIconRefreshNeeded(state, payload, nextFileIdentityKey)) {
       counters.resolveTrayIcon += 1;
       counters.setImage += 1;
-      rememberMenuBarNativeIcon(state, payload, iconResolvesOk);
+      rememberMenuBarNativeIcon(state, payload, iconResolvesOk, nextFileIdentityKey);
     }
 
     const nextTitle = getMenuBarNativeTitle(payload, state.lastResolvedTrayIconOk);
@@ -207,7 +233,7 @@ test('MenuBarExtra native update cache', async (t) => {
     assert.equal(after.setContextMenu, 2);
   });
 
-  await t.test('keeps file-backed tray icons refreshing on accepted updates', () => {
+  await t.test('skips native image refresh for stable file-backed tray icon title ticks', () => {
     const payloads = Array.from({ length: 3 }, (_, index) => makePayload({
       iconEmoji: undefined,
       iconPath: '/tmp/supercmd-timer.png',
@@ -215,8 +241,69 @@ test('MenuBarExtra native update cache', async (t) => {
     }));
     const after = runCachedNativeWork(payloads);
 
-    assert.equal(after.resolveTrayIcon, 3, 'file-backed icons are re-resolved so file identity can refresh');
-    assert.equal(after.setImage, 2, 'existing trays keep setImage behavior for file-backed icons');
+    assert.equal(after.resolveTrayIcon, 1, 'stable file-backed icons resolve only for tray creation');
+    assert.equal(after.setImage, 0, 'stable file-backed title ticks skip native setImage');
+    assert.equal(after.statSync, 3, 'file identity is checked each accepted update');
+    assert.equal(after.setTitle, 3, 'changing title text still updates the native title every tick');
+    assert.equal(after.buildFromTemplate, 1);
+  });
+
+  await t.test('refreshes file-backed tray icons when file identity changes', () => {
+    const payloads = Array.from({ length: 3 }, (_, index) => makePayload({
+      iconEmoji: undefined,
+      iconPath: '/tmp/supercmd-timer.png',
+      title: `Timer ${index}`,
+    }));
+    const after = runCachedNativeWork(payloads, {
+      onBeforePayload(index, files) {
+        if (index === 1) {
+          files.set('/tmp/supercmd-timer.png', { size: 65, mtimeMs: 11 });
+        }
+      },
+    });
+
+    assert.equal(after.resolveTrayIcon, 2, 'changed file identity re-resolves the tray icon');
+    assert.equal(after.setImage, 1, 'changed file identity updates the existing native tray image');
+    assert.equal(after.statSync, 3, 'file identity continues to be checked each accepted update');
+    assert.equal(after.buildFromTemplate, 1);
+  });
+
+  await t.test('refreshes file-backed tray icons when image inputs change', () => {
+    const payloads = [
+      makePayload({
+        iconEmoji: undefined,
+        iconPath: '/tmp/supercmd-timer.png',
+        iconTemplate: true,
+        iconBitmapScale: 1,
+        fallbackIconDataUrl: 'data:image/png;base64,ZmFsbGJhY2sx',
+      }),
+      makePayload({
+        iconEmoji: undefined,
+        iconPath: '/tmp/supercmd-timer.png',
+        iconTemplate: false,
+        iconBitmapScale: 1,
+        fallbackIconDataUrl: 'data:image/png;base64,ZmFsbGJhY2sx',
+      }),
+      makePayload({
+        iconEmoji: undefined,
+        iconPath: '/tmp/supercmd-timer.png',
+        iconTemplate: false,
+        iconBitmapScale: 2,
+        fallbackIconDataUrl: 'data:image/png;base64,ZmFsbGJhY2sx',
+      }),
+      makePayload({
+        iconEmoji: undefined,
+        iconPath: '/tmp/supercmd-timer.png',
+        iconTemplate: false,
+        iconBitmapScale: 2,
+        fallbackIconDataUrl: 'data:image/png;base64,ZmFsbGJhY2sy',
+      }),
+    ];
+    const after = runCachedNativeWork(payloads);
+
+    assert.equal(after.resolveTrayIcon, 4, 'template, scale, and fallback changes re-resolve the tray icon');
+    assert.equal(after.setImage, 3, 'template, scale, and fallback changes update the existing tray image');
+    assert.equal(after.statSync, 4);
     assert.equal(after.buildFromTemplate, 1);
   });
 
