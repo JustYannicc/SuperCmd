@@ -21,6 +21,16 @@ import { installExtensionFetchBridge } from './extension-fetch-bridge';
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
 
+let extensionRuntimeRequestSeq = 0;
+
+function createExtensionRuntimeRequestId(prefix: string): string {
+  const randomId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return `${prefix}:${Date.now()}:${++extensionRuntimeRequestSeq}:${randomId}`;
+}
+
 // ─── React Module for Extensions ────────────────────────────────────
 // Extensions MUST use the exact same React instance as the host app.
 //
@@ -2870,14 +2880,46 @@ const nodeBuiltinStubs: Record<string, any> = {
             if (typeof binaryDownloader !== 'function') {
               throw new Error('Binary download bridge unavailable');
             }
-            rawBytes = await Promise.race([
-              binaryDownloader(resolvedUrl),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('Binary download timed out')), 45_000)
-              ),
-            ]);
+            const requestId = createExtensionRuntimeRequestId('axiosBinary');
+            const cancelDownload = () => {
+              (window as any).electron?.cancelHttpRequest?.(requestId);
+            };
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            let abortListener: (() => void) | undefined;
+            try {
+              rawBytes = await Promise.race([
+                binaryDownloader(resolvedUrl, requestId),
+                new Promise<never>((_, reject) => {
+                  timeoutId = setTimeout(() => {
+                    cancelDownload();
+                    reject(new Error('Binary download timed out'));
+                  }, 45_000);
+                }),
+                config?.signal
+                  ? new Promise<never>((_, reject) => {
+                    abortListener = () => {
+                      cancelDownload();
+                      const err = new Error('Binary download aborted');
+                      err.name = 'AbortError';
+                      reject(err);
+                    };
+                    if (config.signal.aborted) {
+                      abortListener();
+                      return;
+                    }
+                    config.signal.addEventListener('abort', abortListener, { once: true });
+                  })
+                  : new Promise<never>(() => {}),
+              ]);
+            } finally {
+              if (timeoutId) clearTimeout(timeoutId);
+              if (abortListener && config?.signal) {
+                config.signal.removeEventListener('abort', abortListener);
+              }
+            }
           } catch (e: any) {
             const err: any = new Error(e?.message || 'Download failed');
+            if (e?.name) err.name = e.name;
             err.isAxiosError = true;
             throw err;
           }

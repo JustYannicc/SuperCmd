@@ -15876,7 +15876,11 @@ app.whenReady().then(async () => {
     const binaryRequestId = typeof requestId === 'string' ? requestId : '';
     let canceled = false;
     let activeCancel: (() => void) | undefined;
-    const cancelError = () => new Error('Request canceled');
+    const cancelError = () => {
+      const err = new Error('Request canceled');
+      err.name = 'AbortError';
+      return err;
+    };
     const throwIfCanceled = () => {
       if (canceled) throw cancelError();
     };
@@ -15902,14 +15906,20 @@ app.whenReady().then(async () => {
 
       return new Promise((resolve, reject) => {
         let settled = false;
+        let chunks: Buffer[] = [];
+        const cleanupChunks = () => {
+          chunks = [];
+        };
         const settleResolve = (value: Uint8Array) => {
           if (settled) return;
           settled = true;
+          cleanupChunks();
           resolve(value);
         };
         const settleReject = (err: Error) => {
           if (settled) return;
           settled = true;
+          cleanupChunks();
           reject(err);
         };
         const client = parsed.protocol === 'https:' ? https : http;
@@ -15938,7 +15948,6 @@ app.whenReady().then(async () => {
               settleReject(new Error(`HTTP ${res.statusCode}`));
               return;
             }
-            const chunks: Buffer[] = [];
             res.on('data', (chunk: Buffer) => {
               if (!canceled) chunks.push(chunk);
             });
@@ -15949,7 +15958,9 @@ app.whenReady().then(async () => {
               }
               settleResolve(new Uint8Array(Buffer.concat(chunks)));
             });
-            res.on('error', settleReject);
+            res.on('error', (err: Error) => {
+              settleReject(canceled ? cancelError() : err);
+            });
           }
         );
 
@@ -16005,7 +16016,11 @@ app.whenReady().then(async () => {
                 return;
               }
               if (err) {
-                const stderrText = typeof stderr === 'string' ? stderr : String(stderr || '');
+                const stderrText = typeof stderr === 'string'
+                  ? stderr.slice(0, 4096)
+                  : Buffer.isBuffer(stderr)
+                    ? stderr.toString('utf-8', 0, Math.min(stderr.length, 4096))
+                    : String(stderr || '').slice(0, 4096);
                 settleReject(
                   new Error(
                     `HTTP download failed (${primaryErr?.message || 'unknown'}) and curl fallback failed (${stderrText || err.message})`
