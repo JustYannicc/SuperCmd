@@ -21,7 +21,7 @@ export function useGridRegistry() {
       mountedRef.current = false;
       pendingRef.current = false;
       registryRef.current.clear();
-      visibleSignatureRef.current.clear();
+      lastSnapshotRef.current = '';
     };
   }, []);
 

@@ -1416,8 +1416,9 @@ function applyRuntimeMetadataAndAliases(commands: CommandInfo[]): void {
     const commandMetadata = loadedSettings.commandMetadata || {};
     const commandAliases = loadedSettings.commandAliases || {};
     for (const cmd of commands) {
-      if (!(cmd.category === 'script' && cmd.mode !== 'inline') && commandMetadata[cmd.id]?.subtitle !== undefined) {
-        const subtitle = String(commandMetadata[cmd.id]?.subtitle || '').trim();
+      const metadata = commandMetadata[cmd.id] || (cmd.path ? commandMetadata[cmd.path] : undefined);
+      if (!(cmd.category === 'script' && cmd.mode !== 'inline') && metadata?.subtitle !== undefined) {
+        const subtitle = String(metadata.subtitle || '').trim();
         if (subtitle) {
           cmd.subtitle = subtitle;
         }
