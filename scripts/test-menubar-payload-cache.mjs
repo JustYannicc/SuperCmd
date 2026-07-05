@@ -68,6 +68,41 @@ test('MenuBarExtra visible payload cache', async (t) => {
     })), true, 'menu item change sends');
   });
 
+  await t.test('reuses serialized item hash when the item array is stable', () => {
+    const cache = createMenuBarVisiblePayloadHashCache();
+    let itemStringifyCount = 0;
+    const stableItems = [{
+      type: 'item',
+      id: '__mbi_1',
+      title: 'Start',
+      disabled: false,
+      toJSON() {
+        itemStringifyCount += 1;
+        return {
+          type: 'item',
+          id: '__mbi_1',
+          title: 'Start',
+          disabled: false,
+        };
+      },
+    }];
+
+    assert.equal(shouldSendMenuBarVisiblePayload(cache, makePayload({ items: stableItems })), true);
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(
+        shouldSendMenuBarVisiblePayload(cache, makePayload({ title: `Timer ${i}`, items: stableItems })),
+        true,
+      );
+    }
+
+    assert.equal(itemStringifyCount, 1, 'title-only ticks reuse the cached item hash');
+    assert.equal(
+      shouldSendMenuBarVisiblePayload(cache, makePayload({ title: 'Timer 6', items: [...stableItems] })),
+      true,
+    );
+    assert.equal(itemStringifyCount, 2, 'a new item array is hashed before comparison');
+  });
+
   await t.test('parent refreshes actions before skipping unchanged visible payloads', () => {
     const parentSource = fs.readFileSync(
       path.join(root, 'src/renderer/src/raycast-api/menubar-runtime-parent.tsx'),
