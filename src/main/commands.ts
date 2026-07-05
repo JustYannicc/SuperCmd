@@ -114,12 +114,30 @@ const CACHE_TTL = 30 * 60_000; // 30 min
 const STALE_REFRESH_COOLDOWN_MS = 15_000;
 let commandDiscoveryStartCount = 0;
 let commandDiscoveryRunnerForTesting: (() => Promise<CommandInfo[]>) | null = null;
+let applicationSearchScopeForTesting: string[] | null = null;
+let settingsDiscoveryRootsForTesting: { extensionDir?: string; prefDirs?: string[] } | null = null;
 
 type CommandRuntimeMetadata = { subtitle?: string | null | undefined };
 type CommandRuntimeMetadataStore = Record<string, CommandRuntimeMetadata | undefined>;
 
 const runtimeMetadataBaseSubtitleByKey = new Map<string, string | undefined>();
 const runtimeMetadataCommandsByKey = new Map<string, Set<CommandInfo>>();
+let commandDiscoveryMetadataCacheEnabled = true;
+
+type PathSignature = {
+  exists: boolean;
+  size?: number;
+  mtimeMs?: number;
+};
+
+type CachedValue<T> = {
+  signature: string;
+  value: T;
+};
+
+const plistJsonByPath = new Map<string, CachedValue<Record<string, any> | null>>();
+const bundleDisplayNameBySignature = new Map<string, CachedValue<string | undefined>>();
+const searchTermsFileBySignature = new Map<string, CachedValue<string | undefined>>();
 
 // ─── Commands Disk Cache ─────────────────────────────────────────────────────
 // Persists the discovered commands list across restarts so the launcher is
@@ -307,8 +325,12 @@ export function __resetCommandCacheForTesting(): void {
   lastStaleRefreshRequestAt = 0;
   commandDiscoveryStartCount = 0;
   commandDiscoveryRunnerForTesting = null;
+  applicationSearchScopeForTesting = null;
+  settingsDiscoveryRootsForTesting = null;
+  commandDiscoveryMetadataCacheEnabled = true;
   resetRuntimeMetadataTracking();
   commandsDiskCachePath = null;
+  clearCommandDiscoveryMetadataCaches();
 }
 
 export function __setCommandDiscoveryRunnerForTesting(
@@ -319,6 +341,29 @@ export function __setCommandDiscoveryRunnerForTesting(
 
 export function __getCommandDiscoveryStartCountForTesting(): number {
   return commandDiscoveryStartCount;
+}
+
+export function __setApplicationSearchScopeForTesting(scope: string[] | null): void {
+  applicationSearchScopeForTesting = scope;
+}
+
+export function __setSettingsDiscoveryRootsForTesting(
+  roots: { extensionDir?: string; prefDirs?: string[] } | null
+): void {
+  settingsDiscoveryRootsForTesting = roots;
+}
+
+export function __setCommandDiscoveryMetadataCacheEnabledForTesting(enabled: boolean): void {
+  commandDiscoveryMetadataCacheEnabled = enabled;
+  clearCommandDiscoveryMetadataCaches();
+}
+
+export async function __discoverApplicationCommandsForTesting(): Promise<CommandInfo[]> {
+  return discoverApplications();
+}
+
+export async function __discoverSystemSettingsCommandsForTesting(): Promise<CommandInfo[]> {
+  return discoverSystemSettings();
 }
 
 // ─── Icon Disk Cache ────────────────────────────────────────────────
@@ -391,12 +436,8 @@ async function getIconFromIcns(bundlePath: string): Promise<string | undefined> 
 
   // Try CFBundleIconFile / CFBundleIconName from Info.plist
   try {
-    const plistPath = path.join(bundlePath, 'Contents', 'Info.plist');
-    if (fs.existsSync(plistPath)) {
-      const { stdout } = await execAsync(
-        `/usr/bin/plutil -convert json -o - "${plistPath}" 2>/dev/null`
-      );
-      const info = JSON.parse(stdout);
+    const info = await readPlistJson(bundlePath);
+    if (info) {
       const iconFileName: string | undefined =
         info.CFBundleIconFile || info.CFBundleIconName;
 
@@ -547,22 +588,66 @@ async function getIconDataUrl(bundlePath: string): Promise<string | undefined> {
 
 // ─── Plist / Name Helpers ───────────────────────────────────────────
 
+function clearCommandDiscoveryMetadataCaches(): void {
+  plistJsonByPath.clear();
+  bundleDisplayNameBySignature.clear();
+  searchTermsFileBySignature.clear();
+}
+
+function getPathSignature(targetPath: string): PathSignature {
+  try {
+    const stat = fs.statSync(targetPath);
+    return {
+      exists: true,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
+  } catch {
+    return { exists: false };
+  }
+}
+
+function stringifyPathSignature(signature: PathSignature): string {
+  return signature.exists
+    ? `${signature.size || 0}:${signature.mtimeMs || 0}`
+    : 'missing';
+}
+
+function getCombinedPathSignature(paths: string[]): string {
+  return paths
+    .map((targetPath) => `${targetPath}:${stringifyPathSignature(getPathSignature(targetPath))}`)
+    .join('|');
+}
+
+function getLocalizedMetadataFilePaths(resourcesDir: string, localeCandidates: string[]): string[] {
+  const paths = [
+    path.join(resourcesDir, 'InfoPlist.loctable'),
+    path.join(resourcesDir, 'InfoPlist.strings'),
+  ];
+
+  for (const locale of localeCandidates) {
+    paths.push(path.join(resourcesDir, `${locale}.lproj`, 'InfoPlist.strings'));
+  }
+
+  paths.push(
+    path.join(resourcesDir, 'Localizable.loctable'),
+    path.join(resourcesDir, 'Localizable.strings')
+  );
+
+  for (const locale of localeCandidates) {
+    paths.push(path.join(resourcesDir, `${locale}.lproj`, 'Localizable.strings'));
+  }
+
+  return paths;
+}
+
 /**
  * Read a JSON-converted Info.plist and return the whole object.
  */
 async function readPlistJson(
   bundlePath: string
 ): Promise<Record<string, any> | null> {
-  try {
-    const plistPath = path.join(bundlePath, 'Contents', 'Info.plist');
-    if (!fs.existsSync(plistPath)) return null;
-    const { stdout } = await execAsync(
-      `/usr/bin/plutil -convert json -o - "${plistPath}" 2>/dev/null`
-    );
-    return JSON.parse(stdout);
-  } catch {
-    return null;
-  }
+  return readPlistFileJson(path.join(bundlePath, 'Contents', 'Info.plist'));
 }
 
 /**
@@ -864,36 +949,77 @@ function resolveSearchTermsFile(bundlePath: string, searchTermsFileName?: string
 
   const fileStem = String(searchTermsFileName || '').trim();
   const localeCandidates = getLocaleCandidates();
-  if (fileStem) {
-    for (const locale of localeCandidates) {
-      const candidate = path.join(resourcesDir, `${locale}.lproj`, `${fileStem}.searchTerms`);
-      if (fs.existsSync(candidate)) return candidate;
+  const lprojDirs = localeCandidates.map((locale) => path.join(resourcesDir, `${locale}.lproj`));
+  const cacheKey = `${bundlePath}\0${fileStem}\0${localeCandidates.join('\0')}`;
+  const signature = getCombinedPathSignature([resourcesDir, ...lprojDirs]);
+  if (commandDiscoveryMetadataCacheEnabled) {
+    const cached = searchTermsFileBySignature.get(cacheKey);
+    if (cached && cached.signature === signature) {
+      return cached.value;
     }
   }
 
-  for (const locale of localeCandidates) {
-    const lprojDir = path.join(resourcesDir, `${locale}.lproj`);
-    if (!fs.existsSync(lprojDir)) continue;
-    try {
-      const files = fs.readdirSync(lprojDir).filter((f) => f.endsWith('.searchTerms'));
-      if (files.length > 0) return path.join(lprojDir, files[0]);
-    } catch {}
+  let resolved: string | undefined;
+  if (fileStem) {
+    for (const locale of localeCandidates) {
+      const candidate = path.join(resourcesDir, `${locale}.lproj`, `${fileStem}.searchTerms`);
+      if (fs.existsSync(candidate)) {
+        resolved = candidate;
+        break;
+      }
+    }
   }
 
-  return undefined;
+  if (!resolved) {
+    for (const locale of localeCandidates) {
+      const lprojDir = path.join(resourcesDir, `${locale}.lproj`);
+      if (!fs.existsSync(lprojDir)) continue;
+      try {
+        const files = fs.readdirSync(lprojDir).filter((f) => f.endsWith('.searchTerms'));
+        if (files.length > 0) {
+          resolved = path.join(lprojDir, files[0]);
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  if (commandDiscoveryMetadataCacheEnabled) {
+    searchTermsFileBySignature.set(cacheKey, { signature, value: resolved });
+  }
+
+  return resolved;
 }
 
 async function readPlistFileJson(plistPath: string): Promise<Record<string, any> | null> {
+  const signature = stringifyPathSignature(getPathSignature(plistPath));
+  if (commandDiscoveryMetadataCacheEnabled) {
+    const cached = plistJsonByPath.get(plistPath);
+    if (cached && cached.signature === signature) {
+      return cached.value;
+    }
+  }
+
+  let result: Record<string, any> | null = null;
   try {
-    if (!fs.existsSync(plistPath)) return null;
+    if (!fs.existsSync(plistPath)) {
+      if (commandDiscoveryMetadataCacheEnabled) {
+        plistJsonByPath.set(plistPath, { signature, value: null });
+      }
+      return null;
+    }
     const safePath = plistPath.replace(/"/g, '\\"');
     const { stdout } = await execAsync(
       `/usr/bin/plutil -convert json -o - "${safePath}" 2>/dev/null`
     );
-    return JSON.parse(stdout);
+    result = JSON.parse(stdout);
   } catch {
-    return null;
+    result = null;
   }
+  if (commandDiscoveryMetadataCacheEnabled) {
+    plistJsonByPath.set(plistPath, { signature, value: result });
+  }
+  return result;
 }
 
 async function resolveBundleDisplayNameViaSystem(
@@ -901,6 +1027,20 @@ async function resolveBundleDisplayNameViaSystem(
   keys: string[]
 ): Promise<string | undefined> {
   if (!fs.existsSync(bundlePath) || keys.length === 0) return undefined;
+
+  const resourcesDir = path.join(bundlePath, 'Contents', 'Resources');
+  const localeCandidates = getLocaleCandidates();
+  const cacheKey = `${bundlePath}\0${keys.join('\0')}`;
+  const signature = getCombinedPathSignature([
+    path.join(bundlePath, 'Contents', 'Info.plist'),
+    ...getLocalizedMetadataFilePaths(resourcesDir, localeCandidates),
+  ]);
+  if (commandDiscoveryMetadataCacheEnabled) {
+    const cached = bundleDisplayNameBySignature.get(cacheKey);
+    if (cached && cached.signature === signature) {
+      return cached.value;
+    }
+  }
 
   const script = `
 ObjC.import("Foundation");
@@ -962,8 +1102,15 @@ resolved;
   try {
     const { stdout } = await execFileAsync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script]);
     const resolved = String(stdout || '').trim();
-    return resolved || undefined;
+    const result = resolved || undefined;
+    if (commandDiscoveryMetadataCacheEnabled) {
+      bundleDisplayNameBySignature.set(cacheKey, { signature, value: result });
+    }
+    return result;
   } catch {
+    if (commandDiscoveryMetadataCacheEnabled) {
+      bundleDisplayNameBySignature.set(cacheKey, { signature, value: undefined });
+    }
     return undefined;
   }
 }
@@ -1132,6 +1279,16 @@ async function discoverSettingsSearchTermCommands(
   return commands;
 }
 
+export async function __discoverSettingsSearchTermCommandsForTesting(
+  bundlePath: string,
+  pane: CommandInfo,
+  bundleId?: string,
+  legacyBundleId?: string,
+  searchTermsFileName?: string
+): Promise<CommandInfo[]> {
+  return discoverSettingsSearchTermCommands(bundlePath, pane, bundleId, legacyBundleId, searchTermsFileName);
+}
+
 function buildSettingsKeywords(
   title: string,
   bundleId?: string,
@@ -1161,7 +1318,7 @@ function buildSettingsKeywords(
 async function discoverApplications(): Promise<CommandInfo[]> {
   const results: CommandInfo[] = [];
   const usedIds = new Set<string>();
-  const appDirs = getSearchApplicationsScope();
+  const appDirs = applicationSearchScopeForTesting || getSearchApplicationsScope();
 
   const appPathsSet = new Set<string>();
   const spotlightPaths = await discoverAppBundlesViaSpotlight(appDirs);
@@ -1175,7 +1332,7 @@ async function discoverApplications(): Promise<CommandInfo[]> {
     }
   }
   const finderPath = '/System/Library/CoreServices/Finder.app';
-  if (fs.existsSync(finderPath)) {
+  if (!applicationSearchScopeForTesting && fs.existsSync(finderPath)) {
     appPathsSet.add(finderPath);
   }
 
@@ -1254,7 +1411,7 @@ async function discoverSystemSettings(): Promise<CommandInfo[]> {
   const seen = new Set<string>();
 
   // ── Source 1: .appex extensions (macOS Ventura+) ──
-  const extDir = '/System/Library/ExtensionKit/Extensions';
+  const extDir = settingsDiscoveryRootsForTesting?.extensionDir || '/System/Library/ExtensionKit/Extensions';
   if (fs.existsSync(extDir)) {
     let files: string[];
     try {
@@ -1340,7 +1497,7 @@ async function discoverSystemSettings(): Promise<CommandInfo[]> {
   }
 
   // ── Source 2: .prefPane bundles ──
-  const prefDirs = [
+  const prefDirs = settingsDiscoveryRootsForTesting?.prefDirs || [
     '/System/Library/PreferencePanes',
     '/Library/PreferencePanes',
     path.join(process.env.HOME || '', 'Library', 'PreferencePanes'),
