@@ -51,6 +51,12 @@ import {
   forwardAIStreamChunksToIpc,
   type AIStreamIpcCoalescer,
 } from './ai-stream-ipc';
+import {
+  appendNativeHelperLineBuffer,
+  appendNativeHelperTextBuffer,
+  createNativeHelperReadinessWait,
+  type NativeHelperReadinessWait,
+} from './native-helper-lifecycle';
 import { transcribeWhisperAudioFile } from './whisper-transcribe-file';
 import { scanAppRemnants } from './app-uninstaller';
 import * as soulverCalculator from './soulver-calculator';
@@ -300,8 +306,17 @@ let parakeetServerProcess: any = null; // ChildProcess
 let parakeetServerReady = false;
 let parakeetServerStarting: Promise<void> | null = null;
 let parakeetServerBuffer = '';
+let parakeetServerReadyWait: NativeHelperReadinessWait | null = null;
 type PendingParakeetRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
 let parakeetPendingRequest: PendingParakeetRequest | null = null;
+
+const nativeHelperLineBufferTruncationWarnings = new Set<string>();
+
+function warnNativeHelperLineBufferTruncated(helperName: string): void {
+  if (nativeHelperLineBufferTruncationWarnings.has(helperName)) return;
+  nativeHelperLineBufferTruncationWarnings.add(helperName);
+  console.warn(`[${helperName}] Dropped oversized native helper output line`);
+}
 
 function killParakeetServer(processToKill: any = parakeetServerProcess): void {
   if (processToKill) {
@@ -315,6 +330,8 @@ function killParakeetServer(processToKill: any = parakeetServerProcess): void {
   parakeetServerReady = false;
   parakeetServerStarting = null;
   parakeetServerBuffer = '';
+  parakeetServerReadyWait?.reject(new Error('Parakeet server killed'));
+  parakeetServerReadyWait = null;
   if (parakeetPendingRequest) {
     parakeetPendingRequest.reject(new Error('Parakeet server killed'));
     parakeetPendingRequest = null;
@@ -350,6 +367,8 @@ function ensureParakeetServer(): Promise<void> {
       parakeetServerReady = false;
       parakeetServerProcess = null;
       parakeetServerStarting = null;
+      parakeetServerReadyWait?.reject(new Error('Parakeet server process died during startup'));
+      parakeetServerReadyWait = null;
       if (parakeetPendingRequest) {
         parakeetPendingRequest.reject(new Error(`Parakeet server exited with code ${code}`));
         parakeetPendingRequest = null;
@@ -358,9 +377,10 @@ function ensureParakeetServer(): Promise<void> {
 
     child.stdout.on('data', (chunk: Buffer) => {
       if (parakeetServerProcess !== child) return;
-      parakeetServerBuffer += chunk.toString();
-      const lines = parakeetServerBuffer.split('\n');
-      parakeetServerBuffer = lines.pop() || '';
+      const result = appendNativeHelperLineBuffer(parakeetServerBuffer, chunk);
+      parakeetServerBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('Parakeet');
+      const lines = result.lines;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -369,6 +389,8 @@ function ensureParakeetServer(): Promise<void> {
           if (json.ready) {
             parakeetServerReady = true;
             console.log('[Parakeet] Server ready (models loaded)');
+            parakeetServerReadyWait?.markReady();
+            parakeetServerReadyWait = null;
             continue;
           }
           if (parakeetPendingRequest) {
@@ -385,33 +407,18 @@ function ensureParakeetServer(): Promise<void> {
     });
 
     // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (parakeetServerProcess !== child) return;
-        reject(new Error('Parakeet server startup timed out (120s)'));
-        killParakeetServer(child);
-      }, 120_000);
-
-      const checkReady = setInterval(() => {
-        if (parakeetServerProcess !== child) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Parakeet server startup superseded'));
-          return;
-        }
-        if (parakeetServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        if (child.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Parakeet server process died during startup'));
-        }
-      }, 50);
+    const readyWait = createNativeHelperReadinessWait({
+      timeoutMs: 120_000,
+      timeoutMessage: 'Parakeet server startup timed out (120s)',
+      supersededMessage: 'Parakeet server startup superseded',
+      diedMessage: 'Parakeet server process died during startup',
+      isActive: () => parakeetServerProcess === child,
+      isKilled: () => child.killed,
+      kill: () => killParakeetServer(child),
     });
+    parakeetServerReadyWait = readyWait;
+    await readyWait.promise;
+    if (parakeetServerReadyWait === readyWait) parakeetServerReadyWait = null;
   })();
 
   parakeetServerStarting = startingPromise;
@@ -689,6 +696,7 @@ let qwen3ServerProcess: any = null;
 let qwen3ServerReady = false;
 let qwen3ServerStarting: Promise<void> | null = null;
 let qwen3ServerBuffer = '';
+let qwen3ServerReadyWait: NativeHelperReadinessWait | null = null;
 type PendingQwen3Request = { resolve: (json: any) => void; reject: (err: Error) => void };
 let qwen3PendingRequest: PendingQwen3Request | null = null;
 
@@ -704,6 +712,8 @@ function killQwen3Server(processToKill: any = qwen3ServerProcess): void {
   qwen3ServerReady = false;
   qwen3ServerStarting = null;
   qwen3ServerBuffer = '';
+  qwen3ServerReadyWait?.reject(new Error('Qwen3 server killed'));
+  qwen3ServerReadyWait = null;
   if (qwen3PendingRequest) {
     qwen3PendingRequest.reject(new Error('Qwen3 server killed'));
     qwen3PendingRequest = null;
@@ -739,6 +749,8 @@ function ensureQwen3Server(): Promise<void> {
       qwen3ServerReady = false;
       qwen3ServerProcess = null;
       qwen3ServerStarting = null;
+      qwen3ServerReadyWait?.reject(new Error('Qwen3 server process died during startup'));
+      qwen3ServerReadyWait = null;
       if (qwen3PendingRequest) {
         qwen3PendingRequest.reject(new Error(`Qwen3 server exited with code ${code}`));
         qwen3PendingRequest = null;
@@ -747,9 +759,10 @@ function ensureQwen3Server(): Promise<void> {
 
     child.stdout.on('data', (chunk: Buffer) => {
       if (qwen3ServerProcess !== child) return;
-      qwen3ServerBuffer += chunk.toString();
-      const lines = qwen3ServerBuffer.split('\n');
-      qwen3ServerBuffer = lines.pop() || '';
+      const result = appendNativeHelperLineBuffer(qwen3ServerBuffer, chunk);
+      qwen3ServerBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('Qwen3');
+      const lines = result.lines;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -758,6 +771,8 @@ function ensureQwen3Server(): Promise<void> {
           if (json.ready) {
             qwen3ServerReady = true;
             console.log('[Qwen3] Server ready (models loaded)');
+            qwen3ServerReadyWait?.markReady();
+            qwen3ServerReadyWait = null;
             continue;
           }
           if (qwen3PendingRequest) {
@@ -773,33 +788,18 @@ function ensureQwen3Server(): Promise<void> {
       }
     });
 
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (qwen3ServerProcess !== child) return;
-        reject(new Error('Qwen3 server startup timed out (120s)'));
-        killQwen3Server(child);
-      }, 120_000);
-
-      const checkReady = setInterval(() => {
-        if (qwen3ServerProcess !== child) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Qwen3 server startup superseded'));
-          return;
-        }
-        if (qwen3ServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        if (child.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Qwen3 server process died during startup'));
-        }
-      }, 50);
+    const readyWait = createNativeHelperReadinessWait({
+      timeoutMs: 120_000,
+      timeoutMessage: 'Qwen3 server startup timed out (120s)',
+      supersededMessage: 'Qwen3 server startup superseded',
+      diedMessage: 'Qwen3 server process died during startup',
+      isActive: () => qwen3ServerProcess === child,
+      isKilled: () => child.killed,
+      kill: () => killQwen3Server(child),
     });
+    qwen3ServerReadyWait = readyWait;
+    await readyWait.promise;
+    if (qwen3ServerReadyWait === readyWait) qwen3ServerReadyWait = null;
   })();
 
   qwen3ServerStarting = startingPromise;
@@ -1257,6 +1257,7 @@ let whisperCppServerProcess: any = null;
 let whisperCppServerReady = false;
 let whisperCppServerStarting: Promise<void> | null = null;
 let whisperCppServerBuffer = '';
+let whisperCppServerReadyWait: NativeHelperReadinessWait | null = null;
 type PendingWhisperCppRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
 let whisperCppPendingRequest: PendingWhisperCppRequest | null = null;
 
@@ -1272,6 +1273,8 @@ function killWhisperCppServer(processToKill: any = whisperCppServerProcess): voi
   whisperCppServerReady = false;
   whisperCppServerStarting = null;
   whisperCppServerBuffer = '';
+  whisperCppServerReadyWait?.reject(new Error('Whisper.cpp server killed'));
+  whisperCppServerReadyWait = null;
   if (whisperCppPendingRequest) {
     whisperCppPendingRequest.reject(new Error('Whisper.cpp server killed'));
     whisperCppPendingRequest = null;
@@ -1304,6 +1307,8 @@ function ensureWhisperCppServer(): Promise<void> {
       whisperCppServerReady = false;
       whisperCppServerProcess = null;
       whisperCppServerStarting = null;
+      whisperCppServerReadyWait?.reject(new Error('Whisper.cpp server process died during startup'));
+      whisperCppServerReadyWait = null;
       if (whisperCppPendingRequest) {
         whisperCppPendingRequest.reject(new Error(`Whisper.cpp server exited with code ${code}`));
         whisperCppPendingRequest = null;
@@ -1312,9 +1317,10 @@ function ensureWhisperCppServer(): Promise<void> {
 
     child.stdout.on('data', (chunk: Buffer | string) => {
       if (whisperCppServerProcess !== child) return;
-      whisperCppServerBuffer += chunk.toString();
-      const lines = whisperCppServerBuffer.split('\n');
-      whisperCppServerBuffer = lines.pop() || '';
+      const result = appendNativeHelperLineBuffer(whisperCppServerBuffer, chunk);
+      whisperCppServerBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('Whisper.cpp');
+      const lines = result.lines;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -1323,6 +1329,8 @@ function ensureWhisperCppServer(): Promise<void> {
           if (json.ready) {
             whisperCppServerReady = true;
             console.log('[Whisper][whisper.cpp] Server ready (model loaded)');
+            whisperCppServerReadyWait?.markReady();
+            whisperCppServerReadyWait = null;
             continue;
           }
           if (whisperCppPendingRequest) {
@@ -1344,33 +1352,18 @@ function ensureWhisperCppServer(): Promise<void> {
     });
 
     // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (whisperCppServerProcess !== child) return;
-        reject(new Error('Whisper.cpp server startup timed out (60s)'));
-        killWhisperCppServer(child);
-      }, 60_000);
-
-      const checkReady = setInterval(() => {
-        if (whisperCppServerProcess !== child) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Whisper.cpp server startup superseded'));
-          return;
-        }
-        if (whisperCppServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        if (child.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Whisper.cpp server process died during startup'));
-        }
-      }, 50);
+    const readyWait = createNativeHelperReadinessWait({
+      timeoutMs: 60_000,
+      timeoutMessage: 'Whisper.cpp server startup timed out (60s)',
+      supersededMessage: 'Whisper.cpp server startup superseded',
+      diedMessage: 'Whisper.cpp server process died during startup',
+      isActive: () => whisperCppServerProcess === child,
+      isKilled: () => child.killed,
+      kill: () => killWhisperCppServer(child),
     });
+    whisperCppServerReadyWait = readyWait;
+    await readyWait.promise;
+    if (whisperCppServerReadyWait === readyWait) whisperCppServerReadyWait = null;
   })();
 
   whisperCppServerStarting = startingPromise;
@@ -1529,6 +1522,7 @@ let audioCapturerProcess: any = null;
 let audioCapturerReady = false;
 let audioCapturerStarting: Promise<void> | null = null;
 let audioCapturerBuffer = '';
+let audioCapturerReadyWait: NativeHelperReadinessWait | null = null;
 let audioCapturerRecording = false;
 type PendingAudioCapturerRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
 let audioCapturerPendingRequest: PendingAudioCapturerRequest | null = null;
@@ -1553,6 +1547,8 @@ function killAudioCapturer(processToKill: any = audioCapturerProcess): void {
   audioCapturerReady = false;
   audioCapturerStarting = null;
   audioCapturerBuffer = '';
+  audioCapturerReadyWait?.reject(new Error('Audio capturer killed'));
+  audioCapturerReadyWait = null;
   audioCapturerRecording = false;
   if (audioCapturerPendingRequest) {
     audioCapturerPendingRequest.reject(new Error('Audio capturer killed'));
@@ -1638,6 +1634,8 @@ function warmAudioCapturer(): Promise<void> {
       audioCapturerProcess = null;
       audioCapturerStarting = null;
       audioCapturerRecording = false;
+      audioCapturerReadyWait?.reject(new Error('Audio capturer process died during warmup'));
+      audioCapturerReadyWait = null;
       if (audioCapturerPendingRequest) {
         audioCapturerPendingRequest.reject(new Error(`Audio capturer exited with code ${code}`));
         audioCapturerPendingRequest = null;
@@ -1646,9 +1644,10 @@ function warmAudioCapturer(): Promise<void> {
 
     child.stdout.on('data', (chunk: Buffer | string) => {
       if (audioCapturerProcess !== child) return;
-      audioCapturerBuffer += chunk.toString();
-      const lines = audioCapturerBuffer.split('\n');
-      audioCapturerBuffer = lines.pop() || '';
+      const result = appendNativeHelperLineBuffer(audioCapturerBuffer, chunk);
+      audioCapturerBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('AudioCapturer');
+      const lines = result.lines;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -1658,6 +1657,8 @@ function warmAudioCapturer(): Promise<void> {
           if (json.ready) {
             audioCapturerReady = true;
             console.log('[AudioCapturer] Engine ready (mic hot)');
+            audioCapturerReadyWait?.markReady();
+            audioCapturerReadyWait = null;
             continue;
           }
 
@@ -1702,33 +1703,18 @@ function warmAudioCapturer(): Promise<void> {
     child.stdin.write(JSON.stringify({ command: 'warmup' }) + '\n');
 
     // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (audioCapturerProcess !== child) return;
-        reject(new Error('Audio capturer warmup timed out (30s)'));
-        killAudioCapturer(child);
-      }, 30_000);
-
-      const checkReady = setInterval(() => {
-        if (audioCapturerProcess !== child) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Audio capturer warmup superseded'));
-          return;
-        }
-        if (audioCapturerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        if (child.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Audio capturer process died during warmup'));
-        }
-      }, 50);
+    const readyWait = createNativeHelperReadinessWait({
+      timeoutMs: 30_000,
+      timeoutMessage: 'Audio capturer warmup timed out (30s)',
+      supersededMessage: 'Audio capturer warmup superseded',
+      diedMessage: 'Audio capturer process died during warmup',
+      isActive: () => audioCapturerProcess === child,
+      isKilled: () => child.killed,
+      kill: () => killAudioCapturer(child),
     });
+    audioCapturerReadyWait = readyWait;
+    await readyWait.promise;
+    if (audioCapturerReadyWait === readyWait) audioCapturerReadyWait = null;
   })();
 
   audioCapturerStarting = startingPromise;
@@ -5700,16 +5686,19 @@ async function ensureSpeechRecognitionAccess(prompt = true): Promise<SpeechRecog
     };
 
     proc.stdout.on('data', (chunk: Buffer | string) => {
-      stdoutBuffer += String(chunk || '');
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() || '';
+      const result = appendNativeHelperLineBuffer(stdoutBuffer, chunk);
+      stdoutBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('SpeechRecognitionPermission');
+      const lines = result.lines;
       for (const line of lines) {
         parseLine(line);
       }
     });
 
     proc.stderr.on('data', (chunk: Buffer | string) => {
-      stderrBuffer += String(chunk || '');
+      const result = appendNativeHelperTextBuffer(stderrBuffer, chunk);
+      stderrBuffer = result.buffer;
+      if (result.truncated) warnNativeHelperLineBufferTruncated('SpeechRecognitionPermission stderr');
     });
 
     proc.on('error', (error: Error) => {
@@ -18911,7 +18900,9 @@ if let tiff = image?.tiffRepresentation {
       let stderrBuffer = '';
 
       child.stdout?.on('data', (chunk: Buffer) => {
-        stdoutBuffer += chunk.toString('utf8');
+        const result = appendNativeHelperTextBuffer(stdoutBuffer, chunk);
+        stdoutBuffer = result.buffer;
+        if (result.truncated) warnNativeHelperLineBufferTruncated('KeyboardLock stdout');
         if (!settled && stdoutBuffer.includes('ready')) {
           settled = true;
           resolve({ ok: true });
@@ -18919,7 +18910,9 @@ if let tiff = image?.tiffRepresentation {
       });
 
       child.stderr?.on('data', (chunk: Buffer) => {
-        stderrBuffer += chunk.toString('utf8');
+        const result = appendNativeHelperTextBuffer(stderrBuffer, chunk);
+        stderrBuffer = result.buffer;
+        if (result.truncated) warnNativeHelperLineBufferTruncated('KeyboardLock stderr');
       });
 
       child.on('exit', (code: number | null) => {
