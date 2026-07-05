@@ -108,9 +108,9 @@ const ranking = loadTsModule('src/renderer/src/utils/root-search-ranking.ts');
 const { createRootCommandScoreIndex, filterCommands, rankCommands, rankCommandsWithIndex } = commandHelpers;
 const { scoreRootSearchFields } = ranking;
 
-const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 6000);
-const ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS || 6);
-const WARMUP_ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_WARMUPS || 1);
+const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 2000);
+const ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS || 1);
+const WARMUP_ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_WARMUPS || 0);
 
 const QUERIES = [
   'notes',

@@ -1852,6 +1852,7 @@ function tabToBrowserSearchEntry(tab: BrowserTabEntry): BrowserSearchEntry {
 
 export const __browserSearchTestAccess = {
   buildBrowserEntryIndex,
+  filterBrowserResults,
   getOrderedBrowserResults,
   getRankedBrowserResults,
 };
