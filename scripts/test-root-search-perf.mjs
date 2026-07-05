@@ -111,7 +111,26 @@ const { scoreRootSearchFields } = ranking;
 const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 2000);
 const ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS || 1);
 const WARMUP_ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_WARMUPS || 0);
-const INDEXED_SPEEDUP_MIN = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN || 0);
+
+function readNonNegativeBudget(envName) {
+  const rawValue = process.env[envName];
+  if (rawValue === undefined || rawValue === '') return null;
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`Root search perf budget configuration error: ${envName} must be a finite non-negative number, got "${rawValue}".`);
+    process.exit(1);
+  }
+
+  return value;
+}
+
+const PERF_BUDGETS = {
+  optimizedMedianMs: readNonNegativeBudget('SUPERCMD_ROOT_SEARCH_PERF_OPTIMIZED_MEDIAN_MS'),
+  indexedMedianMs: readNonNegativeBudget('SUPERCMD_ROOT_SEARCH_PERF_INDEXED_MEDIAN_MS'),
+  compileMedianMs: readNonNegativeBudget('SUPERCMD_ROOT_SEARCH_PERF_COMPILE_MEDIAN_MS'),
+  indexedSpeedupMin: readNonNegativeBudget('SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN'),
+};
 
 const QUERIES = [
   'notes',
@@ -337,6 +356,47 @@ function measureSingle(label, fn) {
   return { label, median, min, max, total };
 }
 
+function formatMs(value) {
+  return `${value.toFixed(2)}ms`;
+}
+
+function formatSpeedup(value) {
+  return `${value.toFixed(2)}x`;
+}
+
+function collectBudgetFailures({ optimized, indexed, compile, indexedVsOptimizedSpeedup }) {
+  const failures = [];
+
+  if (PERF_BUDGETS.optimizedMedianMs !== null && optimized.median > PERF_BUDGETS.optimizedMedianMs) {
+    failures.push(
+      `${optimized.label} median ${formatMs(optimized.median)} exceeded SUPERCMD_ROOT_SEARCH_PERF_OPTIMIZED_MEDIAN_MS=${formatMs(PERF_BUDGETS.optimizedMedianMs)}`
+    );
+  }
+
+  if (PERF_BUDGETS.indexedMedianMs !== null && indexed.median > PERF_BUDGETS.indexedMedianMs) {
+    failures.push(
+      `${indexed.label} median ${formatMs(indexed.median)} exceeded SUPERCMD_ROOT_SEARCH_PERF_INDEXED_MEDIAN_MS=${formatMs(PERF_BUDGETS.indexedMedianMs)}`
+    );
+  }
+
+  if (PERF_BUDGETS.compileMedianMs !== null && compile.median > PERF_BUDGETS.compileMedianMs) {
+    failures.push(
+      `${compile.label} median ${formatMs(compile.median)} exceeded SUPERCMD_ROOT_SEARCH_PERF_COMPILE_MEDIAN_MS=${formatMs(PERF_BUDGETS.compileMedianMs)}`
+    );
+  }
+
+  if (
+    PERF_BUDGETS.indexedSpeedupMin !== null
+    && indexedVsOptimizedSpeedup < PERF_BUDGETS.indexedSpeedupMin
+  ) {
+    failures.push(
+      `optimized-vs-indexed-speedup ${formatSpeedup(indexedVsOptimizedSpeedup)} fell below SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN=${formatSpeedup(PERF_BUDGETS.indexedSpeedupMin)}`
+    );
+  }
+
+  return failures;
+}
+
 const { commands, aliases } = makeCommands(COMMAND_COUNT);
 
 assertSameRootCommandMatches(commands, aliases);
@@ -376,9 +436,11 @@ console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
 console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
 console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);
 
-if (INDEXED_SPEEDUP_MIN > 0) {
-  assert.ok(
-    indexedSpeedup >= INDEXED_SPEEDUP_MIN,
-    `indexed root command scoring should be at least ${INDEXED_SPEEDUP_MIN.toFixed(2)}x faster than legacy, got ${indexedSpeedup.toFixed(2)}x`
-  );
+const budgetFailures = collectBudgetFailures({ optimized, indexed, compile, indexedVsOptimizedSpeedup });
+if (budgetFailures.length > 0) {
+  console.error('Root search perf budget failures:');
+  for (const failure of budgetFailures) {
+    console.error(`- ${failure}`);
+  }
+  process.exitCode = 1;
 }
