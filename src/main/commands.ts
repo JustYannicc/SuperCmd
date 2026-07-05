@@ -968,7 +968,7 @@ function discoverScriptCommandInfos(): CommandInfo[] {
   }
 }
 
-async function discoverQuickLinkCommandInfos(): Promise<CommandInfo[]> {
+async function discoverQuickLinkCommandInfos(options: { throwOnError?: boolean } = {}): Promise<CommandInfo[]> {
   try {
     const quickLinks = getAllQuickLinks();
     return await Promise.all(
@@ -995,6 +995,9 @@ async function discoverQuickLinkCommandInfos(): Promise<CommandInfo[]> {
       })
     );
   } catch (e) {
+    if (options.throwOnError) {
+      throw e;
+    }
     console.error('Failed to discover quick links:', e);
     return [];
   }
@@ -1672,6 +1675,16 @@ function getExtensionInsertionIndex(commands: CommandInfo[]): number {
 
   const quickLinkIndex = commands.findIndex((command) => isQuickLinkCommandId(command.id));
   if (quickLinkIndex >= 0) return quickLinkIndex;
+ 
+  const systemIndex = commands.findIndex((command) => command.category === 'system');
+  if (systemIndex >= 0) return systemIndex;
+
+  return commands.length;
+}
+
+function getQuickLinkInsertionIndex(commands: CommandInfo[]): number {
+  const existingQuickLinkIndex = commands.findIndex((command) => isQuickLinkCommandId(command.id));
+  if (existingQuickLinkIndex >= 0) return existingQuickLinkIndex;
 
   const systemIndex = commands.findIndex((command) => command.category === 'system');
   if (systemIndex >= 0) return systemIndex;
@@ -1701,6 +1714,31 @@ function rebuildCommandsWithFreshExtensions(
     ...beforeExtensions,
     ...extensionCommands.map(cloneCommandForTargetedRefresh),
     ...afterExtensions,
+  ];
+}
+
+function rebuildCommandsWithFreshQuickLinks(
+  baseCommands: CommandInfo[],
+  quickLinkCommands: CommandInfo[]
+): CommandInfo[] {
+  const insertionIndex = getQuickLinkInsertionIndex(baseCommands);
+  const beforeQuickLinks: CommandInfo[] = [];
+  const afterQuickLinks: CommandInfo[] = [];
+
+  baseCommands.forEach((command, index) => {
+    if (isQuickLinkCommandId(command.id)) return;
+    const cloned = cloneCommandForTargetedRefresh(command);
+    if (index < insertionIndex) {
+      beforeQuickLinks.push(cloned);
+    } else {
+      afterQuickLinks.push(cloned);
+    }
+  });
+
+  return [
+    ...beforeQuickLinks,
+    ...quickLinkCommands.map(cloneCommandForTargetedRefresh),
+    ...afterQuickLinks,
   ];
 }
 
@@ -2395,6 +2433,34 @@ export async function refreshCommandsForExtensionChange(): Promise<CommandInfo[]
   const refreshed = publishCommandCache(nextCommands);
   console.log(
     `[Commands] Refreshed ${extensionCommands.length} extension commands from cached app/settings base in ${Date.now() - t0}ms`
+  );
+  return refreshed;
+}
+
+export async function refreshCommandsForQuickLinkChange(): Promise<CommandInfo[]> {
+  if (!cachedCommands && !staleCommandsFallback) {
+    return refreshCommandsNow();
+  }
+
+  if (inflightDiscovery) {
+    try {
+      await inflightDiscovery;
+    } catch (error) {
+      console.warn('[Commands] Inflight refresh failed before quick link refresh:', error);
+    }
+  }
+
+  const baseCommands = cachedCommands || staleCommandsFallback;
+  if (!baseCommands) {
+    return refreshCommandsNow();
+  }
+
+  const t0 = Date.now();
+  const quickLinkCommands = await discoverQuickLinkCommandInfos({ throwOnError: true });
+  const nextCommands = rebuildCommandsWithFreshQuickLinks(baseCommands, quickLinkCommands);
+  const refreshed = publishCommandCache(nextCommands);
+  console.log(
+    `[Commands] Refreshed ${quickLinkCommands.length} quick link commands from cached app/settings base in ${Date.now() - t0}ms`
   );
   return refreshed;
 }
