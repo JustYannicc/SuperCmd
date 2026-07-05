@@ -8,6 +8,9 @@ import { EventEmitter } from 'node:events';
 
 const mainPath = path.resolve('src/main/main.ts');
 const mainSource = fs.readFileSync(mainPath, 'utf8');
+const nativeHelperLifecyclePath = path.resolve('src/main/native-helper-lifecycle.ts');
+const nativeHelperLifecycleSource = fs.readFileSync(nativeHelperLifecyclePath, 'utf8');
+const NATIVE_HELPER_LINE_BUFFER_MAX_CHARS = 256 * 1024;
 
 const helpers = [
   {
@@ -61,6 +64,97 @@ function expectContains(haystack, needle, message) {
 
 function countOccurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
+}
+
+function appendBoundedLineBufferForTest(buffer, chunk, maxChars = NATIVE_HELPER_LINE_BUFFER_MAX_CHARS) {
+  const combined = buffer + chunk.toString();
+  const rawLines = combined.split('\n');
+  let nextBuffer = rawLines.pop() ?? '';
+  let truncated = false;
+  const lines = [];
+
+  for (const line of rawLines) {
+    if (line.length >= maxChars) {
+      truncated = true;
+      continue;
+    }
+    lines.push(line);
+  }
+
+  if (nextBuffer.length > maxChars) {
+    nextBuffer = nextBuffer.slice(-maxChars);
+    truncated = true;
+  }
+
+  return { buffer: nextBuffer, lines, truncated };
+}
+
+function appendBoundedTextBufferForTest(buffer, chunk, maxChars = NATIVE_HELPER_LINE_BUFFER_MAX_CHARS) {
+  const combined = buffer + chunk.toString();
+  if (combined.length <= maxChars) {
+    return { buffer: combined, truncated: false };
+  }
+  return { buffer: combined.slice(-maxChars), truncated: true };
+}
+
+function createReadinessWaitForTest(options) {
+  let settled = false;
+  let timeout = null;
+  let resolvePromise = null;
+  let rejectPromise = null;
+
+  const cleanup = () => {
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+    resolvePromise = null;
+    rejectPromise = null;
+  };
+
+  const settle = (error) => {
+    if (settled) return;
+    settled = true;
+    const resolve = resolvePromise;
+    const reject = rejectPromise;
+    cleanup();
+    if (error) {
+      reject?.(error);
+    } else {
+      resolve?.();
+    }
+  };
+
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+    timeout = setTimeout(() => {
+      if (!options.isActive()) {
+        settle(new Error(options.supersededMessage));
+        return;
+      }
+      settle(new Error(options.timeoutMessage));
+      options.kill();
+    }, options.timeoutMs);
+  });
+
+  return {
+    promise,
+    markReady: () => {
+      if (!options.isActive()) {
+        settle(new Error(options.supersededMessage));
+        return;
+      }
+      if (options.isKilled()) {
+        settle(new Error(options.diedMessage));
+        return;
+      }
+      settle();
+    },
+    reject: (error) => {
+      settle(error);
+    },
+  };
 }
 
 class FakeChild extends EventEmitter {
@@ -188,24 +282,150 @@ test('native helper lifecycle source uses active-child guards', () => {
     );
     expectContains(
       killSource,
-      `if (processToKill && ${helper.processVar} !== processToKill) return;`,
+      `if (processToKill !== ${helper.processVar}) {`,
       `${helper.label} kill helper should not clear replacement state for a stale child`
     );
+    const staleChildGuardCount =
+      countOccurrences(ensureSource, `if (${helper.processVar} !== child) return;`) +
+      countOccurrences(ensureSource, `if (${helper.processVar} !== child) {`);
     assert.ok(
-      countOccurrences(ensureSource, `if (${helper.processVar} !== child) return;`) >= 2,
+      staleChildGuardCount >= 2,
       `${helper.label} exit and stdout handlers should ignore stale child events`
     );
     expectContains(
       ensureSource,
-      `${helper.kill}(child);`,
+      `kill: () => ${helper.kill}(child)`,
       `${helper.label} startup timeout should only kill the child it started`
     );
     expectContains(
       ensureSource,
-      `if (${helper.processVar} !== child) {`,
+      `isActive: () => ${helper.processVar} === child`,
       `${helper.label} startup wait should detect a superseded child by identity`
     );
+    expectContains(
+      ensureSource,
+      'appendNativeHelperLineBuffer',
+      `${helper.label} stdout parser should cap partial native-helper lines`
+    );
+    assert.equal(
+      countOccurrences(ensureSource, 'setInterval('),
+      0,
+      `${helper.label} startup readiness should not poll`
+    );
   }
+});
+
+test('native helper lifecycle utility source keeps readiness event-driven and buffers bounded', () => {
+  expectContains(
+    nativeHelperLifecycleSource,
+    'export const NATIVE_HELPER_LINE_BUFFER_MAX_CHARS = 256 * 1024;',
+    'native helper partial-line buffer cap should be explicit'
+  );
+  assert.equal(
+    countOccurrences(nativeHelperLifecycleSource, 'setInterval('),
+    0,
+    'native helper readiness utility should not poll'
+  );
+  assert.equal(
+    countOccurrences(nativeHelperLifecycleSource, 'setTimeout('),
+    1,
+    'native helper readiness utility should keep one startup timeout'
+  );
+  expectContains(
+    nativeHelperLifecycleSource,
+    'nextBuffer = nextBuffer.slice(-maxChars);',
+    'native helper buffer should keep a bounded suffix for malformed partial lines'
+  );
+  expectContains(
+    nativeHelperLifecycleSource,
+    'export function appendNativeHelperTextBuffer',
+    'native helper stderr/plain text buffers should have a shared cap'
+  );
+});
+
+test('native helper readiness wait uses one timeout and no polling interval', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  let timeoutCount = 0;
+  let intervalCount = 0;
+  const timers = new Map();
+  let nextTimerId = 1;
+
+  globalThis.setTimeout = (callback, delay) => {
+    const id = nextTimerId++;
+    timeoutCount += 1;
+    timers.set(id, { callback, delay, cleared: false });
+    return id;
+  };
+  globalThis.clearTimeout = (id) => {
+    const timer = timers.get(id);
+    if (timer) timer.cleared = true;
+  };
+  globalThis.setInterval = () => {
+    intervalCount += 1;
+    throw new Error('readiness wait must not allocate an interval');
+  };
+  globalThis.clearInterval = () => {};
+
+  try {
+    let active = true;
+    let killed = false;
+    const wait = createReadinessWaitForTest({
+      timeoutMs: 120_000,
+      timeoutMessage: 'timeout',
+      supersededMessage: 'superseded',
+      diedMessage: 'died',
+      isActive: () => active,
+      isKilled: () => killed,
+      kill: () => {
+        killed = true;
+        active = false;
+      },
+    });
+
+    assert.equal(timeoutCount, 1, 'event-driven readiness should keep only the startup timeout');
+    assert.equal(intervalCount, 0, 'event-driven readiness should not allocate polling intervals');
+
+    wait.markReady();
+    await wait.promise;
+    assert.ok([...timers.values()].every((timer) => timer.cleared), 'ready event should clear the startup timeout');
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test('native helper line buffers cap malformed partial output while preserving JSON lines', () => {
+  const oversizedPartial = 'x'.repeat(NATIVE_HELPER_LINE_BUFFER_MAX_CHARS + 128);
+  const first = appendBoundedLineBufferForTest('', oversizedPartial);
+
+  assert.equal(first.truncated, true);
+  assert.equal(first.lines.length, 0);
+  assert.equal(first.buffer.length, NATIVE_HELPER_LINE_BUFFER_MAX_CHARS);
+
+  const second = appendBoundedLineBufferForTest(first.buffer, '\n{"ready":true}\n{"text":"hel');
+  assert.equal(second.truncated, true, 'oversized malformed line should be dropped after newline');
+  assert.deepEqual(second.lines, ['{"ready":true}']);
+  assert.equal(second.buffer, '{"text":"hel');
+
+  const third = appendBoundedLineBufferForTest(second.buffer, 'lo"}\n');
+  assert.equal(third.truncated, false);
+  assert.deepEqual(third.lines, ['{"text":"hello"}']);
+  assert.equal(third.buffer, '');
+});
+
+test('native helper text buffers cap stderr and plain output suffixes', () => {
+  const oversized = `prefix-${'y'.repeat(NATIVE_HELPER_LINE_BUFFER_MAX_CHARS)}-tail`;
+  const result = appendBoundedTextBufferForTest('', oversized);
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.buffer.length, NATIVE_HELPER_LINE_BUFFER_MAX_CHARS);
+  assert.ok(result.buffer.endsWith('-tail'));
 });
 
 test('legacy reproduction shows why stale exits are dangerous', () => {
@@ -239,5 +459,19 @@ test('guarded lifecycle preserves replacement process and pending request', () =
     assert.notEqual(harness.starting, null, `${helper.label} replacement startup should remain tracked`);
     assert.notEqual(harness.pendingRequest, null, `${helper.label} replacement pending request should remain pending`);
     assert.deepEqual(harness.rejections, [], `${helper.label} stale exit should not reject replacement request`);
+  }
+});
+
+test('guarded lifecycle rejects and clears the active pending request on kill', () => {
+  for (const helper of helpers) {
+    const harness = createLifecycleHarness({ guarded: true, label: helper.label });
+    const child = harness.spawn('active');
+    harness.setPending();
+
+    harness.kill(child);
+
+    assert.equal(harness.activeProcess, null, `${helper.label} active process should clear on kill`);
+    assert.equal(harness.pendingRequest, null, `${helper.label} pending request should clear on kill`);
+    assert.deepEqual(harness.rejections, [`${helper.label} killed`]);
   }
 });
