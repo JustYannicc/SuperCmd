@@ -17,7 +17,8 @@ const Module = require('node:module');
 function createBuildFixture(commandCount) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `sc-extension-multi-build-${commandCount}-`));
   const userDataDir = path.join(tmpDir, 'userData');
-  const extDir = path.join(tmpDir, 'extension');
+  const extName = `multi-build-fixture-${commandCount}`;
+  const extDir = path.join(userDataDir, 'extensions', extName);
   const srcDir = path.join(extDir, 'src');
   fs.mkdirSync(srcDir, { recursive: true });
 
@@ -44,7 +45,7 @@ function createBuildFixture(commandCount) {
     path.join(extDir, 'package.json'),
     JSON.stringify(
       {
-        name: `multi-build-fixture-${commandCount}`,
+        name: extName,
         title: `Multi Build Fixture ${commandCount}`,
         description: 'Fixture for batched extension builds',
         owner: 'codex',
@@ -55,7 +56,7 @@ function createBuildFixture(commandCount) {
     )
   );
 
-  return { tmpDir, userDataDir, extDir };
+  return { tmpDir, userDataDir, extDir, extName };
 }
 
 async function withBundledRunner(fixture, callback) {
@@ -69,11 +70,19 @@ async function withBundledRunner(fixture, callback) {
       const entryCount = Array.isArray(options.entryPoints)
         ? options.entryPoints.length
         : Object.keys(options.entryPoints || {}).length;
+      const entryNames = Array.isArray(options.entryPoints)
+        ? options.entryPoints.map((entryPoint) => path.basename(entryPoint, path.extname(entryPoint)))
+        : Object.keys(options.entryPoints || {});
+      const started = performance.now();
+      const result = await originalBuild.call(this, options);
       buildCalls.push({
         entryCount,
+        entryNames,
         outdir: options.outdir,
         outfile: options.outfile,
+        durationMs: Number((performance.now() - started).toFixed(2)),
       });
+      return result;
     }
     return originalBuild.call(this, options);
   };
@@ -176,6 +185,51 @@ test('buildAllCommands rebuilds only stale commands in a multi-command extension
         untouchedBefore,
         'expected unchanged command output to be reused'
       );
+    });
+  } finally {
+    fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildSingleCommand stamp lets buildAllCommands reuse on-demand bundle', async () => {
+  const fixture = createBuildFixture(3);
+  try {
+    await withBundledRunner(fixture, async ({ runner, buildCalls }) => {
+      const singleStarted = performance.now();
+      assert.equal(await runner.buildSingleCommand(fixture.extName, 'command-0'), true);
+      const singleElapsedMs = Number((performance.now() - singleStarted).toFixed(2));
+
+      const fullStarted = performance.now();
+      assert.equal(await runner.buildAllCommands(fixture.extName, fixture.extDir), 3);
+      const fullElapsedMs = Number((performance.now() - fullStarted).toFixed(2));
+
+      assert.equal(buildCalls.length, 2, 'expected one on-demand build and one partial full build');
+      assert.equal(buildCalls[0].entryCount, 1);
+      assert.deepEqual(buildCalls[0].entryNames, ['command-0']);
+      assert.equal(buildCalls[0].outfile, path.join(fixture.extDir, '.sc-build', 'command-0.js'));
+      assert.equal(buildCalls[1].entryCount, 2, 'expected full build to skip on-demand-stamped command');
+      assert.deepEqual(buildCalls[1].entryNames.sort(), ['command-1', 'command-2']);
+      assert.equal(buildCalls[1].outdir, path.join(fixture.extDir, '.sc-build'));
+
+      const stamp = JSON.parse(
+        fs.readFileSync(path.join(fixture.extDir, '.sc-build', '.sc-build-stamp.json'), 'utf-8')
+      );
+      assert.deepEqual(
+        stamp.commands.map((command) => command.name).sort(),
+        ['command-0', 'command-1', 'command-2']
+      );
+
+      console.log(JSON.stringify({
+        scenario: 'on-demand-single-then-full-build',
+        elapsedMs: {
+          single: singleElapsedMs,
+          full: fullElapsedMs,
+        },
+        esbuildCalls: buildCalls.map((call) => ({
+          entryNames: call.entryNames,
+          durationMs: call.durationMs,
+        })),
+      }));
     });
   } finally {
     fs.rmSync(fixture.tmpDir, { recursive: true, force: true });

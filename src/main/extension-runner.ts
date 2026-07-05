@@ -176,6 +176,12 @@ interface ExtensionBuildStamp {
   commands: ExtensionCommandBuildStamp[];
 }
 
+interface ExtensionBuildInput {
+  requiresNodeModules: boolean;
+  tsconfigRaw: string;
+  buildContext: Omit<ExtensionBuildStamp, 'commands'>;
+}
+
 const extensionBuildStampVersion = 1;
 const extensionBuildStampFile = '.sc-build-stamp.json';
 
@@ -1022,6 +1028,52 @@ function createExtensionBuildContext(
   };
 }
 
+function getManifestExternal(pkg: any): string[] {
+  return Array.isArray(pkg?.external)
+    ? pkg.external.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
+    : [];
+}
+
+function createExtensionBuildInput(
+  extName: string,
+  extPath: string,
+  pkg: any
+): ExtensionBuildInput {
+  const manifestExternal = getManifestExternal(pkg);
+  const tsconfigRaw = getEsbuildTsconfigRaw(extPath);
+  return {
+    requiresNodeModules: extensionRequiresNodeModules(pkg),
+    tsconfigRaw,
+    buildContext: createExtensionBuildContext(extName, extPath, pkg, manifestExternal, tsconfigRaw),
+  };
+}
+
+function createCommonExtensionBuildOptions(
+  extPath: string,
+  extNodeModules: string,
+  buildInput: ExtensionBuildInput
+): Record<string, any> {
+  return {
+    absWorkingDir: extPath,
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    plugins: [createNativeSchemeExternalPlugin()],
+    external: buildInput.buildContext.external,
+    nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
+    target: 'es2020',
+    jsx: 'automatic',
+    jsxImportSource: 'react',
+    tsconfigRaw: buildInput.tsconfigRaw,
+    define: {
+      'process.env.NODE_ENV': '"production"',
+      'global': 'globalThis',
+    },
+    logLevel: 'warning',
+    metafile: true,
+  };
+}
+
 function sameExtensionBuildContext(
   stamp: ExtensionBuildStamp | null,
   context: Omit<ExtensionBuildStamp, 'commands'>
@@ -1121,6 +1173,27 @@ function createCommandBuildStamp(
   };
 }
 
+function writeMergedCommandBuildStamp(
+  buildDir: string,
+  buildContext: Omit<ExtensionBuildStamp, 'commands'>,
+  commandStamp: ExtensionCommandBuildStamp
+): void {
+  const previousStamp = readExtensionBuildStamp(buildDir);
+  const nextCommandStamps = new Map<string, ExtensionCommandBuildStamp>();
+
+  if (sameExtensionBuildContext(previousStamp, buildContext)) {
+    for (const existingStamp of previousStamp.commands) {
+      nextCommandStamps.set(existingStamp.name, existingStamp);
+    }
+  }
+
+  nextCommandStamps.set(commandStamp.name, commandStamp);
+  writeExtensionBuildStamp(buildDir, {
+    ...buildContext,
+    commands: [...nextCommandStamps.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  });
+}
+
 /**
  * Build ALL commands for an installed extension using esbuild.
  * Called at install time so the extension is ready to run instantly.
@@ -1146,21 +1219,16 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
   invalidateExtensionStaticCacheForPath(extPath);
 
   let commands: any[];
-  let pkg: any;
-  let requiresNodeModules = false;
-  let manifestExternal: string[] = [];
+  let buildInput: ExtensionBuildInput;
   try {
-    pkg = readExtensionManifest(extPath);
+    const pkg = readExtensionManifest(extPath);
     if (!pkg) return 0;
     if (!isManifestPlatformCompatible(pkg)) {
       console.warn(`Skipping build for incompatible extension ${extName}`);
       return 0;
     }
     commands = pkg.commands || [];
-    requiresNodeModules = extensionRequiresNodeModules(pkg);
-    manifestExternal = Array.isArray(pkg.external)
-      ? pkg.external.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
-      : [];
+    buildInput = createExtensionBuildInput(extName, extPath, pkg);
   } catch {
     return 0;
   }
@@ -1168,8 +1236,7 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
   if (commands.length === 0) return 0;
 
   const buildDir = getBuildDir(extPath);
-  const tsconfigRaw = getEsbuildTsconfigRaw(extPath);
-  const buildContext = createExtensionBuildContext(extName, extPath, pkg, manifestExternal, tsconfigRaw);
+  const buildContext = buildInput.buildContext;
   const previousStamp = readExtensionBuildStamp(buildDir);
   const matchingStamp = sameExtensionBuildContext(previousStamp, buildContext) ? previousStamp : null;
   const buildableCommands: Array<{ cmd: any; entryFile: string; outFile: string }> = [];
@@ -1224,7 +1291,7 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
   }
 
   const extNodeModules = path.join(extPath, 'node_modules');
-  if (requiresNodeModules && !fs.existsSync(extNodeModules)) {
+  if (buildInput.requiresNodeModules && !fs.existsSync(extNodeModules)) {
     try {
       const { installExtensionDeps } = require('./extension-registry');
       await installExtensionDeps(extPath);
@@ -1239,25 +1306,7 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
   }
 
   const esbuild = requireEsbuild();
-  const commonOptions = {
-    absWorkingDir: extPath,
-    bundle: true,
-    format: 'cjs',
-    platform: 'node',
-    plugins: [createNativeSchemeExternalPlugin()],
-    external: buildContext.external,
-    nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
-    target: 'es2020',
-    jsx: 'automatic',
-    jsxImportSource: 'react',
-    tsconfigRaw,
-    define: {
-      'process.env.NODE_ENV': '"production"',
-      'global': 'globalThis',
-    },
-    logLevel: 'warning',
-    metafile: true,
-  };
+  const commonOptions = createCommonExtensionBuildOptions(extPath, extNodeModules, buildInput);
 
   for (const { outFile } of staleCommands) {
     try {
@@ -1494,8 +1543,7 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
   invalidateExtensionStaticCacheForPath(extPath);
 
   let cmd: any;
-  let requiresNodeModules = false;
-  let manifestExternal: string[] = [];
+  let buildInput: ExtensionBuildInput;
   try {
     const pkg = readExtensionManifest(extPath);
     if (!pkg) return false;
@@ -1505,10 +1553,7 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
     }
     const commands = pkg.commands || [];
     cmd = commands.find((c: any) => c.name === cmdName);
-    requiresNodeModules = extensionRequiresNodeModules(pkg);
-    manifestExternal = Array.isArray(pkg.external)
-      ? pkg.external.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
-      : [];
+    buildInput = createExtensionBuildInput(extName, extPath, pkg);
   } catch (e: any) {
     console.error(`buildSingleCommand: failed to parse package.json for ${extName}:`, e?.message);
     return false;
@@ -1536,7 +1581,7 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
   const extNodeModules = path.join(extPath, 'node_modules');
 
   // If node_modules is missing, install dependencies first
-  if (requiresNodeModules && !fs.existsSync(extNodeModules)) {
+  if (buildInput.requiresNodeModules && !fs.existsSync(extNodeModules)) {
     console.log(`  node_modules missing for ${extName}, installing dependencies…`);
     try {
       const { installExtensionDeps } = require('./extension-registry');
@@ -1551,51 +1596,25 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
   try {
     const esbuild = requireEsbuild();
     console.log(`  On-demand building ${extName}/${cmdName}…`);
-    await runEsbuildBuild(
+    const result = await runEsbuildBuild(
       esbuild,
       {
-        entryPoints: [entryFile],
-        absWorkingDir: extPath,
-        bundle: true,
-        format: 'cjs',
-        platform: 'node',
+        ...createCommonExtensionBuildOptions(extPath, extNodeModules, buildInput),
         outfile: outFile,
-        plugins: [
-          {
-            name: 'native-scheme-external',
-            setup(build: any) {
-              build.onResolve({ filter: /^(swift|rust):/ }, (args: any) => ({
-                path: args.path,
-                external: true,
-              }));
-            },
-          },
-        ],
-        external: [
-          'react', 'react-dom', 'react-dom/*', 'react/jsx-runtime', 'react/jsx-dev-runtime',
-          '@raycast/api', '@raycast/utils',
-          're2', 'better-sqlite3', 'fsevents',
-          'raycast-cross-extension',
-          'node-fetch', 'undici', 'undici/*',
-          'axios', 'tar', 'extract-zip', 'sha256-file',
-          ...manifestExternal,
-          ...nodeBuiltins,
-        ],
-        nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
-        target: 'es2020',
-        jsx: 'automatic',
-        jsxImportSource: 'react',
-        tsconfigRaw: getEsbuildTsconfigRaw(extPath),
-        define: {
-          'process.env.NODE_ENV': '"production"',
-          'global': 'globalThis',
-        },
-        logLevel: 'warning',
+        entryPoints: [entryFile],
       },
       extPath,
       `${extName}/${cmdName}`
     );
-    return fs.existsSync(outFile);
+    const built = fs.existsSync(outFile);
+    if (built) {
+      writeMergedCommandBuildStamp(
+        buildDir,
+        buildInput.buildContext,
+        createCommandBuildStamp(extPath, cmd, entryFile, outFile, result?.metafile)
+      );
+    }
+    return built;
   } catch (e: any) {
     console.error(`  On-demand esbuild failed for ${extName}/${cmdName}:`, e);
     lastBuildError.set(`${extName}/${cmdName}`, e?.message || String(e));
