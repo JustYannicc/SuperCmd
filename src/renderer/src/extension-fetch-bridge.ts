@@ -13,7 +13,7 @@ interface ExtensionFetchElectronBridge {
     url: string;
   }>;
   cancelHttpRequest?: (requestId: string) => void;
-  httpDownloadBinary?: (url: string) => Promise<Uint8Array>;
+  httpDownloadBinary?: (url: string, requestId?: string) => Promise<Uint8Array>;
 }
 
 let extensionFetchRequestSeq = 0;
@@ -136,58 +136,63 @@ export function installExtensionFetchBridge(
     let ipcRes: Awaited<ReturnType<NonNullable<ExtensionFetchElectronBridge['httpRequest']>>>;
     try {
       ipcRes = await electronBridge.httpRequest({ url, method, headers, body, requestId });
+    } catch (err) {
+      removeAbortListener();
+      throw err;
+    }
+
+    try {
+      if (signal?.aborted) throw createAbortError();
+
+      if (!ipcRes || ipcRes.status === 0) {
+        if (typeof nativeFetch === 'function') {
+          try {
+            return await nativeFetch(input, init);
+          } catch (nativeErr: any) {
+            const proxyMsg = ipcRes?.statusText || `Failed to fetch ${url}`;
+            const nativeMsg = nativeErr?.message || String(nativeErr);
+            throw new TypeError(`${proxyMsg}; native fetch fallback failed: ${nativeMsg}`);
+          }
+        }
+        throw new TypeError(ipcRes?.statusText || `Failed to fetch ${url}`);
+      }
+
+      const contentType = String(
+        ipcRes.headers?.['content-type'] ||
+        ipcRes.headers?.['Content-Type'] ||
+        ''
+      ).toLowerCase();
+      const requestAccept = String(headers?.Accept || headers?.accept || '').toLowerCase();
+      const looksLikeBinaryUrl = /\.(gif|png|apng|jpe?g|webp|bmp|ico|icns|tiff?|mp3|wav|ogg|aac|m4a|mp4|mov|webm|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|7z|rar)(?:[?#]|$)/i.test(url);
+      const isBinaryContentType =
+        /^image\/(?!svg\+xml)/i.test(contentType) ||
+        /^(audio|video|font)\//i.test(contentType) ||
+        /^application\/(?:octet-stream|pdf|zip|gzip|x-gzip|x-bzip|x-7z-compressed|x-rar-compressed)/i.test(contentType);
+      const prefersBinaryResponse = requestAccept.includes('image/') || requestAccept.includes('application/octet-stream');
+
+      let rawBytes: Uint8Array | null = null;
+      if (canDownloadBinary && (isBinaryContentType || prefersBinaryResponse || looksLikeBinaryUrl)) {
+        if (signal?.aborted) throw createAbortError();
+        rawBytes = await binaryDownloader(url, requestId).catch(() => null as Uint8Array | null);
+        if (signal?.aborted) throw createAbortError();
+      }
+
+      // Build Response with binary body when available, text otherwise.
+      const responseBody = rawBytes && rawBytes.length > 0 ? rawBytes as BodyInit : (ipcRes.bodyText ?? '');
+      const response = new Response(responseBody, {
+        status: ipcRes.status,
+        statusText: ipcRes.statusText || '',
+        headers: ipcRes.headers || {},
+      });
+
+      try {
+        Object.defineProperty(response, 'url', { value: ipcRes.url || url });
+      } catch {}
+
+      return response;
     } finally {
       removeAbortListener();
     }
-
-    if (signal?.aborted) throw createAbortError();
-
-    if (!ipcRes || ipcRes.status === 0) {
-      if (typeof nativeFetch === 'function') {
-        try {
-          return await nativeFetch(input, init);
-        } catch (nativeErr: any) {
-          const proxyMsg = ipcRes?.statusText || `Failed to fetch ${url}`;
-          const nativeMsg = nativeErr?.message || String(nativeErr);
-          throw new TypeError(`${proxyMsg}; native fetch fallback failed: ${nativeMsg}`);
-        }
-      }
-      throw new TypeError(ipcRes?.statusText || `Failed to fetch ${url}`);
-    }
-
-    const contentType = String(
-      ipcRes.headers?.['content-type'] ||
-      ipcRes.headers?.['Content-Type'] ||
-      ''
-    ).toLowerCase();
-    const requestAccept = String(headers?.Accept || headers?.accept || '').toLowerCase();
-    const looksLikeBinaryUrl = /\.(gif|png|apng|jpe?g|webp|bmp|ico|icns|tiff?|mp3|wav|ogg|aac|m4a|mp4|mov|webm|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|7z|rar)(?:[?#]|$)/i.test(url);
-    const isBinaryContentType =
-      /^image\/(?!svg\+xml)/i.test(contentType) ||
-      /^(audio|video|font)\//i.test(contentType) ||
-      /^application\/(?:octet-stream|pdf|zip|gzip|x-gzip|x-bzip|x-7z-compressed|x-rar-compressed)/i.test(contentType);
-    const prefersBinaryResponse = requestAccept.includes('image/') || requestAccept.includes('application/octet-stream');
-
-    let rawBytes: Uint8Array | null = null;
-    if (canDownloadBinary && (isBinaryContentType || prefersBinaryResponse || looksLikeBinaryUrl)) {
-      if (signal?.aborted) throw createAbortError();
-      rawBytes = await binaryDownloader(url).catch(() => null as Uint8Array | null);
-      if (signal?.aborted) throw createAbortError();
-    }
-
-    // Build Response with binary body when available, text otherwise.
-    const responseBody = rawBytes && rawBytes.length > 0 ? rawBytes as BodyInit : (ipcRes.bodyText ?? '');
-    const response = new Response(responseBody, {
-      status: ipcRes.status,
-      statusText: ipcRes.statusText || '',
-      headers: ipcRes.headers || {},
-    });
-
-    try {
-      Object.defineProperty(response, 'url', { value: ipcRes.url || url });
-    } catch {}
-
-    return response;
   };
 
   g.__SUPERCMD_FETCH_PATCHED = true;
