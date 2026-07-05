@@ -709,6 +709,29 @@ interface HttpRequestOptions {
 function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
     const mod = opts.useHttps ? https : http;
+    let settled = false;
+    let onAbort: (() => void) | null = null;
+
+    const cleanup = () => {
+      if (opts.signal && onAbort) {
+        opts.signal.removeEventListener('abort', onAbort);
+        onAbort = null;
+      }
+    };
+
+    const finish = <T>(settle: (value: T) => void, value: T, shouldCleanup = true) => {
+      if (settled) return;
+      settled = true;
+      if (shouldCleanup) cleanup();
+      settle(value);
+    };
+
+    const cleanupAfterResponse = (res: http.IncomingMessage) => {
+      const cleanupOnce = () => cleanup();
+      res.once('end', cleanupOnce);
+      res.once('close', cleanupOnce);
+      res.once('error', cleanupOnce);
+    };
 
     const reqOpts: https.RequestOptions = {
       hostname: opts.hostname,
@@ -723,25 +746,31 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
         let body = '';
         res.on('data', (chunk) => { body += chunk; });
         res.on('end', () => {
-          reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 500)}`));
+          finish(reject, new Error(`HTTP ${res.statusCode}: ${body.slice(0, 500)}`));
         });
         return;
       }
-      resolve(res);
+      cleanupAfterResponse(res);
+      finish(resolve, res, false);
     });
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      finish(reject, err);
+    });
 
     if (opts.signal) {
       if (opts.signal.aborted) {
+        cleanup();
+        finish(reject, new Error('Request aborted'));
         req.destroy();
-        reject(new Error('Request aborted'));
         return;
       }
-      opts.signal.addEventListener('abort', () => {
+      onAbort = () => {
+        cleanup();
+        finish(reject, new Error('Request aborted'));
         req.destroy();
-        reject(new Error('Request aborted'));
-      }, { once: true });
+      };
+      opts.signal.addEventListener('abort', onAbort, { once: true });
     }
 
     req.write(opts.body);
@@ -893,6 +922,23 @@ export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
   const upload = buildTranscriptionMultipartUpload(opts, boundary);
 
   return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let onAbort: (() => void) | null = null;
+
+    const cleanup = () => {
+      if (opts.signal && onAbort) {
+        opts.signal.removeEventListener('abort', onAbort);
+        onAbort = null;
+      }
+    };
+
+    const finish = <T>(settle: (value: T) => void, value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      settle(value);
+    };
+
     const req = https.request(
       {
         hostname: 'api.openai.com',
@@ -909,26 +955,29 @@ export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
         res.on('data', (chunk) => { responseBody += chunk; });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`Whisper API HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
+            finish(reject, new Error(`Whisper API HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
             return;
           }
-          resolve(responseBody.trim());
+          finish(resolve, responseBody.trim());
         });
       }
     );
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      finish(reject, err);
+    });
 
     if (opts.signal) {
       if (opts.signal.aborted) {
+        finish(reject, new Error('Transcription aborted'));
         req.destroy();
-        reject(new Error('Transcription aborted'));
         return;
       }
-      opts.signal.addEventListener('abort', () => {
+      onAbort = () => {
+        finish(reject, new Error('Transcription aborted'));
         req.destroy();
-        reject(new Error('Transcription aborted'));
-      }, { once: true });
+      };
+      opts.signal.addEventListener('abort', onAbort, { once: true });
     }
 
     writeBufferedRequestParts(req, upload.parts);

@@ -21,7 +21,7 @@ import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { createAerospaceWorkspaceMover } from './aerospace-workspace';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
 import { createLocalAsrHelperStatusProbeCache } from './local-model-status-probe';
-import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow, applyCommandMetadataUpdate } from './commands';
+import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow, applyCommandMetadataUpdate, refreshCommandsForExtensionChange } from './commands';
 import {
   loadSettings,
   saveSettings,
@@ -76,6 +76,7 @@ import {
   mergeAiChatSnapshot,
   upsertAiChatConversation,
 } from './ai-chat-store';
+import { decodeHttpResponseBodyBuffer } from './http-response-decode';
 import {
   getExtensionPreferences,
   getExtensionPreferencesSnapshot,
@@ -5841,6 +5842,43 @@ function resolveElevenLabsTtsConfig(selectedModel: string): { modelId: string; v
   return { modelId, voiceId };
 }
 
+type BufferedRequestPart = Buffer;
+
+function getBufferedRequestPartsContentLength(parts: readonly BufferedRequestPart[]): number {
+  return parts.reduce((total, part) => total + part.length, 0);
+}
+
+function writeBufferedRequestParts(req: { write: (chunk: Buffer) => unknown; end: () => unknown }, parts: readonly BufferedRequestPart[]): void {
+  for (const part of parts) {
+    req.write(part);
+  }
+  req.end();
+}
+
+function collectBoundedResponseText(res: any, maxBytes = 1024 * 1024): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const { StringDecoder } = require('string_decoder') as typeof import('string_decoder');
+    const decoder = new StringDecoder('utf8');
+    let remaining = maxBytes;
+    let text = '';
+
+    res.on('data', (chunk: Buffer | string) => {
+      if (remaining <= 0) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      const next = buffer.length > remaining ? buffer.subarray(0, remaining) : buffer;
+      remaining -= next.length;
+      text += decoder.write(next);
+    });
+    res.on('error', reject);
+    res.on('end', () => {
+      if (remaining > 0) {
+        text += decoder.end();
+      }
+      resolve(text);
+    });
+  });
+}
+
 function transcribeAudioWithElevenLabs(opts: {
   audioBuffer: Buffer;
   apiKey: string;
@@ -5881,7 +5919,6 @@ function transcribeAudioWithElevenLabs(opts: {
   }
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
 
   return new Promise<string>((resolve, reject) => {
     try {
@@ -5894,14 +5931,11 @@ function transcribeAudioWithElevenLabs(opts: {
           headers: {
             'xi-api-key': opts.apiKey,
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
+            'Content-Length': getBufferedRequestPartsContentLength(parts),
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
+          collectBoundedResponseText(res).then((responseBody) => {
             if (res.statusCode && res.statusCode >= 400) {
               if (res.statusCode === 401 && responseBody.includes('detected_unusual_activity')) {
                 reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
@@ -5926,12 +5960,11 @@ function transcribeAudioWithElevenLabs(opts: {
               }
               resolve(text);
             }
-          });
+          }).catch(reject);
         }
       );
       req.on('error', reject);
-      req.write(body);
-      req.end();
+      writeBufferedRequestParts(req, parts);
     } catch (error) {
       reject(error);
     }
@@ -5968,7 +6001,6 @@ function transcribeAudioWithMistralVoxtral(opts: {
   }
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
 
   return new Promise<string>((resolve, reject) => {
     try {
@@ -5981,14 +6013,11 @@ function transcribeAudioWithMistralVoxtral(opts: {
           headers: {
             'Authorization': `Bearer ${opts.apiKey}`,
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
+            'Content-Length': getBufferedRequestPartsContentLength(parts),
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
+          collectBoundedResponseText(res).then((responseBody) => {
             if (res.statusCode && res.statusCode >= 400) {
               reject(new Error(`Mistral Voxtral STT HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
               return;
@@ -6015,15 +6044,14 @@ function transcribeAudioWithMistralVoxtral(opts: {
               }
               resolve(text);
             }
-          });
+          }).catch(reject);
         }
       );
       req.on('error', reject);
       req.setTimeout(60000, () => {
         req.destroy(new Error('Mistral Voxtral STT timed out.'));
       });
-      req.write(body);
-      req.end();
+      writeBufferedRequestParts(req, parts);
     } catch (error) {
       reject(error);
     }
@@ -6054,27 +6082,38 @@ function synthesizeElevenLabsToFile(opts: {
           },
         },
         (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              const responseText = Buffer.concat(chunks).toString('utf-8');
+          if (res.statusCode && res.statusCode >= 400) {
+            collectBoundedResponseText(res).then((responseText) => {
               if (res.statusCode === 401 && responseText.includes('detected_unusual_activity')) {
                 reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
                 return;
               }
               reject(new Error(`ElevenLabs TTS HTTP ${res.statusCode}: ${responseText.slice(0, 500)}`));
               return;
+            }).catch(reject);
+            return;
+          }
+
+          const fileStream = fs.createWriteStream(opts.audioPath);
+          const { pipeline } = require('stream') as typeof import('stream');
+          let audioBytes = 0;
+
+          res.on('data', (chunk: Buffer) => {
+            audioBytes += chunk.length;
+          });
+
+          pipeline(res, fileStream, (err: Error | null) => {
+            if (err) {
+              try { fs.unlink(opts.audioPath, () => {}); } catch {}
+              reject(err);
+              return;
             }
-            const audio = Buffer.concat(chunks);
-            if (!audio.length) {
+            if (!audioBytes) {
+              try { fs.unlink(opts.audioPath, () => {}); } catch {}
               reject(new Error('ElevenLabs TTS returned empty audio.'));
               return;
             }
-            fs.writeFile(opts.audioPath, audio, (err: Error | null) => {
-              if (err) reject(err);
-              else resolve();
-            });
+            resolve();
           });
         }
       );
@@ -15375,6 +15414,15 @@ app.whenReady().then(async () => {
   // ─── IPC: Extension APIs (for @raycast/api compatibility) ────────
 
   // HTTP request proxy (so extensions can make Node.js HTTP requests without CORS)
+  const activeHttpRequests = new Map<string, () => void>();
+
+  ipcMain.on('http-request-cancel', (_event: any, requestId: string) => {
+    if (!requestId) return;
+    const cancel = activeHttpRequests.get(requestId);
+    if (!cancel) return;
+    cancel();
+  });
+
   ipcMain.handle(
     'http-request',
     async (
@@ -15384,6 +15432,7 @@ app.whenReady().then(async () => {
         method?: string;
         headers?: Record<string, string>;
         body?: string;
+        requestId?: string;
       }
     ) => {
       const http = require('http');
@@ -15401,17 +15450,39 @@ app.whenReady().then(async () => {
         }
       } catch {}
 
+      const requestId = typeof options.requestId === 'string' ? options.requestId : '';
+      let canceled = false;
+      const resolveCanceled = (url: string) => ({
+        status: 0,
+        statusText: 'Request canceled',
+        headers: {},
+        bodyText: '',
+        url,
+      });
+
       const doRequest = (url: string, method: string, headers: Record<string, string>, body: string | undefined, redirectsLeft: number): Promise<any> => {
         return new Promise((resolve) => {
+          let settled = false;
+          const settle = (value: any) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+          const settleCanceled = () => settle(resolveCanceled(url));
+
+          if (canceled) {
+            settleCanceled();
+            return;
+          }
+
           try {
             const parsedUrl = new URL(url);
             const transport = parsedUrl.protocol === 'https:' ? https : http;
-
             const reqOptions: any = {
               hostname: parsedUrl.hostname,
               port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
               path: parsedUrl.pathname + parsedUrl.search,
-              method: method,
+              method,
               headers: {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 ...headers,
@@ -15419,87 +15490,113 @@ app.whenReady().then(async () => {
             };
 
             const req = transport.request(reqOptions, (res: any) => {
-              // Follow redirects (301, 302, 303, 307, 308)
+              if (canceled) {
+                res.resume();
+                settleCanceled();
+                return;
+              }
+
               if (redirectsLeft > 0 && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                res.resume(); // drain the response
+                res.resume();
                 const redirectUrl = new URL(res.headers.location, url).toString();
-                const redirectMethod = (res.statusCode === 303) ? 'GET' : method;
-                const redirectBody = (res.statusCode === 303) ? undefined : body;
-                resolve(doRequest(redirectUrl, redirectMethod, headers, redirectBody, redirectsLeft - 1));
+                const redirectMethod = res.statusCode === 303 ? 'GET' : method;
+                const redirectBody = res.statusCode === 303 ? undefined : body;
+                settle(doRequest(redirectUrl, redirectMethod, headers, redirectBody, redirectsLeft - 1));
                 return;
               }
 
               const chunks: Buffer[] = [];
-              res.on('data', (chunk: Buffer) => chunks.push(chunk));
-              res.on('end', () => {
+              res.on('data', (chunk: Buffer) => {
+                if (!canceled) chunks.push(chunk);
+              });
+              res.on('end', async () => {
+                if (canceled) {
+                  settleCanceled();
+                  return;
+                }
+
                 const bodyBuffer = Buffer.concat(chunks);
                 const contentEncoding = String(res.headers['content-encoding'] || '').toLowerCase();
-                let decodedBuffer = bodyBuffer;
-                try {
-                  const zlib = require('zlib');
-                  if (contentEncoding.includes('br')) {
-                    decodedBuffer = zlib.brotliDecompressSync(bodyBuffer);
-                  } else if (contentEncoding.includes('gzip')) {
-                    decodedBuffer = zlib.gunzipSync(bodyBuffer);
-                  } else if (contentEncoding.includes('deflate')) {
-                    decodedBuffer = zlib.inflateSync(bodyBuffer);
-                  }
-                } catch {
-                  // If decompression fails, keep raw buffer to avoid hard-failing requests.
-                  decodedBuffer = bodyBuffer;
+                const decodedBuffer = await decodeHttpResponseBodyBuffer(bodyBuffer, contentEncoding);
+                if (canceled) {
+                  settleCanceled();
+                  return;
                 }
                 const responseHeaders: Record<string, string> = {};
                 for (const [key, val] of Object.entries(res.headers)) {
                   responseHeaders[key] = Array.isArray(val) ? val.join(', ') : String(val);
                 }
-                resolve({
+                settle({
                   status: res.statusCode,
                   statusText: res.statusMessage || '',
                   headers: responseHeaders,
                   bodyText: decodedBuffer.toString('utf-8'),
-                  url: url,
+                  url,
                 });
               });
             });
 
             req.on('error', (err: Error) => {
-              resolve({
+              if (canceled) {
+                settleCanceled();
+                return;
+              }
+
+              settle({
                 status: 0,
                 statusText: err.message,
                 headers: {},
                 bodyText: '',
-                url: url,
+                url,
               });
             });
 
             req.setTimeout(30000, () => {
+              if (settled) return;
               req.destroy();
-              resolve({
+              settle({
                 status: 0,
                 statusText: 'Request timed out',
                 headers: {},
                 bodyText: '',
-                url: url,
+                url,
               });
             });
+
+            if (requestId) {
+              activeHttpRequests.set(requestId, () => {
+                canceled = true;
+                if (settled) return;
+                try {
+                  req.destroy(new Error('Request canceled'));
+                } catch {
+                  req.destroy();
+                }
+                settleCanceled();
+              });
+            }
 
             if (body) {
               req.write(body);
             }
             req.end();
           } catch (e: any) {
-            resolve({
+            settle({
               status: 0,
               statusText: e?.message || 'Request failed',
               headers: {},
               bodyText: '',
-              url: url,
+              url,
             });
           }
         });
       };
 
-      return doRequest(requestUrl, (options.method || 'GET').toUpperCase(), options.headers || {}, options.body, 5);
+      try {
+        return await doRequest(requestUrl, (options.method || 'GET').toUpperCase(), options.headers || {}, options.body, 5);
+      } finally {
+        if (requestId) activeHttpRequests.delete(requestId);
+      }
     }
   );
 
@@ -15520,7 +15617,58 @@ app.whenReady().then(async () => {
   // This is the generic fix for any extension that uses child_process.spawn with progressive output
   // (e.g. speedtest CLI outputting JSON lines, ffmpeg progress, etc.)
   {
-    const spawnedProcesses = new Map<number, any>();
+    const spawnedProcesses = new Map<number, { proc: any; sender: any }>();
+    const spawnedProcessPidsBySender = new WeakMap<any, Set<number>>();
+    const senderCleanupRegistered = new WeakSet<any>();
+
+    const forgetSpawnedProcess = (pid: number) => {
+      const entry = spawnedProcesses.get(pid);
+      if (!entry) return;
+      spawnedProcesses.delete(pid);
+      const senderPids = spawnedProcessPidsBySender.get(entry.sender);
+      senderPids?.delete(pid);
+    };
+
+    const terminateSpawnedProcess = (pid: number, signal?: string | number) => {
+      const entry = spawnedProcesses.get(pid);
+      if (!entry) return;
+      const proc = entry.proc;
+      const killSignal = signal ?? 'SIGTERM';
+      forgetSpawnedProcess(pid);
+      try {
+        if (process.platform !== 'win32' && typeof proc.pid === 'number' && proc.pid > 0) {
+          process.kill(-proc.pid, killSignal as NodeJS.Signals | number);
+        } else {
+          proc.kill(killSignal);
+        }
+      } catch {
+        try { proc.kill(killSignal); } catch {}
+      }
+    };
+
+    const cleanupSenderSpawnedProcesses = (sender: any) => {
+      const senderPids = spawnedProcessPidsBySender.get(sender);
+      if (!senderPids) return;
+      for (const pid of Array.from(senderPids)) {
+        terminateSpawnedProcess(pid, 'SIGTERM');
+      }
+      spawnedProcessPidsBySender.delete(sender);
+    };
+
+    const trackSenderSpawnedProcess = (sender: any, pid: number) => {
+      if (pid === -1 || !sender) return;
+      let senderPids = spawnedProcessPidsBySender.get(sender);
+      if (!senderPids) {
+        senderPids = new Set<number>();
+        spawnedProcessPidsBySender.set(sender, senderPids);
+      }
+      senderPids.add(pid);
+      if (!senderCleanupRegistered.has(sender)) {
+        senderCleanupRegistered.add(sender);
+        try { sender.once?.('destroyed', () => cleanupSenderSpawnedProcesses(sender)); } catch {}
+        try { sender.on?.('render-process-gone', () => cleanupSenderSpawnedProcesses(sender)); } catch {}
+      }
+    };
 
     ipcMain.handle(
       'spawn-process',
@@ -15559,9 +15707,11 @@ app.whenReady().then(async () => {
           : spawn(resolvedFile, args || [], spawnOpts);
 
         const pid: number = proc.pid ?? -1;
-        if (pid !== -1) spawnedProcesses.set(pid, proc);
-
         const sender = event.sender;
+        if (pid !== -1) {
+          spawnedProcesses.set(pid, { proc, sender });
+          trackSenderSpawnedProcess(sender, pid);
+        }
         const safeSend = (channel: string, ...sendArgs: any[]) => {
           try { if (!sender.isDestroyed()) sender.send(channel, ...sendArgs); } catch {}
         };
@@ -15593,7 +15743,7 @@ app.whenReady().then(async () => {
         });
         proc.on('close', (code: number | null) => {
           if (!finalize()) return;
-          spawnedProcesses.delete(pid);
+          forgetSpawnedProcess(pid);
           const exitCode = code ?? 0;
           const seq = nextSeq();
           safeSendSpawnEvent({ pid, seq, type: 'exit', code: exitCode });
@@ -15602,7 +15752,7 @@ app.whenReady().then(async () => {
         });
         proc.on('error', (err: Error) => {
           if (!finalize()) return;
-          spawnedProcesses.delete(pid);
+          forgetSpawnedProcess(pid);
           const message = err.message;
           const seq = nextSeq();
           safeSendSpawnEvent({ pid, seq, type: 'error', message });
@@ -15615,7 +15765,7 @@ app.whenReady().then(async () => {
     );
 
     ipcMain.on('spawn-stdin', (_event: any, pid: number, data: Uint8Array | string, end?: boolean) => {
-      const proc = spawnedProcesses.get(pid);
+      const proc = spawnedProcesses.get(pid)?.proc;
       if (!proc?.stdin) return;
       try {
         if (data != null && (typeof data === 'string' ? data.length > 0 : data.byteLength > 0)) {
@@ -15626,20 +15776,7 @@ app.whenReady().then(async () => {
     });
 
     ipcMain.handle('spawn-kill', (_event: any, pid: number, signal?: string | number) => {
-      const proc = spawnedProcesses.get(pid);
-      if (proc) {
-        const killSignal = signal ?? 'SIGTERM';
-        try {
-          if (process.platform !== 'win32' && typeof proc.pid === 'number' && proc.pid > 0) {
-            process.kill(-proc.pid, killSignal as NodeJS.Signals | number);
-          } else {
-            proc.kill(killSignal);
-          }
-        } catch {
-          try { proc.kill(killSignal); } catch {}
-        }
-        spawnedProcesses.delete(pid);
-      }
+      terminateSpawnedProcess(pid, signal);
     });
   }
 
@@ -16465,12 +16602,10 @@ return appURL's |path|() as text`,
       if (!success) {
         throw new Error(`Failed to install extension "${name}". Check SuperCmd main-process logs for details.`);
       }
-      // Invalidate the command cache and rebuild it BEFORE we broadcast, so
+      // Refresh extension commands BEFORE we broadcast, so
       // the renderer's follow-up get-commands fetch lands on fresh data
-      // rather than the stale fallback that getAvailableCommands() returns
-      // immediately after an invalidation.
-      invalidateCache();
-      try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after install failed:', e); }
+      // without rediscovering unrelated apps/settings when a cache exists.
+      try { await refreshCommandsForExtensionChange(); } catch (e) { console.warn('refreshCommandsForExtensionChange after install failed:', e); }
       broadcastExtensionsUpdated();
       // The launcher's root list listens for 'commands-updated', not
       // 'extensions-updated' — without this, the new extension wouldn't
@@ -16488,10 +16623,9 @@ return appURL's |path|() as text`,
     async (_event: any, name: string) => {
       const success = await uninstallExtension(name);
       if (success) {
-        // Invalidate the command cache and rebuild synchronously before
+        // Refresh extension commands synchronously before
         // broadcasting — see install-extension handler for context.
-        invalidateCache();
-        try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after uninstall failed:', e); }
+        try { await refreshCommandsForExtensionChange(); } catch (e) { console.warn('refreshCommandsForExtensionChange after uninstall failed:', e); }
         // Tell the launcher renderer to tear down any live runners (menu-bar
         // tray, background no-view loop, interval re-runner) for this
         // extension before its bundle keeps trying to re-mount itself.
@@ -18257,7 +18391,7 @@ if let tiff = image?.tiffRepresentation {
                 requestId,
                 error: `HTTP ${res.statusCode}: ${errBody.slice(0, 200)}`,
               });
-              activeOllamaPullRequests.delete(requestId);
+              finishPullRequest();
             });
             return;
           }
@@ -18301,7 +18435,7 @@ if let tiff = image?.tiffRepresentation {
             if (!controller.signal.aborted) {
               event.sender.send('ollama-pull-done', { requestId });
             }
-            activeOllamaPullRequests.delete(requestId);
+            finishPullRequest();
           });
         }
       );
@@ -18313,16 +18447,34 @@ if let tiff = image?.tiffRepresentation {
             error: err.message || 'Failed to pull model',
           });
         }
-        activeOllamaPullRequests.delete(requestId);
+        finishPullRequest();
       });
 
+      let abortListenerAttached = false;
+      let pullRequestFinished = false;
+      const onAbort = () => {
+        finishPullRequest();
+        req.destroy();
+      };
+      const cleanupAbortListener = () => {
+        if (!abortListenerAttached) return;
+        controller.signal.removeEventListener('abort', onAbort);
+        abortListenerAttached = false;
+      };
+      const finishPullRequest = () => {
+        if (pullRequestFinished) return;
+        pullRequestFinished = true;
+        cleanupAbortListener();
+        activeOllamaPullRequests.delete(requestId);
+      };
+
       if (controller.signal.aborted) {
+        finishPullRequest();
         req.destroy();
         return;
       }
-      controller.signal.addEventListener('abort', () => {
-        req.destroy();
-      }, { once: true });
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      abortListenerAttached = true;
 
       req.write(body);
       req.end();
