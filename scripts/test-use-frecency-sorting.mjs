@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const hookPath = path.resolve('src/renderer/src/raycast-api/hooks/use-frecency-sorting.ts');
+const contextScopePath = path.resolve('src/renderer/src/raycast-api/context-scope-runtime.ts');
 
 function createLocalStorage(initial = {}) {
   const store = new Map(Object.entries(initial));
@@ -26,6 +27,9 @@ function createLocalStorage(initial = {}) {
     },
     clear() {
       store.clear();
+    },
+    entries() {
+      return Array.from(store.entries());
     },
   };
 }
@@ -117,52 +121,102 @@ function createReactMock() {
   };
 }
 
-function loadHook({ initialNow = Date.UTC(2026, 0, 1, 12), localStorage = createLocalStorage() } = {}) {
-  const source = fs.readFileSync(hookPath, 'utf8');
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
-    },
-    fileName: hookPath,
-  });
-
+function loadHook({
+  extensionName = 'default-extension',
+  initialNow = Date.UTC(2026, 0, 1, 12),
+  localStorage = createLocalStorage(),
+} = {}) {
   const dateController = createDateController(initialNow);
   const reactMock = createReactMock();
-  const module = { exports: {} };
-  const sandbox = {
-    module,
-    exports: module.exports,
-    require: (request) => {
-      if (request === 'react') return reactMock.react;
-      return require(request);
-    },
-    console,
-    Date: dateController.Date,
-    JSON,
-    localStorage,
-    Math,
-    Object,
-    Promise,
-    String,
-  };
+  const moduleCache = new Map();
 
-  vm.runInNewContext(transpiled.outputText, sandbox, { filename: hookPath });
+  function resolveTsModule(request, fromPath) {
+    if (!request.startsWith('.')) return null;
+    const resolved = path.resolve(path.dirname(fromPath), request);
+    const candidates = [resolved, `${resolved}.ts`, `${resolved}.tsx`, path.join(resolved, 'index.ts')];
+    const match = candidates.find((candidate) => fs.existsSync(candidate));
+    if (!match) throw new Error(`Unable to resolve ${request} from ${fromPath}`);
+    return match;
+  }
+
+  function loadTsModule(filePath) {
+    if (moduleCache.has(filePath)) return moduleCache.get(filePath).exports;
+
+    const source = fs.readFileSync(filePath, 'utf8');
+    const transpiled = ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true,
+        importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+      },
+      fileName: filePath,
+    });
+
+    const module = { exports: {} };
+    moduleCache.set(filePath, module);
+
+    const sandbox = {
+      module,
+      exports: module.exports,
+      require: (request) => {
+        if (request === 'react') return reactMock.react;
+        const resolved = resolveTsModule(request, filePath);
+        return resolved ? loadTsModule(resolved) : require(request);
+      },
+      console,
+      Date: dateController.Date,
+      JSON,
+      localStorage,
+      Math,
+      Object,
+      Promise,
+      String,
+    };
+
+    vm.runInNewContext(transpiled.outputText, sandbox, { filename: filePath });
+    return module.exports;
+  }
+
+  const contextScope = loadTsModule(contextScopePath);
+  contextScope.configureContextScopeRuntime({
+    getExtensionContext: () => ({
+      extensionName,
+      extensionDisplayName: extensionName,
+      extensionIconDataUrl: '',
+      commandName: 'test-command',
+      assetsPath: '',
+      supportPath: '/tmp/supercmd-test',
+      owner: 'test-owner',
+      preferences: {},
+      preferenceDefinitions: [],
+      commandMode: 'view',
+    }),
+    setExtensionContext: () => {},
+  });
+
+  const hookModule = loadTsModule(hookPath);
 
   return {
     dateController,
     localStorage,
     render(data, options) {
       reactMock.reset();
-      return module.exports.useFrecencySorting(data, options);
+      return hookModule.useFrecencySorting(data, options);
     },
   };
 }
 
 function ids(items) {
   return Array.from(items, (item) => item.id);
+}
+
+function serializedBytes(localStorage, key) {
+  return Buffer.byteLength(localStorage.getItem(key) || '', 'utf8');
+}
+
+function retainedEntryCount(localStorage, key) {
+  return Object.keys(JSON.parse(localStorage.getItem(key) || '{}')).length;
 }
 
 test('useFrecencySorting reuses sorted data on stable rerender with the default key', () => {
@@ -196,7 +250,7 @@ test('useFrecencySorting reads the current time once per sorting recompute', () 
   const harness = loadHook({
     initialNow: now,
     localStorage: createLocalStorage({
-      [`sc-frecency-${namespace}`]: JSON.stringify({
+      [`sc-frecency:default-extension:${namespace}`]: JSON.stringify({
         alpha: { count: 1, lastVisited: now - 1_000 },
         bravo: { count: 3, lastVisited: now - 1_000 },
         charlie: { count: 2, lastVisited: now - 1_000 },
@@ -229,7 +283,7 @@ test('useFrecencySorting preserves visit tracking and reset behavior', async () 
   result = harness.render(data, { namespace });
 
   assert.deepEqual(ids(result.data), ['bravo', 'alpha', 'charlie']);
-  assert.deepEqual(JSON.parse(harness.localStorage.getItem(`sc-frecency-${namespace}`)), {
+  assert.deepEqual(JSON.parse(harness.localStorage.getItem(`sc-frecency:default-extension:${namespace}`)), {
     alpha: { count: 1, lastVisited: now - 4 * 60 * 60 * 1_000 },
     bravo: { count: 2, lastVisited: now - 30 * 60 * 1_000 },
   });
@@ -238,7 +292,60 @@ test('useFrecencySorting preserves visit tracking and reset behavior', async () 
   result = harness.render(data, { namespace });
 
   assert.equal(result.data[0].id, 'alpha');
-  assert.deepEqual(JSON.parse(harness.localStorage.getItem(`sc-frecency-${namespace}`)), {
+  assert.deepEqual(JSON.parse(harness.localStorage.getItem(`sc-frecency:default-extension:${namespace}`)), {
     alpha: { count: 1, lastVisited: now - 4 * 60 * 60 * 1_000 },
   });
+});
+
+test('useFrecencySorting scopes storage by extension and migrates legacy rankings without loss', async () => {
+  const now = Date.UTC(2026, 0, 1, 12);
+  const namespace = 'shared-namespace';
+  const legacyKey = `sc-frecency-${namespace}`;
+  const alphaKey = `sc-frecency:alpha-extension:${namespace}`;
+  const bravoKey = `sc-frecency:bravo-extension:${namespace}`;
+  const localStorage = createLocalStorage({
+    [legacyKey]: JSON.stringify({
+      alpha: { count: 2, lastVisited: now - 2 * 60 * 60 * 1_000 },
+      legacyOnly: { count: 1, lastVisited: now - 6 * 60 * 60 * 1_000 },
+    }),
+  });
+  const legacyBytes = serializedBytes(localStorage, legacyKey);
+
+  assert.equal(retainedEntryCount(localStorage, legacyKey), 2, 'legacy fixture should start with two retained entries');
+  assert.equal(legacyBytes, 102, 'legacy fixture should start with 102 serialized bytes');
+
+  const alphaHarness = loadHook({ extensionName: 'alpha-extension', initialNow: now, localStorage });
+  let alphaResult = alphaHarness.render([{ id: 'alpha' }, { id: 'bravo' }, { id: 'legacyOnly' }], { namespace });
+
+  assert.deepEqual(ids(alphaResult.data), ['alpha', 'legacyOnly', 'bravo']);
+  assert.deepEqual(JSON.parse(localStorage.getItem(alphaKey)), JSON.parse(localStorage.getItem(legacyKey)));
+  assert.equal(retainedEntryCount(localStorage, alphaKey), 2, 'migration should retain all legacy entries');
+  assert.equal(serializedBytes(localStorage, alphaKey), legacyBytes, 'migration should copy the full serialized payload');
+
+  alphaHarness.dateController.setNow(now + 1_000);
+  await alphaResult.visitItem({ id: 'bravo' });
+  alphaResult = alphaHarness.render([{ id: 'alpha' }, { id: 'bravo' }, { id: 'legacyOnly' }], { namespace });
+
+  assert.deepEqual(ids(alphaResult.data), ['alpha', 'bravo', 'legacyOnly']);
+  assert.equal(retainedEntryCount(localStorage, alphaKey), 3, 'new visits should preserve migrated rankings');
+  assert.equal(serializedBytes(localStorage, alphaKey), 150, 'alpha scoped storage should retain three serialized entries');
+  assert.equal(retainedEntryCount(localStorage, legacyKey), 2, 'legacy migration should not mutate the legacy payload');
+
+  const bravoHarness = loadHook({ extensionName: 'bravo-extension', initialNow: now, localStorage });
+  let bravoResult = bravoHarness.render([{ id: 'alpha' }, { id: 'bravo' }, { id: 'legacyOnly' }], { namespace });
+
+  assert.deepEqual(ids(bravoResult.data), ['alpha', 'legacyOnly', 'bravo']);
+  assert.deepEqual(JSON.parse(localStorage.getItem(bravoKey)), JSON.parse(localStorage.getItem(legacyKey)));
+  assert.notDeepEqual(JSON.parse(localStorage.getItem(bravoKey)), JSON.parse(localStorage.getItem(alphaKey)));
+
+  bravoHarness.dateController.setNow(now + 2_000);
+  await bravoResult.visitItem({ id: 'legacyOnly' });
+  bravoResult = bravoHarness.render([{ id: 'alpha' }, { id: 'bravo' }, { id: 'legacyOnly' }], { namespace });
+
+  assert.deepEqual(ids(bravoResult.data), ['legacyOnly', 'alpha', 'bravo']);
+  assert.equal(retainedEntryCount(localStorage, bravoKey), 2, 'visiting an existing migrated entry should not prune entries');
+  assert.equal(serializedBytes(localStorage, bravoKey), legacyBytes, 'bravo scoped storage should retain two serialized entries');
+  assert.equal(retainedEntryCount(localStorage, alphaKey), 3, 'other extension scoped storage should be isolated');
+  assert.ok(serializedBytes(localStorage, alphaKey) > serializedBytes(localStorage, legacyKey));
+  assert.ok(serializedBytes(localStorage, bravoKey) >= serializedBytes(localStorage, legacyKey));
 });

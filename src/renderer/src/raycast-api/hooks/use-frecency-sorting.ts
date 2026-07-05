@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useMemo, useState } from 'react';
+import { getScopedFrecencyStorageKeys, readScopedJsonState } from './storage-scope';
 
 interface FrecencyEntry {
   count: number;
@@ -34,25 +35,21 @@ export function useFrecencySorting<T>(
   resetRanking: (item: T) => Promise<void>;
 } {
   const ns = options?.namespace || 'default';
-  const storageKey = `sc-frecency-${ns}`;
+  const { scopedKey, legacyKeys } = getScopedFrecencyStorageKeys(ns);
   const getKey = options?.key || getDefaultFrecencyKey;
 
   const [frecencyMap, setFrecencyMap] = useState<Record<string, FrecencyEntry>>(() => {
-    try {
-      const stored = localStorage.getItem(storageKey);
-      return stored ? JSON.parse(stored) : {};
-    } catch {
-      return {};
-    }
+    const stored = readScopedJsonState<Record<string, FrecencyEntry>>(scopedKey, legacyKeys);
+    return stored === undefined ? {} : stored;
   });
 
   const persistMap = useCallback((map: Record<string, FrecencyEntry>) => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(map));
+      localStorage.setItem(scopedKey, JSON.stringify(map));
     } catch {
       // best-effort
     }
-  }, [storageKey]);
+  }, [scopedKey]);
 
   const sortedData = useMemo(() => {
     if (!data) return [];
