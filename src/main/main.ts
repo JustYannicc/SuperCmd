@@ -287,9 +287,7 @@ function killParakeetServer(processToKill: any = parakeetServerProcess): void {
       processToKill.kill();
     } catch {}
   }
-  if (processToKill !== parakeetServerProcess) {
-    return;
-  }
+  if (processToKill && parakeetServerProcess !== processToKill) return;
   parakeetServerProcess = null;
   parakeetServerReady = false;
   parakeetServerStarting = null;
@@ -327,9 +325,7 @@ function ensureParakeetServer(): Promise<void> {
 
     child.on('exit', (code: number | null) => {
       console.log(`[Parakeet] Server process exited with code ${code}`);
-      if (parakeetServerProcess !== child) {
-        return;
-      }
+      if (parakeetServerProcess !== child) return;
       parakeetServerReady = false;
       parakeetServerProcess = null;
       parakeetServerStarting = null;
@@ -342,9 +338,7 @@ function ensureParakeetServer(): Promise<void> {
     });
 
     child.stdout.on('data', (chunk: Buffer) => {
-      if (parakeetServerProcess !== child) {
-        return;
-      }
+      if (parakeetServerProcess !== child) return;
       const result = appendNativeHelperLineBuffer(parakeetServerBuffer, chunk);
       parakeetServerBuffer = result.buffer;
       if (result.truncated) warnNativeHelperLineBufferTruncated('Parakeet');
@@ -653,9 +647,7 @@ function killQwen3Server(processToKill: any = qwen3ServerProcess): void {
       processToKill.kill();
     } catch {}
   }
-  if (processToKill !== qwen3ServerProcess) {
-    return;
-  }
+  if (processToKill && qwen3ServerProcess !== processToKill) return;
   qwen3ServerProcess = null;
   qwen3ServerReady = false;
   qwen3ServerStarting = null;
@@ -693,9 +685,7 @@ function ensureQwen3Server(): Promise<void> {
 
     child.on('exit', (code: number | null) => {
       console.log(`[Qwen3] Server process exited with code ${code}`);
-      if (qwen3ServerProcess !== child) {
-        return;
-      }
+      if (qwen3ServerProcess !== child) return;
       qwen3ServerReady = false;
       qwen3ServerProcess = null;
       qwen3ServerStarting = null;
@@ -708,9 +698,7 @@ function ensureQwen3Server(): Promise<void> {
     });
 
     child.stdout.on('data', (chunk: Buffer) => {
-      if (qwen3ServerProcess !== child) {
-        return;
-      }
+      if (qwen3ServerProcess !== child) return;
       const result = appendNativeHelperLineBuffer(qwen3ServerBuffer, chunk);
       qwen3ServerBuffer = result.buffer;
       if (result.truncated) warnNativeHelperLineBufferTruncated('Qwen3');
@@ -1198,9 +1186,7 @@ function killWhisperCppServer(processToKill: any = whisperCppServerProcess): voi
       processToKill.kill();
     } catch {}
   }
-  if (processToKill !== whisperCppServerProcess) {
-    return;
-  }
+  if (processToKill && whisperCppServerProcess !== processToKill) return;
   whisperCppServerProcess = null;
   whisperCppServerReady = false;
   whisperCppServerStarting = null;
@@ -1235,9 +1221,7 @@ function ensureWhisperCppServer(): Promise<void> {
 
     child.on('exit', (code: number | null) => {
       console.log(`[Whisper][whisper.cpp] Server process exited with code ${code}`);
-      if (whisperCppServerProcess !== child) {
-        return;
-      }
+      if (whisperCppServerProcess !== child) return;
       whisperCppServerReady = false;
       whisperCppServerProcess = null;
       whisperCppServerStarting = null;
@@ -1250,9 +1234,7 @@ function ensureWhisperCppServer(): Promise<void> {
     });
 
     child.stdout.on('data', (chunk: Buffer | string) => {
-      if (whisperCppServerProcess !== child) {
-        return;
-      }
+      if (whisperCppServerProcess !== child) return;
       const result = appendNativeHelperLineBuffer(whisperCppServerBuffer, chunk);
       whisperCppServerBuffer = result.buffer;
       if (result.truncated) warnNativeHelperLineBufferTruncated('Whisper.cpp');
@@ -1476,9 +1458,7 @@ function killAudioCapturer(processToKill: any = audioCapturerProcess): void {
       processToKill.kill();
     } catch {}
   }
-  if (processToKill !== audioCapturerProcess) {
-    return;
-  }
+  if (processToKill && audioCapturerProcess !== processToKill) return;
   audioCapturerProcess = null;
   audioCapturerReady = false;
   audioCapturerStarting = null;
@@ -1565,9 +1545,7 @@ function warmAudioCapturer(): Promise<void> {
 
     child.on('exit', (code: number | null) => {
       console.log(`[AudioCapturer] Process exited with code ${code}`);
-      if (audioCapturerProcess !== child) {
-        return;
-      }
+      if (audioCapturerProcess !== child) return;
       audioCapturerReady = false;
       audioCapturerProcess = null;
       audioCapturerStarting = null;
@@ -1581,9 +1559,7 @@ function warmAudioCapturer(): Promise<void> {
     });
 
     child.stdout.on('data', (chunk: Buffer | string) => {
-      if (audioCapturerProcess !== child) {
-        return;
-      }
+      if (audioCapturerProcess !== child) return;
       const result = appendNativeHelperLineBuffer(audioCapturerBuffer, chunk);
       audioCapturerBuffer = result.buffer;
       if (result.truncated) warnNativeHelperLineBufferTruncated('AudioCapturer');
