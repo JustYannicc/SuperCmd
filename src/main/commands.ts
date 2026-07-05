@@ -18,7 +18,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { discoverInstalledExtensionCommands } from './extension-runner';
 import { discoverScriptCommands } from './script-command-runner';
-import { getAllQuickLinks, getQuickLinkCommandId, type QuickLink, type QuickLinkIcon } from './quicklink-store';
+import { getAllQuickLinks, getQuickLinkCommandId, isQuickLinkCommandId, type QuickLink, type QuickLinkIcon } from './quicklink-store';
 import { loadSettings,getSearchApplicationsScope} from './settings-store';
 
 const execAsync = promisify(exec);
@@ -112,6 +112,14 @@ let inflightDiscovery: Promise<CommandInfo[]> | null = null;
 let lastStaleRefreshRequestAt = 0;
 const CACHE_TTL = 30 * 60_000; // 30 min
 const STALE_REFRESH_COOLDOWN_MS = 15_000;
+let commandDiscoveryStartCount = 0;
+let commandDiscoveryRunnerForTesting: (() => Promise<CommandInfo[]>) | null = null;
+
+type CommandRuntimeMetadata = { subtitle?: string | null | undefined };
+type CommandRuntimeMetadataStore = Record<string, CommandRuntimeMetadata | undefined>;
+
+const runtimeMetadataBaseSubtitleByKey = new Map<string, string | undefined>();
+const runtimeMetadataCommandsByKey = new Map<string, Set<CommandInfo>>();
 
 // ─── Commands Disk Cache ─────────────────────────────────────────────────────
 // Persists the discovered commands list across restarts so the launcher is
@@ -151,7 +159,18 @@ function loadCommandsDiskCache(): CommandInfo[] | null {
 function saveCommandsDiskCache(commands: CommandInfo[]): void {
   try {
     // Strip icon data — icons are persisted separately in icon-cache/.
-    const stripped = commands.map(({ iconDataUrl: _drop, ...rest }) => rest);
+    const stripped = commands.map(({ iconDataUrl: _drop, ...rest }) => {
+      const commandForDisk = { ...rest };
+      const baseSubtitle = getRuntimeMetadataBaseSubtitle(commandForDisk);
+      if (baseSubtitle.known) {
+        if (baseSubtitle.subtitle) {
+          commandForDisk.subtitle = baseSubtitle.subtitle;
+        } else {
+          delete commandForDisk.subtitle;
+        }
+      }
+      return commandForDisk;
+    });
     fs.writeFileSync(
       getCommandsDiskCachePath(),
       JSON.stringify({ version: COMMANDS_DISK_CACHE_VERSION, commands: stripped }),
@@ -166,6 +185,11 @@ function saveCommandsDiskCache(commands: CommandInfo[]): void {
 export function initCommandsCache(): void {
   const cmds = loadCommandsDiskCache();
   if (cmds) {
+    resetRuntimeMetadataTracking();
+    rememberRuntimeMetadataBaseSubtitles(cmds);
+    try {
+      applyStoredRuntimeCommandMetadata(cmds, loadSettings().commandMetadata || {});
+    } catch {}
     cachedCommands = cmds;
     staleCommandsFallback = cmds;
     cacheTimestamp = 0; // mark stale so the next getAvailableCommands() triggers a background refresh
@@ -176,6 +200,125 @@ export function initCommandsCache(): void {
 /** Returns the current inflight background discovery promise, if any. */
 export function getInflightDiscovery(): Promise<CommandInfo[]> | null {
   return inflightDiscovery;
+}
+
+function normalizeCommandMetadataKey(value: string): string {
+  return String(value || '').trim();
+}
+
+function normalizeRuntimeSubtitle(value: string | null | undefined): string {
+  return String(value ?? '').trim();
+}
+
+function isRuntimeMetadataSubtitleEligible(command: CommandInfo): boolean {
+  return !(command.category === 'script' && command.mode !== 'inline');
+}
+
+function getRuntimeMetadataKeys(command: CommandInfo): string[] {
+  const keys = [normalizeCommandMetadataKey(command.id)];
+  if (command.category === 'extension') {
+    keys.push(normalizeCommandMetadataKey(command.path || ''));
+  }
+  return Array.from(new Set(keys.filter(Boolean)));
+}
+
+function resetRuntimeMetadataTracking(): void {
+  runtimeMetadataBaseSubtitleByKey.clear();
+  runtimeMetadataCommandsByKey.clear();
+}
+
+function rememberRuntimeMetadataBaseSubtitles(commands: CommandInfo[]): void {
+  for (const command of commands) {
+    if (!isRuntimeMetadataSubtitleEligible(command)) continue;
+    for (const key of getRuntimeMetadataKeys(command)) {
+      runtimeMetadataBaseSubtitleByKey.set(key, command.subtitle);
+      let commandsForKey = runtimeMetadataCommandsByKey.get(key);
+      if (!commandsForKey) {
+        commandsForKey = new Set();
+        runtimeMetadataCommandsByKey.set(key, commandsForKey);
+      }
+      commandsForKey.add(command);
+    }
+  }
+}
+
+function getRuntimeMetadataBaseSubtitle(command: CommandInfo): { known: boolean; subtitle?: string } {
+  if (!isRuntimeMetadataSubtitleEligible(command)) return { known: false };
+  for (const key of getRuntimeMetadataKeys(command)) {
+    if (runtimeMetadataBaseSubtitleByKey.has(key)) {
+      return { known: true, subtitle: runtimeMetadataBaseSubtitleByKey.get(key) };
+    }
+  }
+  return { known: false };
+}
+
+function getStoredRuntimeSubtitle(
+  command: CommandInfo,
+  commandMetadata: CommandRuntimeMetadataStore
+): string {
+  if (!isRuntimeMetadataSubtitleEligible(command)) return '';
+  for (const key of getRuntimeMetadataKeys(command)) {
+    const subtitle = normalizeRuntimeSubtitle(commandMetadata[key]?.subtitle);
+    if (subtitle) return subtitle;
+  }
+  return '';
+}
+
+function applyStoredRuntimeCommandMetadata(
+  commands: CommandInfo[],
+  commandMetadata: CommandRuntimeMetadataStore
+): void {
+  for (const command of commands) {
+    const subtitle = getStoredRuntimeSubtitle(command, commandMetadata);
+    if (subtitle) {
+      command.subtitle = subtitle;
+    }
+  }
+}
+
+function startCommandDiscovery(): Promise<CommandInfo[]> {
+  commandDiscoveryStartCount += 1;
+  return (commandDiscoveryRunnerForTesting || discoverAndBuildCommands)();
+}
+
+export function __seedCommandCacheForTesting(
+  commands: CommandInfo[],
+  options: { cacheTimestamp?: number; staleCommandsFallback?: CommandInfo[] | null } = {}
+): void {
+  cachedCommands = commands;
+  staleCommandsFallback = options.staleCommandsFallback === undefined
+    ? commands
+    : options.staleCommandsFallback;
+  cacheTimestamp = options.cacheTimestamp ?? Date.now();
+  inflightDiscovery = null;
+  lastStaleRefreshRequestAt = 0;
+  resetRuntimeMetadataTracking();
+  rememberRuntimeMetadataBaseSubtitles(commands);
+  if (staleCommandsFallback && staleCommandsFallback !== commands) {
+    rememberRuntimeMetadataBaseSubtitles(staleCommandsFallback);
+  }
+}
+
+export function __resetCommandCacheForTesting(): void {
+  cachedCommands = null;
+  staleCommandsFallback = null;
+  cacheTimestamp = 0;
+  inflightDiscovery = null;
+  lastStaleRefreshRequestAt = 0;
+  commandDiscoveryStartCount = 0;
+  commandDiscoveryRunnerForTesting = null;
+  resetRuntimeMetadataTracking();
+  commandsDiskCachePath = null;
+}
+
+export function __setCommandDiscoveryRunnerForTesting(
+  runner: (() => Promise<CommandInfo[]>) | null
+): void {
+  commandDiscoveryRunnerForTesting = runner;
+}
+
+export function __getCommandDiscoveryStartCountForTesting(): number {
+  return commandDiscoveryStartCount;
 }
 
 // ─── Icon Disk Cache ────────────────────────────────────────────────
@@ -655,6 +798,41 @@ function buildQuickLinkKeywords(quickLink: QuickLink): string[] {
   } catch {}
 
   return Array.from(set);
+}
+
+async function discoverQuickLinkCommandInfos(options: { throwOnError?: boolean } = {}): Promise<CommandInfo[]> {
+  try {
+    const quickLinks = getAllQuickLinks();
+    return await Promise.all(
+      quickLinks.map(async (quickLink) => {
+        const resolvedIconName = resolveQuickLinkIconName(quickLink.icon);
+        let iconDataUrl = resolveQuickLinkIconDataUrl(quickLink, resolvedIconName);
+
+        if (!resolvedIconName && quickLink.applicationPath) {
+          const resolvedAppIconDataUrl = await getIconDataUrl(quickLink.applicationPath);
+          if (resolvedAppIconDataUrl) {
+            iconDataUrl = resolvedAppIconDataUrl;
+          }
+        }
+
+        return {
+          id: getQuickLinkCommandId(quickLink.id),
+          title: quickLink.name,
+          subtitle: quickLink.applicationName || 'Quick Link',
+          keywords: buildQuickLinkKeywords(quickLink),
+          iconDataUrl,
+          iconName: iconDataUrl ? undefined : resolvedIconName,
+          category: 'system' as const,
+        };
+      })
+    );
+  } catch (e) {
+    if (options.throwOnError) {
+      throw e;
+    }
+    console.error('Failed to discover quick links:', e);
+    return [];
+  }
 }
 
 function getLocaleCandidates(): string[] {
@@ -1269,6 +1447,91 @@ async function openSettingsPane(identifier: string): Promise<void> {
 }
 
 // ─── Public API ─────────────────────────────────────────────────────
+
+function assignUniversalDeeplinks(commands: CommandInfo[]): void {
+  for (const cmd of commands) {
+    if (!cmd.deeplink && cmd.id) {
+      cmd.deeplink = `supercmd://commands/${encodeURIComponent(cmd.id)}`;
+    }
+  }
+}
+
+function applyRuntimeMetadataAndAliases(commands: CommandInfo[]): void {
+  try {
+    const loadedSettings = loadSettings();
+    const commandMetadata = loadedSettings.commandMetadata || {};
+    const commandAliases = loadedSettings.commandAliases || {};
+    resetRuntimeMetadataTracking();
+    rememberRuntimeMetadataBaseSubtitles(commands);
+    applyStoredRuntimeCommandMetadata(commands, commandMetadata);
+    for (const cmd of commands) {
+      const alias = String(commandAliases[cmd.id] || '').trim();
+      if (alias) {
+        cmd.keywords = Array.from(new Set([...(cmd.keywords || []), alias]));
+      }
+    }
+  } catch {}
+}
+
+function publishCommandCache(commands: CommandInfo[]): CommandInfo[] {
+  assignUniversalDeeplinks(commands);
+  applyRuntimeMetadataAndAliases(commands);
+
+  cachedCommands = commands;
+  cacheTimestamp = Date.now();
+  staleCommandsFallback = commands;
+  saveCommandsDiskCache(commands);
+
+  return cachedCommands;
+}
+
+function cloneCommandForTargetedRefresh(command: CommandInfo): CommandInfo {
+  return {
+    ...command,
+    keywords: command.keywords ? [...command.keywords] : undefined,
+    commandArgumentDefinitions: command.commandArgumentDefinitions
+      ? command.commandArgumentDefinitions.map((arg) => ({
+          ...arg,
+          data: arg.data ? arg.data.map((item) => ({ ...item })) : arg.data,
+        }))
+      : undefined,
+  };
+}
+
+function getQuickLinkInsertionIndex(commands: CommandInfo[]): number {
+  const existingQuickLinkIndex = commands.findIndex((command) => isQuickLinkCommandId(command.id));
+  if (existingQuickLinkIndex >= 0) return existingQuickLinkIndex;
+
+  const systemIndex = commands.findIndex((command) => command.category === 'system');
+  if (systemIndex >= 0) return systemIndex;
+
+  return commands.length;
+}
+
+function rebuildCommandsWithFreshQuickLinks(
+  baseCommands: CommandInfo[],
+  quickLinkCommands: CommandInfo[]
+): CommandInfo[] {
+  const insertionIndex = getQuickLinkInsertionIndex(baseCommands);
+  const beforeQuickLinks: CommandInfo[] = [];
+  const afterQuickLinks: CommandInfo[] = [];
+
+  baseCommands.forEach((command, index) => {
+    if (isQuickLinkCommandId(command.id)) return;
+    const cloned = cloneCommandForTargetedRefresh(command);
+    if (index < insertionIndex) {
+      beforeQuickLinks.push(cloned);
+    } else {
+      afterQuickLinks.push(cloned);
+    }
+  });
+
+  return [
+    ...beforeQuickLinks,
+    ...quickLinkCommands.map(cloneCommandForTargetedRefresh),
+    ...afterQuickLinks,
+  ];
+}
 
 async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
   const t0 = Date.now();
@@ -1974,45 +2237,11 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
     delete cmd._bundlePath;
   }
 
-  // Assign a universal deeplink to any launcher command that doesn't already
-  // have one (extensions + scripts keep their owner/slug-based schemes above).
-  // This lets apps, settings, system, and quick-link commands be copied and
-  // re-invoked via `supercmd://commands/<id>`.
-  for (const cmd of allCommands) {
-    if (!cmd.deeplink && cmd.id) {
-      cmd.deeplink = `supercmd://commands/${encodeURIComponent(cmd.id)}`;
-    }
-  }
-
-  // Runtime metadata overlays (used by updateCommandMetadata and inline scripts).
-  try {
-    const loadedSettings = loadSettings();
-    const commandMetadata = loadedSettings.commandMetadata || {};
-    const commandAliases = loadedSettings.commandAliases || {};
-    for (const cmd of allCommands) {
-      if (!(cmd.category === 'script' && cmd.mode !== 'inline')) {
-        const subtitle = String(commandMetadata[cmd.id]?.subtitle || '').trim();
-        if (subtitle) {
-          cmd.subtitle = subtitle;
-        }
-      }
-      const alias = String(commandAliases[cmd.id] || '').trim();
-      if (alias) {
-        cmd.keywords = Array.from(new Set([...(cmd.keywords || []), alias]));
-      }
-    }
-  } catch {}
-
-  cachedCommands = allCommands;
-  cacheTimestamp = Date.now();
-  staleCommandsFallback = allCommands;
+  publishCommandCache(allCommands);
 
   console.log(
     `Discovered ${apps.length} apps, ${settings.length} settings panes, ${extensionCommands.length} extension commands, ${scriptCommands.length} script commands, ${quickLinkCommands.length} quick links in ${Date.now() - t0}ms`
   );
-
-  // Persist to disk so the next startup can serve commands instantly.
-  saveCommandsDiskCache(allCommands);
 
   return cachedCommands;
 }
@@ -2023,7 +2252,7 @@ function ensureBackgroundRefreshForStaleCache(): void {
   const now = Date.now();
   if (now - lastStaleRefreshRequestAt < STALE_REFRESH_COOLDOWN_MS) return;
   lastStaleRefreshRequestAt = now;
-  inflightDiscovery = discoverAndBuildCommands()
+  inflightDiscovery = startCommandDiscovery()
     .catch((error) => {
       console.warn('[Commands] Background refresh failed:', error);
       return cachedCommands || [];
@@ -2038,10 +2267,38 @@ export async function refreshCommandsNow(): Promise<CommandInfo[]> {
     return inflightDiscovery;
   }
 
-  inflightDiscovery = discoverAndBuildCommands().finally(() => {
+  inflightDiscovery = startCommandDiscovery().finally(() => {
     inflightDiscovery = null;
   });
   return inflightDiscovery;
+}
+
+export async function refreshCommandsForQuickLinkChange(): Promise<CommandInfo[]> {
+  if (!cachedCommands && !staleCommandsFallback) {
+    return refreshCommandsNow();
+  }
+
+  if (inflightDiscovery) {
+    try {
+      await inflightDiscovery;
+    } catch (error) {
+      console.warn('[Commands] Inflight refresh failed before quick link refresh:', error);
+    }
+  }
+
+  const baseCommands = cachedCommands || staleCommandsFallback;
+  if (!baseCommands) {
+    return refreshCommandsNow();
+  }
+
+  const t0 = Date.now();
+  const quickLinkCommands = await discoverQuickLinkCommandInfos({ throwOnError: true });
+  const nextCommands = rebuildCommandsWithFreshQuickLinks(baseCommands, quickLinkCommands);
+  const refreshed = publishCommandCache(nextCommands);
+  console.log(
+    `[Commands] Refreshed ${quickLinkCommands.length} quick link commands from cached app/settings base in ${Date.now() - t0}ms`
+  );
+  return refreshed;
 }
 
 export async function getAvailableCommands(): Promise<CommandInfo[]> {
@@ -2062,7 +2319,7 @@ export async function getAvailableCommands(): Promise<CommandInfo[]> {
   // so the launcher never blocks on discovery after an invalidation event.
   if (staleCommandsFallback) {
     if (!inflightDiscovery) {
-      inflightDiscovery = discoverAndBuildCommands()
+      inflightDiscovery = startCommandDiscovery()
         .catch((error) => {
           console.warn('[Commands] Background refresh failed:', error);
           return staleCommandsFallback || [];
