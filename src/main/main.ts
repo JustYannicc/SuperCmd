@@ -221,6 +221,7 @@ import {
 } from './raycast-config-import';
 import {
   createMenuBarNativeUpdateState,
+  getMenuBarNativeFileIconIdentityKey,
   getMenuBarNativeItemsKey,
   getMenuBarNativeTitle,
   getMenuBarNativeTooltip,
@@ -19042,6 +19043,7 @@ if let tiff = image?.tiffRepresentation {
 
     let tray = menuBarTrays.get(extId);
     const updateState = getMenuBarNativeUpdateState(extId);
+    const nextIconFileIdentityKey = getMenuBarNativeFileIconIdentityKey(data, fs);
 
     const createNativeImageFromMenuIcon = (
       payload: { pathValue?: string; dataUrlValue?: string; bitmapScale?: number },
@@ -19137,11 +19139,11 @@ if let tiff = image?.tiffRepresentation {
       const icon = resolveTrayIcon();
       tray = new Tray(icon);
       menuBarTrays.set(extId, tray);
-      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
-    } else if (isMenuBarNativeIconRefreshNeeded(updateState, data)) {
+      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk, nextIconFileIdentityKey);
+    } else if (isMenuBarNativeIconRefreshNeeded(updateState, data, nextIconFileIdentityKey)) {
       // Refresh icon on accepted updates after creation (first payload can be incomplete).
       tray.setImage(resolveTrayIcon());
-      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk);
+      rememberMenuBarNativeIcon(updateState, data, lastResolvedTrayIconOk, nextIconFileIdentityKey);
     }
 
     // Update title: if there's a text title, show it; if only emoji icon, show that

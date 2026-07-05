@@ -17,8 +17,17 @@ export type MenuBarNativeUpdatePayload = {
   items?: unknown;
 };
 
+export type MenuBarNativeFileStatFs = {
+  statSync: (pathValue: string) => {
+    size?: number;
+    mtimeMs?: number;
+    isFile?: () => boolean;
+  };
+};
+
 export type MenuBarNativeUpdateState = {
   iconKey: string | null;
+  iconFileIdentityKey: string | null;
   lastResolvedTrayIconOk: boolean;
   title: string | null;
   tooltip: string | null;
@@ -28,6 +37,7 @@ export type MenuBarNativeUpdateState = {
 export function createMenuBarNativeUpdateState(): MenuBarNativeUpdateState {
   return {
     iconKey: null,
+    iconFileIdentityKey: null,
     lastResolvedTrayIconOk: false,
     title: null,
     tooltip: null,
@@ -50,20 +60,45 @@ export function hasFileBackedMenuBarNativeIcon(payload: MenuBarNativeUpdatePaylo
   return typeof payload.iconPath === 'string' && payload.iconPath.trim().length > 0;
 }
 
+export function getMenuBarNativeFileIconIdentityKey(
+  payload: MenuBarNativeUpdatePayload,
+  fs: MenuBarNativeFileStatFs,
+): string | null {
+  if (!hasFileBackedMenuBarNativeIcon(payload)) return null;
+  const pathValue = (payload.iconPath as string).trim();
+  try {
+    const stat = fs.statSync(pathValue);
+    if (typeof stat?.isFile === 'function' && !stat.isFile()) {
+      return `path:${pathValue}|missing`;
+    }
+    const size = Number.isFinite(Number(stat?.size)) ? Number(stat.size) : 0;
+    const mtimeMs = Number.isFinite(Number(stat?.mtimeMs)) ? Number(stat.mtimeMs) : 0;
+    return `path:${pathValue}|mtimeMs=${mtimeMs}|bytes=${size}`;
+  } catch {
+    return `path:${pathValue}|missing`;
+  }
+}
+
 export function isMenuBarNativeIconRefreshNeeded(
   state: MenuBarNativeUpdateState,
   payload: MenuBarNativeUpdatePayload,
+  nextFileIdentityKey?: string | null,
 ): boolean {
   const nextIconKey = getMenuBarNativeIconKey(payload);
-  return state.iconKey !== nextIconKey || hasFileBackedMenuBarNativeIcon(payload);
+  if (state.iconKey !== nextIconKey) return true;
+  if (!hasFileBackedMenuBarNativeIcon(payload)) return false;
+  if (nextFileIdentityKey === undefined) return true;
+  return state.iconFileIdentityKey !== nextFileIdentityKey;
 }
 
 export function rememberMenuBarNativeIcon(
   state: MenuBarNativeUpdateState,
   payload: MenuBarNativeUpdatePayload,
   lastResolvedTrayIconOk: boolean,
+  fileIdentityKey: string | null = null,
 ): void {
   state.iconKey = getMenuBarNativeIconKey(payload);
+  state.iconFileIdentityKey = fileIdentityKey;
   state.lastResolvedTrayIconOk = lastResolvedTrayIconOk;
 }
 
