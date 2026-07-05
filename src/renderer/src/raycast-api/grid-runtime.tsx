@@ -263,7 +263,9 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
       });
       if (Math.abs(nextScrollTop - node.scrollTop) < 1) return;
 
-      node.scrollTo({ top: nextScrollTop, behavior: 'smooth' });
+      // Keep keyboard-driven virtual selection scrolling instant. Smooth scroll
+      // queues animations under held arrow navigation and makes the window lag.
+      node.scrollTo({ top: nextScrollTop, behavior: 'auto' });
       requestAnimationFrame(measureGridViewport);
     }, [filteredItems.length, gridViewport.viewportHeight, measureGridViewport, selectedIdx, virtualLayout]);
 

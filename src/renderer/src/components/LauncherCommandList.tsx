@@ -304,7 +304,9 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
     }
 
     if (nextTop !== null) {
-      element.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
+      // Match the virtual List runtime: instant correction avoids queued smooth
+      // scroll animations while the selected row changes rapidly from keys.
+      element.scrollTo({ top: Math.max(0, nextTop), behavior: 'auto' });
     }
   }, [listRef, selectedEntry, shouldVirtualize, viewportHeight]);
 
