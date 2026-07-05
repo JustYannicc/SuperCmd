@@ -7369,7 +7369,49 @@ app.on('open-url', (event: any, url: string) => {
 // ─── Menu Bar (Tray) Management ─────────────────────────────────────
 
 const menuBarTrays = new Map<string, InstanceType<typeof Tray>>();
+const menuBarTrayUpdateStates = new Map<string, {
+  iconKey: string | null;
+  iconFileIdentityKey: string | null;
+  lastResolvedTrayIconOk: boolean;
+}>();
 let appTray: InstanceType<typeof Tray> | null = null;
+
+function getMenuBarTrayUpdateState(extId: string) {
+  let state = menuBarTrayUpdateStates.get(extId);
+  if (!state) {
+    state = { iconKey: null, iconFileIdentityKey: null, lastResolvedTrayIconOk: false };
+    menuBarTrayUpdateStates.set(extId, state);
+  }
+  return state;
+}
+
+function getMenuBarTrayIconKey(data: any): string {
+  return JSON.stringify({
+    iconPath: data?.iconPath || '',
+    iconDataUrl: data?.iconDataUrl || '',
+    iconEmoji: data?.iconEmoji || '',
+    iconTemplate: data?.iconTemplate ?? null,
+    iconBitmapScale: data?.iconBitmapScale ?? null,
+    fallbackIconDataUrl: data?.fallbackIconDataUrl || '',
+  });
+}
+
+function getMenuBarFileIconIdentityKey(iconPath: unknown): string | null {
+  const pathValue = typeof iconPath === 'string' ? iconPath.trim() : '';
+  if (!pathValue) return null;
+  try {
+    const fs = require('fs');
+    const stat = fs.statSync(pathValue);
+    if (typeof stat?.isFile === 'function' && !stat.isFile()) {
+      return `path:${pathValue}|missing`;
+    }
+    const size = Number.isFinite(Number(stat?.size)) ? Number(stat.size) : 0;
+    const mtimeMs = Number.isFinite(Number(stat?.mtimeMs)) ? Number(stat.mtimeMs) : 0;
+    return `path:${pathValue}|mtimeMs=${mtimeMs}|bytes=${size}`;
+  } catch {
+    return `path:${pathValue}|missing`;
+  }
+}
 
 function buildDefaultMacTrayTemplateIcon(): any | null {
   if (process.platform !== 'darwin') return null;
@@ -19089,6 +19131,9 @@ if let tiff = image?.tiffRepresentation {
     const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, iconBitmapScale, fallbackIconDataUrl, title, tooltip, items } = data;
 
     let tray = menuBarTrays.get(extId);
+    const updateState = getMenuBarTrayUpdateState(extId);
+    const nextIconKey = getMenuBarTrayIconKey(data);
+    const nextIconFileIdentityKey = getMenuBarFileIconIdentityKey(iconPath);
 
     const createNativeImageFromMenuIcon = (
       payload: { pathValue?: string; dataUrlValue?: string; bitmapScale?: number },
@@ -19142,7 +19187,7 @@ if let tiff = image?.tiffRepresentation {
       }
     };
 
-    let lastResolvedTrayIconOk = false;
+    let lastResolvedTrayIconOk = updateState.lastResolvedTrayIconOk;
     const hasEmojiIcon = typeof iconEmoji === 'string' && iconEmoji.trim().length > 0;
     const resolveTrayIcon = () => {
       const primaryImg = createNativeImageFromMenuIcon(
@@ -19184,10 +19229,15 @@ if let tiff = image?.tiffRepresentation {
       const icon = resolveTrayIcon();
       tray = new Tray(icon);
       menuBarTrays.set(extId, tray);
+      updateState.iconKey = nextIconKey;
+      updateState.iconFileIdentityKey = nextIconFileIdentityKey;
+      updateState.lastResolvedTrayIconOk = lastResolvedTrayIconOk;
+    } else if (updateState.iconKey !== nextIconKey || updateState.iconFileIdentityKey !== nextIconFileIdentityKey) {
+      tray.setImage(resolveTrayIcon());
+      updateState.iconKey = nextIconKey;
+      updateState.iconFileIdentityKey = nextIconFileIdentityKey;
+      updateState.lastResolvedTrayIconOk = lastResolvedTrayIconOk;
     }
-
-    // Always refresh icon on update (first payload can be incomplete).
-    tray.setImage(resolveTrayIcon());
 
     // Update title: if there's a text title, show it; if only emoji icon, show that
     if (title) {
@@ -19217,6 +19267,7 @@ if let tiff = image?.tiffRepresentation {
       tray.destroy();
     } catch {}
     menuBarTrays.delete(extId);
+    menuBarTrayUpdateStates.delete(extId);
   });
 
   // Route native menu clicks back to the renderer
