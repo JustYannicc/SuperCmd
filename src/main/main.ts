@@ -19251,7 +19251,7 @@ if let tiff = image?.tiffRepresentation {
     let tray = menuBarTrays.get(extId);
     const updateState = getMenuBarNativeUpdateState(extId);
 
-    let lastResolvedTrayIconOk = false;
+    let lastResolvedTrayIconOk = updateState.lastResolvedTrayIconOk;
     const hasEmojiIcon = typeof iconEmoji === 'string' && iconEmoji.trim().length > 0;
     const isPrimaryGeneratedDataUrl = typeof iconDataUrl === 'string' && iconDataUrl.startsWith('data:');
     const isPrimarySvgPath = /\.svg$/i.test(iconPath || '');
