@@ -173,6 +173,54 @@ function runPickDateAction(props: any): void {
   input.click();
 }
 
+function getReactTypeName(type: any): string {
+  return String(type?.displayName || type?.name || type || '');
+}
+
+function buildValueSignature(value: unknown, seen = new WeakSet<object>()): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (typeof value === 'function') return `fn:${value.name || 'anonymous'}`;
+  if (typeof value === 'symbol') return value.toString();
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => buildValueSignature(item, seen)).join(',')}]`;
+  }
+
+  if (React.isValidElement(value)) {
+    return `element:${getReactTypeName(value.type)}:${buildValueSignature((value as any).props, seen)}`;
+  }
+
+  if (typeof value === 'object') {
+    if (value instanceof Date) return `date:${value.getTime()}`;
+    if (seen.has(value as object)) return '[circular]';
+    seen.add(value as object);
+
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== '_owner' && key !== '_store' && key !== 'ref' && key !== 'key')
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entryValue]) => `${key}:${buildValueSignature(entryValue, seen)}`);
+
+    return `{${entries.join(',')}}`;
+  }
+
+  return String(value);
+}
+
+export function buildActionVisibleSignature(entry: Pick<ActionRegistration, 'id' | 'title' | 'icon' | 'shortcut' | 'style' | 'sectionTitle' | 'order'>): string {
+  return [
+    entry.id,
+    String(entry.order),
+    entry.title,
+    entry.sectionTitle || '',
+    buildValueSignature(entry.icon),
+    buildValueSignature(entry.shortcut),
+    entry.style || '',
+  ].join('\u001f');
+}
+
 export function createActionRegistryRuntime(deps: RegistryDeps) {
   const {
     snapshotExtensionContext,
@@ -347,10 +395,10 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
 
   function useCollectedActions() {
     const registryRef = useRef(new Map<string, ActionRegistration>());
+    const visibleSignatureRef = useRef(new Map<string, string>());
     const [version, setVersion] = useState(0);
     const mountedRef = useRef(true);
     const pendingRef = useRef(false);
-    const lastSnapshotRef = useRef('');
 
     useEffect(() => {
       mountedRef.current = true;
@@ -359,7 +407,7 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
         mountedRef.current = false;
         pendingRef.current = false;
         registryRef.current.clear();
-        lastSnapshotRef.current = '';
+        visibleSignatureRef.current.clear();
       };
     }, []);
 
@@ -373,12 +421,7 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
           return;
         }
         pendingRef.current = false;
-        const entries = Array.from(registryRef.current.values());
-        const snapshot = entries.map((entry) => `${entry.id}:${entry.title}:${entry.sectionTitle || ''}`).join('|');
-        if (snapshot !== lastSnapshotRef.current) {
-          lastSnapshotRef.current = snapshot;
-          setVersion((value) => value + 1);
-        }
+        setVersion((value) => value + 1);
       });
     }, []);
 
@@ -387,6 +430,7 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
         register(id, data) {
           if (!mountedRef.current) return;
           const existing = registryRef.current.get(id);
+          let shouldPublish = false;
           if (existing) {
             existing.title = data.title;
             existing.icon = data.icon;
@@ -395,15 +439,22 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
             existing.sectionTitle = data.sectionTitle;
             existing.execute = data.execute;
             existing.order = data.order;
+            const nextSignature = buildActionVisibleSignature(existing);
+            shouldPublish = visibleSignatureRef.current.get(id) !== nextSignature;
+            visibleSignatureRef.current.set(id, nextSignature);
           } else {
-            registryRef.current.set(id, { id, ...data });
+            const entry = { id, ...data };
+            registryRef.current.set(id, entry);
+            visibleSignatureRef.current.set(id, buildActionVisibleSignature(entry));
+            shouldPublish = true;
           }
-          scheduleUpdate();
+          if (shouldPublish) scheduleUpdate();
         },
         unregister(id) {
           if (!mountedRef.current) return;
           if (!registryRef.current.has(id)) return;
           registryRef.current.delete(id);
+          visibleSignatureRef.current.delete(id);
           scheduleUpdate();
         },
       }),

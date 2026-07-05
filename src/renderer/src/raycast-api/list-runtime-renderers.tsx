@@ -5,7 +5,7 @@
  * subcomponents like EmptyView and Dropdown.
  */
 
-import React, { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   EmptyViewRegistryContext,
   ListRegistryContext,
@@ -20,6 +20,26 @@ interface ListRendererDeps {
   resolveTintColor: (tintColor?: string) => string | undefined;
   resolveReadableTintColor: (tintColor?: string, options?: { minContrast?: number }) => string | undefined;
   addHexAlpha: (hex: string, alphaHex: string) => string | undefined;
+}
+
+export type ListDropdownItem = { title: string; value: string };
+
+export function flattenListDropdownItems(children: React.ReactNode, metrics?: { childWalks?: number; itemPushes?: number }): ListDropdownItem[] {
+  const items: ListDropdownItem[] = [];
+  const walk = (nodes: React.ReactNode) => {
+    React.Children.forEach(nodes, (child) => {
+      if (!React.isValidElement(child)) return;
+      metrics && (metrics.childWalks = (metrics.childWalks || 0) + 1);
+      const props = child.props as any;
+      if (props.value !== undefined && props.title !== undefined) {
+        items.push({ title: props.title, value: props.value });
+        metrics && (metrics.itemPushes = (metrics.itemPushes || 0) + 1);
+      }
+      if (props.children) walk(props.children);
+    });
+  };
+  walk(children);
+  return items;
 }
 
 export function createListRenderers(deps: ListRendererDeps) {
@@ -186,17 +206,7 @@ export function createListRenderers(deps: ListRendererDeps) {
   function ListDropdown({ children, tooltip, onChange, value, defaultValue }: any) {
     const [internalValue, setInternalValue] = useState(value ?? defaultValue ?? '');
     const didEmitInitialChange = useRef(false);
-
-    const items: { title: string; value: string }[] = [];
-    const walk = (nodes: React.ReactNode) => {
-      React.Children.forEach(nodes, (child) => {
-        if (!React.isValidElement(child)) return;
-        const props = child.props as any;
-        if (props.value !== undefined && props.title !== undefined) items.push({ title: props.title, value: props.value });
-        if (props.children) walk(props.children);
-      });
-    };
-    walk(children);
+    const items = useMemo(() => flattenListDropdownItems(children), [children]);
 
     useEffect(() => {
       if (didEmitInitialChange.current || !onChange) return;
