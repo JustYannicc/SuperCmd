@@ -18499,7 +18499,7 @@ if let tiff = image?.tiffRepresentation {
         if (pullRequestFinished) return;
         pullRequestFinished = true;
         cleanupAbortListener();
-        activeOllamaPullRequests.delete(requestId);
+        activeAIRequests.delete(requestId);
       };
 
       if (controller.signal.aborted) {
