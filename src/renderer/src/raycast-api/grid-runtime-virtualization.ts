@@ -234,7 +234,37 @@ export function getVisibleVirtualRows(rows: VirtualGridRow[], options: VisibleRo
   const start = Math.max(0, options.scrollTop - overscan);
   const end = options.scrollTop + viewportHeight + overscan;
 
-  return rows.filter((row) => row.top + row.height >= start && row.top <= end);
+  const firstVisibleIndex = findFirstRowWithBottomAtOrAfter(rows, start);
+  const endIndex = findFirstRowWithTopAfter(rows, end);
+
+  return rows.slice(firstVisibleIndex, endIndex);
+}
+
+function findFirstRowWithBottomAtOrAfter(rows: VirtualGridRow[], start: number): number {
+  let low = 0;
+  let high = rows.length;
+
+  while (low < high) {
+    const mid = low + Math.floor((high - low) / 2);
+    const row = rows[mid];
+    if (row.top + row.height < start) low = mid + 1;
+    else high = mid;
+  }
+
+  return low;
+}
+
+function findFirstRowWithTopAfter(rows: VirtualGridRow[], end: number): number {
+  let low = 0;
+  let high = rows.length;
+
+  while (low < high) {
+    const mid = low + Math.floor((high - low) / 2);
+    if (rows[mid].top <= end) low = mid + 1;
+    else high = mid;
+  }
+
+  return low;
 }
 
 export function getScrollTopForItemIndex(
