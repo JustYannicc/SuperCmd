@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionViewPath = path.join(root, 'src/renderer/src/ExtensionView.tsx');
+const extensionWrapperCachePath = path.join(root, 'src/renderer/src/utils/extension-wrapper-cache.ts');
 
 function captureFromOptions(options) {
   if (typeof options === 'boolean') return options;
@@ -173,8 +174,10 @@ function loadLifecycleHarness() {
     ${extractLifecycleSource()}
     globalThis.__extensionLifecycleHarness = {
       clearTimerRegistry,
+      createExtensionTimerBuiltinFacade,
       createExtensionLifecycleScope,
       createTimerRegistry,
+      isExtensionTimerBuiltinRequest,
     };
   `;
   const transpiled = ts.transpileModule(source, {
@@ -196,8 +199,10 @@ function loadLifecycleHarness() {
 
 const {
   clearTimerRegistry,
+  createExtensionTimerBuiltinFacade,
   createExtensionLifecycleScope,
   createTimerRegistry,
+  isExtensionTimerBuiltinRequest,
 } = loadLifecycleHarness();
 
 const extensionCode = `
@@ -293,6 +298,46 @@ function createBareTimerApi(registry) {
   };
 }
 
+function createLegacyImportedTimerFacade(name) {
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  if (normalized === 'timers/promises') {
+    const wait = (ms, value) => new Promise((resolve) => {
+      host.hostWindow.setTimeout(() => resolve(value), ms);
+    });
+    return {
+      setTimeout: wait,
+      setInterval: async function* (ms, value) {
+        while (true) {
+          yield await wait(ms, value);
+        }
+      },
+      setImmediate: (value) => Promise.resolve(value),
+      scheduler: { wait },
+    };
+  }
+
+  return {
+    setImmediate: (callback, ...args) => host.hostWindow.setTimeout(() => callback(...args), 0),
+    clearImmediate: (id) => host.hostWindow.clearTimeout(id),
+    setInterval: (...args) => host.hostWindow.setInterval(...args),
+    clearInterval: (id) => host.hostWindow.clearInterval(id),
+    setTimeout: (...args) => host.hostWindow.setTimeout(...args),
+    clearTimeout: (id) => host.hostWindow.clearTimeout(id),
+  };
+}
+
+function createScopedImportedTimerRequire(lifecycleScope) {
+  const facades = new Map();
+  return (name) => {
+    assert.equal(isExtensionTimerBuiltinRequest(name), true, `expected ${name} to be a timer builtin`);
+    const normalized = name.startsWith('node:') ? name.slice(5) : name;
+    if (!facades.has(normalized)) {
+      facades.set(normalized, createExtensionTimerBuiltinFacade(normalized, lifecycleScope));
+    }
+    return facades.get(normalized);
+  };
+}
+
 function runWrapper({ lifecycleScope, registry, scoped }) {
   const moduleExports = {};
   const fakeModule = { exports: moduleExports };
@@ -330,17 +375,77 @@ function runWrapper({ lifecycleScope, registry, scoped }) {
   return fakeModule.exports.default();
 }
 
+const importedTimerCode = `
+const timers = require("timers");
+const nodeTimers = require("node:timers");
+const timersPromises = require("timers/promises");
+const nodeTimersPromises = require("node:timers/promises");
+
+exports.default = function ImportedTimerProbe() {
+  const intervalId = timers.setInterval(() => {}, 60000);
+  const timeoutId = nodeTimers.setTimeout(() => {}, 60000);
+  const waitPromise = timersPromises.setTimeout(60000, "waited");
+  const intervalIterator = nodeTimersPromises.setInterval(60000, "tick");
+  const intervalNextPromise = intervalIterator.next();
+
+  return {
+    intervalId,
+    timeoutId,
+    waitPromise,
+    intervalIterator,
+    intervalNextPromise
+  };
+};
+`;
+
+function runImportedTimerWrapper({ lifecycleScope, scoped }) {
+  const moduleExports = {};
+  const fakeModule = { exports: moduleExports };
+  const fakeRequire = scoped
+    ? createScopedImportedTimerRequire(lifecycleScope)
+    : (name) => createLegacyImportedTimerFacade(name);
+  const wrapper = new Function(...EXTENSION_WRAPPER_ARGUMENTS, importedTimerCode);
+
+  wrapper(
+    moduleExports,
+    fakeRequire,
+    fakeModule,
+    '/extension/index.js',
+    '/extension',
+    { env: {} },
+    Buffer,
+    host.hostWindow,
+    host.hostWindow,
+    host.hostWindow,
+    host.hostWindow,
+    host.hostDocument,
+    host.hostWindow.setTimeout,
+    host.hostWindow.clearTimeout,
+    host.hostWindow.setInterval,
+    host.hostWindow.clearInterval,
+    host.hostWindow.setTimeout,
+    host.hostWindow.clearTimeout,
+    host.hostWindow.requestAnimationFrame,
+    host.hostWindow.cancelAnimationFrame,
+    undefined,
+    async () => ({}),
+  );
+
+  return fakeModule.exports.default();
+}
+
 test('extension lifecycle sandbox cleanup', async (t) => {
   await t.test('production wrapper wires the lifecycle scope', () => {
     const source = fs.readFileSync(extensionViewPath, 'utf8');
+    const wrapperCacheSource = fs.readFileSync(extensionWrapperCachePath, 'utf8');
     const start = source.indexOf('function loadExtensionExport(');
     const end = source.indexOf('// Get the default export', start);
     assert.notEqual(start, -1, 'Could not locate loadExtensionExport start marker');
     assert.notEqual(end, -1, 'Could not locate loadExtensionExport wrapper marker');
     const wrapperSource = source.slice(start, end);
 
-    assert.match(wrapperSource, /const lifecycleScope = createExtensionLifecycleScope\(timerRegistry\)/);
-    assert.match(wrapperSource, /'window',\s*'self',\s*'document'/);
+    assert.match(wrapperSource, /lifecycleScope = createExtensionLifecycleScope\(timerRegistry\)/);
+    assert.match(wrapperCacheSource, /'window',\s*'self',\s*'document'/);
     assert.match(wrapperSource, /bundleBuffer,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedDocument,/);
     assert.doesNotMatch(wrapperSource, /const trackTimeout = \(cb: any, ms\?: any/);
   });
@@ -401,6 +506,87 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     assert.equal(afterClear.total, 0);
 
     console.log('extension lifecycle cleanup after fix:', { beforeClear, registryBeforeClear, afterClear });
+  });
+
+  await t.test('documents the pre-fix imported timer module leak', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    runImportedTimerWrapper({ scoped: false });
+    const beforeClear = host.snapshot();
+
+    clearTimerRegistry(registry);
+    const afterClear = host.snapshot();
+
+    assert.equal(beforeClear.intervals, 1);
+    assert.equal(beforeClear.timeouts, 3);
+    assert.equal(registry.intervals.size, 0, 'legacy imported timers bypass the lifecycle registry');
+    assert.equal(registry.timeouts.size, 0, 'legacy imported timer promises bypass the lifecycle registry');
+    assert.equal(afterClear.intervals, beforeClear.intervals);
+    assert.equal(afterClear.timeouts, beforeClear.timeouts);
+
+    console.log('imported timer module leak before scoped facade:', { beforeClear, afterClear });
+    host.reset();
+  });
+
+  await t.test('cleans imported timer module handles on unmount', () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+    runImportedTimerWrapper({ lifecycleScope, scoped: true });
+    const beforeClear = host.snapshot();
+    const registryBeforeClear = {
+      intervals: registry.intervals.size,
+      timeouts: registry.timeouts.size,
+    };
+
+    clearTimerRegistry(registry);
+    const afterClear = host.snapshot();
+
+    assert.equal(beforeClear.intervals, 1);
+    assert.equal(beforeClear.timeouts, 3);
+    assert.deepEqual(registryBeforeClear, { intervals: 1, timeouts: 3 });
+    assert.equal(afterClear.total, 0);
+
+    console.log('imported timer module cleanup after scoped facade:', {
+      beforeClear,
+      registryBeforeClear,
+      afterClear,
+    });
+  });
+
+  await t.test('prunes fired imported one-shots from timer builtins', async () => {
+    host.reset();
+    const registry = createTimerRegistry();
+    const lifecycleScope = createExtensionLifecycleScope(registry, host.hostWindow, host.hostDocument);
+    const timers = createExtensionTimerBuiltinFacade('timers', lifecycleScope);
+    const timersPromises = createExtensionTimerBuiltinFacade('timers/promises', lifecycleScope);
+    let callbackCalls = 0;
+
+    timers.setTimeout(() => {
+      callbackCalls += 1;
+    }, 0);
+    const waitPromise = timersPromises.setTimeout(0, 'timeout-value');
+    const schedulerPromise = timersPromises.scheduler.wait(0);
+    const immediatePromise = timersPromises.setImmediate('immediate-value');
+
+    assert.equal(registry.timeouts.size, 4);
+    assert.equal(host.snapshot().timeouts, 4);
+
+    host.flushTimeouts();
+
+    assert.equal(callbackCalls, 1);
+    assert.equal(await waitPromise, 'timeout-value');
+    assert.equal(await schedulerPromise, undefined);
+    assert.equal(await immediatePromise, 'immediate-value');
+    assert.equal(registry.timeouts.size, 0);
+    assert.equal(registry.timeoutClearers.size, 0);
+    assert.equal(host.snapshot().timeouts, 0);
+
+    console.log('imported timer one-shot pruning after scoped facade:', {
+      firedOneShots: 4,
+      registryTimeoutsAfterFlush: registry.timeouts.size,
+      hostTimeoutsAfterFlush: host.snapshot().timeouts,
+    });
   });
 
   await t.test('prunes fired scoped one-shot timers and rafs', () => {

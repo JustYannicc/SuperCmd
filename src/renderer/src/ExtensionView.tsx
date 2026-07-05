@@ -4041,6 +4041,104 @@ export function createExtensionLifecycleScope(
   };
 }
 
+function isExtensionTimerBuiltinRequest(name: string): boolean {
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  return normalized === 'timers' || normalized === 'timers/promises';
+}
+
+function createAbortError(): Error {
+  if (typeof DOMException === 'function') {
+    return new DOMException('The operation was aborted.', 'AbortError') as any;
+  }
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function createExtensionTimersPromisesFacade(lifecycleScope: ReturnType<typeof createExtensionLifecycleScope>): any {
+  const wait = (ms?: number, value?: any, options?: { signal?: AbortSignal }) => {
+    const signal = options?.signal;
+    if (signal?.aborted) return Promise.reject(createAbortError());
+
+    return new Promise((resolve, reject) => {
+      let id: ExtensionTimerHandle | undefined;
+      const cleanup = () => {
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = signal
+        ? () => {
+            lifecycleScope.clearTimeout(id);
+            cleanup();
+            reject(createAbortError());
+          }
+        : undefined;
+
+      if (signal && onAbort) signal.addEventListener('abort', onAbort, { once: true });
+      id = lifecycleScope.setTimeout(() => {
+        cleanup();
+        resolve(value);
+      }, ms as any);
+    });
+  };
+
+  const waitImmediate = (value?: any, options?: { signal?: AbortSignal }) => {
+    const signal = options?.signal;
+    if (signal?.aborted) return Promise.reject(createAbortError());
+
+    return new Promise((resolve, reject) => {
+      let id: ExtensionTimerHandle | undefined;
+      const cleanup = () => {
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = signal
+        ? () => {
+            lifecycleScope.clearImmediate(id);
+            cleanup();
+            reject(createAbortError());
+          }
+        : undefined;
+
+      if (signal && onAbort) signal.addEventListener('abort', onAbort, { once: true });
+      id = lifecycleScope.setImmediate(() => {
+        cleanup();
+        resolve(value);
+      });
+    });
+  };
+
+  const interval = async function* (ms?: number, value?: any, options?: { signal?: AbortSignal }) {
+    while (!options?.signal?.aborted) {
+      yield await wait(ms, value, options);
+    }
+    throw createAbortError();
+  };
+
+  return {
+    setTimeout: wait,
+    setInterval: interval,
+    setImmediate: waitImmediate,
+    scheduler: { wait: (ms?: number, options?: { signal?: AbortSignal }) => wait(ms, undefined, options) },
+  };
+}
+
+function createExtensionTimerBuiltinFacade(
+  name: string,
+  lifecycleScope: ReturnType<typeof createExtensionLifecycleScope>
+): any {
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  if (normalized === 'timers/promises') {
+    return createExtensionTimersPromisesFacade(lifecycleScope);
+  }
+  return {
+    setTimeout: lifecycleScope.setTimeout,
+    clearTimeout: lifecycleScope.clearTimeout,
+    setInterval: lifecycleScope.setInterval,
+    clearInterval: lifecycleScope.clearInterval,
+    setImmediate: lifecycleScope.setImmediate,
+    clearImmediate: lifecycleScope.clearImmediate,
+  };
+}
+
 export function trackChildProcess(
   registry: TimerRegistry | undefined,
   childProcess: TrackedChildProcess
@@ -4274,6 +4372,8 @@ function loadExtensionExport(
     // SuperCmd renderer environment. Every module an extension
     // might `require()` must be handled here.
     let reactRequireCount = 0;
+    let lifecycleScope: ReturnType<typeof createExtensionLifecycleScope>;
+    const scopedTimerBuiltinFacades = new Map<string, any>();
     const fakeRequire: any = (name: string): any => {
       if (name === 'react' || name.startsWith('react/') || name === 'react-dom') {
         reactRequireCount++;
@@ -4410,6 +4510,15 @@ function loadExtensionExport(
       // Prefer real Node (via the preload bridge) when the hosting window
       // has Node enabled. Falls back to the stub if the module isn't a
       // recognised built-in, or if real require throws.
+      if (timerRegistry && isExtensionTimerBuiltinRequest(name)) {
+        const normalizedTimerBuiltinName = name.startsWith('node:') ? name.slice(5) : name;
+        let facade = scopedTimerBuiltinFacades.get(normalizedTimerBuiltinName);
+        if (!facade) {
+          facade = createExtensionTimerBuiltinFacade(normalizedTimerBuiltinName, lifecycleScope);
+          scopedTimerBuiltinFacades.set(normalizedTimerBuiltinName, facade);
+        }
+        return facade;
+      }
       if (shouldUseSuperCmdBuiltinFacade(name)) {
         const normalizedBuiltinName = name.startsWith('node:') ? name.slice(5) : name;
         if (normalizedBuiltinName === 'child_process') {
@@ -4583,7 +4692,7 @@ function loadExtensionExport(
     // Sandboxed lifecycle APIs — passed as named parameters so the extension's
     // bundle resolves bare timers and `window.*`/`document.*` event listeners
     // against this ExtensionView instance instead of the host renderer globals.
-    const lifecycleScope = createExtensionLifecycleScope(timerRegistry);
+    lifecycleScope = createExtensionLifecycleScope(timerRegistry);
     const {
       scopedWindow,
       scopedDocument,
