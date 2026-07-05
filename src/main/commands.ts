@@ -1807,7 +1807,7 @@ function publishCommandCache(commands: CommandInfo[]): CommandInfo[] {
   staleCommandsFallback = commands;
   saveCommandsDiskCache(commands);
 
-  return cachedCommands;
+  return commands;
 }
 
 function cloneCommandForTargetedRefresh(command: CommandInfo): CommandInfo {
@@ -2530,13 +2530,13 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
     delete cmd._bundlePath;
   }
 
-  publishCommandCache(allCommands);
+  const publishedCommands = publishCommandCache(allCommands);
 
   console.log(
     `Discovered ${apps.length} apps, ${settings.length} settings panes, ${extensionCommands.length} extension commands, ${scriptCommands.length} script commands, ${quickLinkCommands.length} quick links in ${Date.now() - t0}ms`
   );
 
-  return allCommands;
+  return publishedCommands;
 }
 
 function ensureBackgroundRefreshForStaleCache(): void {
