@@ -53,8 +53,8 @@ type ListItemRendererProps = ListItemProps & {
 
 function areListItemRendererPropsEqual(previous: ListItemRendererProps, next: ListItemRendererProps): boolean {
   return (
-    previous.title === next.title
-    && previous.subtitle === next.subtitle
+    getListTextValue(previous.title) === getListTextValue(next.title)
+    && getListTextValue(previous.subtitle) === getListTextValue(next.subtitle)
     && previous.icon === next.icon
     && previous.accessories === next.accessories
     && previous.isSelected === next.isSelected
@@ -70,6 +70,10 @@ function areListEmojiGridItemRendererPropsEqual(previous: any, next: any): boole
     && previous.isSelected === next.isSelected
     && previous.dataIdx === next.dataIdx
   );
+}
+
+function getListTextValue(value: unknown): string {
+  return typeof value === 'string' ? value : (value as any)?.value || '';
 }
 
 export function createListRenderers(deps: ListRendererDeps) {

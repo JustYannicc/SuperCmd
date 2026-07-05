@@ -179,6 +179,10 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     const primaryAction = selectedActions[0];
     const globalKeydownRef = useRef({ selectedActions, isMetaK, matchesShortcut });
     globalKeydownRef.current = { selectedActions, isMetaK, matchesShortcut };
+    const selectedIdxRef = useRef(selectedIdx);
+    selectedIdxRef.current = selectedIdx;
+    const primaryActionRef = useRef(primaryAction);
+    primaryActionRef.current = primaryAction;
 
     const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
       if (isMetaK(event)) {
@@ -320,7 +324,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       [containerHeight, rowMetrics, scrollTop, virtualRows],
     );
 
-    // Map from filteredItems index → active virtual row index for scroll-into-view.
+    // Map from filteredItems index to active virtual row index for scroll-into-view.
     const itemIdxToRowIdx = useMemo(() => {
       return buildItemToVirtualRowMap(virtualRows, filteredItems.length);
     }, [filteredItems.length, virtualRows]);
@@ -442,8 +446,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
                             dataIdx={globalIdx}
                             onSelect={() => setSelectedIdx(globalIdx)}
                             onActivate={() => {
-                              if (globalIdx === selectedIdx) {
-                                primaryAction?.execute();
+                              if (globalIdx === selectedIdxRef.current) {
+                                primaryActionRef.current?.execute();
                               } else {
                                 setSelectedIdx(globalIdx);
                               }
@@ -497,8 +501,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
                       dataIdx={globalIdx}
                       onSelect={() => setSelectedIdx(globalIdx)}
                       onActivate={() => {
-                        if (globalIdx === selectedIdx) {
-                          primaryAction?.execute();
+                        if (globalIdx === selectedIdxRef.current) {
+                          primaryActionRef.current?.execute();
                         } else {
                           setSelectedIdx(globalIdx);
                         }
