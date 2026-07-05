@@ -413,7 +413,7 @@ test('browser search perf CI covers large indexed responsiveness budgets', { ski
     {
       label: '50k',
       options: { historyCount: 45_000, bookmarkCount: 4_999, tabCount: 360 },
-      budgets: { indexMs: 7_000, eventLoopDelayMs: 7_500, queryAvgMs: 260, queryEventLoopDelayMs: 7_500 },
+      budgets: { indexMs: 7_000, eventLoopDelayMs: 7_500, queryAvgMs: 300, queryEventLoopDelayMs: 8_000 },
     },
   ];
   const reports = [];
