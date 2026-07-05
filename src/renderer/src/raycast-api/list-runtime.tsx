@@ -177,6 +177,10 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       ActionRegistryContext,
     }), [selectedItem?.id, actionRegistry, ActionRegistryContext]);
     const primaryAction = selectedActions[0];
+    const selectedIdxRef = useRef(selectedIdx);
+    selectedIdxRef.current = selectedIdx;
+    const primaryActionRef = useRef(primaryAction);
+    primaryActionRef.current = primaryAction;
 
     const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
       if (isMetaK(event)) {
@@ -439,8 +443,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
                             dataIdx={globalIdx}
                             onSelect={() => setSelectedIdx(globalIdx)}
                             onActivate={() => {
-                              if (globalIdx === selectedIdx) {
-                                primaryAction?.execute();
+                              if (globalIdx === selectedIdxRef.current) {
+                                primaryActionRef.current?.execute();
                               } else {
                                 setSelectedIdx(globalIdx);
                               }
@@ -494,8 +498,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
                       dataIdx={globalIdx}
                       onSelect={() => setSelectedIdx(globalIdx)}
                       onActivate={() => {
-                        if (globalIdx === selectedIdx) {
-                          primaryAction?.execute();
+                        if (globalIdx === selectedIdxRef.current) {
+                          primaryActionRef.current?.execute();
                         } else {
                           setSelectedIdx(globalIdx);
                         }

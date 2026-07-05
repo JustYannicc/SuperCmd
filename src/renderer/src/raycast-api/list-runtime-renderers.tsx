@@ -49,6 +49,31 @@ export function createListRenderers(deps: ListRendererDeps) {
     return false;
   }
 
+  function getListTextValue(value: unknown): string {
+    return typeof value === 'string' ? value : (value as any)?.value || '';
+  }
+
+  function areListItemRendererPropsEqual(previous: ListItemProps & any, next: ListItemProps & any): boolean {
+    return (
+      getListTextValue(previous.title) === getListTextValue(next.title)
+      && getListTextValue(previous.subtitle) === getListTextValue(next.subtitle)
+      && previous.icon === next.icon
+      && previous.accessories === next.accessories
+      && previous.isSelected === next.isSelected
+      && previous.dataIdx === next.dataIdx
+      && previous.assetsPath === next.assetsPath
+    );
+  }
+
+  function areListEmojiGridItemRendererPropsEqual(previous: any, next: any): boolean {
+    return (
+      previous.icon === next.icon
+      && previous.title === next.title
+      && previous.isSelected === next.isSelected
+      && previous.dataIdx === next.dataIdx
+    );
+  }
+
   function ListItemComponent(props: ListItemProps) {
     const registry = useContext(ListRegistryContext);
     const sectionTitle = useContext(ListSectionTitleContext);
@@ -80,7 +105,7 @@ export function createListRenderers(deps: ListRendererDeps) {
   (ListItemComponent as any).Accessory = {} as ListItemAccessory;
   (ListItemComponent as any).Props = {} as ListItemProps;
 
-  function ListItemRenderer({ title, subtitle, icon, accessories, isSelected, dataIdx, onSelect, onActivate, onContextAction, assetsPath }: ListItemProps & any) {
+  const ListItemRenderer = React.memo(function ListItemRenderer({ title, subtitle, icon, accessories, isSelected, dataIdx, onSelect, onActivate, onContextAction, assetsPath }: ListItemProps & any) {
     const titleStr = typeof title === 'string' ? title : (title as any)?.value || '';
     const subtitleStr = typeof subtitle === 'string' ? subtitle : (subtitle as any)?.value || '';
     const primaryText = titleStr || subtitleStr;
@@ -124,9 +149,9 @@ export function createListRenderers(deps: ListRendererDeps) {
         </div>
       </div>
     );
-  }
+  }, areListItemRendererPropsEqual);
 
-  function ListEmojiGridItemRenderer({ icon, title, isSelected, dataIdx, onSelect, onActivate, onContextAction }: any) {
+  const ListEmojiGridItemRenderer = React.memo(function ListEmojiGridItemRenderer({ icon, title, isSelected, dataIdx, onSelect, onActivate, onContextAction }: any) {
     const emoji = typeof icon === 'string' ? icon : '';
     return (
       <div
@@ -154,7 +179,7 @@ export function createListRenderers(deps: ListRendererDeps) {
         <span className="text-[46px] leading-none select-none">{emoji || '🙂'}</span>
       </div>
     );
-  }
+  }, areListEmojiGridItemRendererPropsEqual);
 
   function ListSectionComponent({ children, title }: { children?: React.ReactNode; title?: string }) {
     return <ListSectionTitleContext.Provider value={title}>{children}</ListSectionTitleContext.Provider>;
