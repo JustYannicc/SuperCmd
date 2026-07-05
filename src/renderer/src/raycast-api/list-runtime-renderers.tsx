@@ -53,13 +53,14 @@ export function createListRenderers(deps: ListRendererDeps) {
     const registry = useContext(ListRegistryContext);
     const sectionTitle = useContext(ListSectionTitleContext);
     const stableId = useRef(props.id || `__li_${++itemOrderCounter}`).current;
-    const renderOrder = ++itemOrderCounter;
+    const orderRef = useRef<number | null>(null);
+    if (orderRef.current === null) orderRef.current = ++itemOrderCounter;
     const selCtx = useContext(SelectedItemActionsContext);
 
     useLayoutEffect(() => {
-      registry.set(stableId, { props, sectionTitle, order: renderOrder });
+      registry.set(stableId, { props, sectionTitle, order: orderRef.current! });
       return () => registry.delete(stableId);
-    }, [props, registry, renderOrder, sectionTitle, stableId]);
+    }, [props, registry, sectionTitle, stableId]);
 
     // When this item is selected, render its actions within the extension's
     // context tree so that per-item React contexts (e.g. VaultItemContext)
