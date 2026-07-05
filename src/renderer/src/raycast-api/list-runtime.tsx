@@ -165,6 +165,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       ActionRegistryContext,
     }), [selectedItem?.id, actionRegistry, ActionRegistryContext]);
     const primaryAction = selectedActions[0];
+    const globalKeydownRef = useRef({ selectedActions, isMetaK, matchesShortcut });
+    globalKeydownRef.current = { selectedActions, isMetaK, matchesShortcut };
 
     const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
       if (isMetaK(event)) {
@@ -198,7 +200,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
 
     useEffect(() => {
       const handler = (event: KeyboardEvent) => {
-        if (isMetaK(event) && !event.repeat) {
+        const { selectedActions: currentActions, isMetaK: currentIsMetaK, matchesShortcut: currentMatchesShortcut } = globalKeydownRef.current;
+        if (currentIsMetaK(event) && !event.repeat) {
           event.preventDefault();
           event.stopPropagation();
           setShowActions((value) => !value);
@@ -206,8 +209,8 @@ export function createListRuntime(deps: ListRuntimeDeps) {
         }
         if (!event.metaKey && !event.altKey && !event.ctrlKey) return;
         if (event.repeat) return;
-        for (const action of selectedActions) {
-          if (!action.shortcut || !matchesShortcut(event, action.shortcut)) continue;
+        for (const action of currentActions) {
+          if (!action.shortcut || !currentMatchesShortcut(event, action.shortcut)) continue;
           event.preventDefault();
           event.stopPropagation();
           setShowActions(false);
@@ -218,7 +221,7 @@ export function createListRuntime(deps: ListRuntimeDeps) {
       };
       window.addEventListener('keydown', handler, true);
       return () => window.removeEventListener('keydown', handler, true);
-    }, [isMetaK, matchesShortcut, selectedActions]);
+    }, []);
 
     const prevFilteredItemsRef = useRef(filteredItems);
     useEffect(() => {
