@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { snapshotExtensionContext, withExtensionContext, type ExtensionContextSnapshot } from '../context-scope-runtime';
+import { useStableArgs } from './use-stable-args';
 
 function resolveInitialDataValue<T>(value: T | (() => T) | undefined): T | undefined {
   if (typeof value === 'function') {
@@ -55,11 +56,13 @@ export function useCachedPromise<T>(
   }, []);
 
   const fnRef = useRef(fn);
-  const argsRef = useRef(args || []);
+  const stableArgs = useStableArgs(args);
+
+  const argsRef = useRef(stableArgs);
   const optionsRef = useRef(options);
   const runtimeCtxRef = useRef<ExtensionContextSnapshot>(snapshotExtensionContext());
   fnRef.current = fn;
-  argsRef.current = args || [];
+  argsRef.current = stableArgs;
   optionsRef.current = options;
   runtimeCtxRef.current = snapshotExtensionContext();
 
@@ -153,7 +156,6 @@ export function useCachedPromise<T>(
     }
   }, []);
 
-  const argsKey = JSON.stringify(args || []);
   useEffect(() => {
     setPage(0);
     setCursor(undefined);
@@ -161,7 +163,7 @@ export function useCachedPromise<T>(
       setAccumulatedData(resolveInitialDataValue(optionsRef.current?.initialData));
     }
     fetchPage(0, undefined);
-  }, [argsKey, fetchPage]);
+  }, [stableArgs, fetchPage]);
 
   const revalidate = useCallback(() => {
     setPage(0);

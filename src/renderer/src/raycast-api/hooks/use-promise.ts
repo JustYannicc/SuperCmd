@@ -5,25 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { snapshotExtensionContext, withExtensionContext, type ExtensionContextSnapshot } from '../context-scope-runtime';
-
-function useStableArgs(args: any[]): any[] {
-  const ref = useRef(args);
-  const prevKey = useRef('');
-
-  let key: string;
-  try {
-    key = JSON.stringify(args);
-  } catch {
-    key = String(args);
-  }
-
-  if (prevKey.current !== key) {
-    prevKey.current = key;
-    ref.current = args;
-  }
-
-  return ref.current;
-}
+import { useStableArgs } from './use-stable-args';
 
 export function usePromise<T>(
   fn: (...args: any[]) => Promise<T>,
@@ -56,7 +38,7 @@ export function usePromise<T>(
     };
   }, []);
 
-  const stableArgs = useStableArgs(args || []);
+  const stableArgs = useStableArgs(args);
 
   const fnRef = useRef(fn);
   const argsRef = useRef(stableArgs);
