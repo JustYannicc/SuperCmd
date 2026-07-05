@@ -56,7 +56,6 @@ export function useListRegistry() {
       mountedRef.current = false;
       pendingRef.current = false;
       registryRef.current.clear();
-      visibleSignatureRef.current.clear();
     };
   }, []);
 

@@ -6,7 +6,40 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import * as esbuild from 'esbuild';
 import { importTs } from './lib/ts-import.mjs';
+
+async function importCanvasStore(root) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'supercmd-canvas-store-bundle-'));
+  const bundlePath = path.join(tmpDir, 'canvas-store.mjs');
+  try {
+    await esbuild.build({
+      entryPoints: [path.join(root, 'src/main/canvas-store.ts')],
+      outfile: bundlePath,
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      logLevel: 'silent',
+      plugins: [{
+        name: 'electron-test-stub',
+        setup(build) {
+          build.onResolve({ filter: /^electron$/ }, () => ({ path: 'electron-test-stub', namespace: 'electron-test-stub' }));
+          build.onLoad({ filter: /.*/, namespace: 'electron-test-stub' }, () => ({
+            loader: 'js',
+            contents: `
+              export const app = { getPath: () => process.env.SUPERCMD_TEST_USER_DATA || process.cwd() };
+              export const dialog = { showSaveDialog: async () => ({ canceled: true }) };
+              export class BrowserWindow {}
+            `,
+          }));
+        },
+      }],
+    });
+    return await import(pathToFileURL(bundlePath).href);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
 
 test('canvas sc-asset serving helpers', async (t) => {
   const root = process.cwd();
@@ -100,7 +133,7 @@ test('canvas store async scene and thumbnail reads', async () => {
 
   try {
     const root = process.cwd();
-    const store = await importTs(path.join(root, 'src/main/canvas-store.ts'));
+    const store = await importCanvasStore(root);
     const dataDir = path.join(tmpDir, 'canvas', 'data');
     await fs.mkdir(dataDir, { recursive: true });
 

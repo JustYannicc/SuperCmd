@@ -8,7 +8,6 @@ import * as esbuild from 'esbuild';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gridItemsPath = path.join(repoRoot, 'src/renderer/src/raycast-api/grid-runtime-items.tsx');
-const gridVirtualizationPath = path.join(repoRoot, 'src/renderer/src/raycast-api/grid-runtime-virtualization.ts');
 
 const visibleCells = readNumberArg('--visible-cells', 112);
 const itemCount = readNumberArg('--items', 4096);
@@ -33,16 +32,12 @@ import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { performance } from 'node:perf_hooks';
 import { createGridItemsRuntime } from ${JSON.stringify(gridItemsPath)};
-import {
-  GRID_DEFAULT_COLUMNS,
-  buildVirtualGridLayout,
-  getColumnsForItemIndex,
-  getScrollTopForItemIndex,
-} from ${JSON.stringify(gridVirtualizationPath)};
 
 type Metrics = {
   cellRenderCount: number;
 };
+
+const GRID_DEFAULT_COLUMNS = 5;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -379,14 +374,44 @@ function makeGridGroups() {
   ];
 }
 
-const layout = buildVirtualGridLayout(makeGridGroups(), {
-  defaultColumns: GRID_DEFAULT_COLUMNS,
-  itemSize: 'medium',
-  defaultAspectRatio: '1',
-  defaultFit: 'contain',
-  defaultInset: 'sm',
-  containerWidth: 920,
-});
+function buildMeasurementGridLayout(groups: ReturnType<typeof makeGridGroups>) {
+  const rows: Array<{ startIdx: number; endIdx: number; top: number; bottom: number; columns: number }> = [];
+  let top = 0;
+  for (const group of groups) {
+    const columns = Number(group.section?.columns) > 0 ? Number(group.section.columns) : GRID_DEFAULT_COLUMNS;
+    for (let offset = 0; offset < group.items.length; offset += columns) {
+      const rowItems = group.items.slice(offset, offset + columns);
+      const rowHeight = Math.max(...rowItems.map(({ item }) => 128 + (item.order % 3) * 24));
+      const startIdx = rowItems[0]?.globalIdx ?? 0;
+      const endIdx = rowItems[rowItems.length - 1]?.globalIdx ?? startIdx;
+      rows.push({ startIdx, endIdx, top, bottom: top + rowHeight, columns });
+      top += rowHeight + 8;
+    }
+  }
+  return { rows };
+}
+
+function findLayoutRow(layout: ReturnType<typeof buildMeasurementGridLayout>, itemIndex: number) {
+  return layout.rows.find((row) => itemIndex >= row.startIdx && itemIndex <= row.endIdx) || layout.rows[0];
+}
+
+function getColumnsForItemIndex(layout: ReturnType<typeof buildMeasurementGridLayout>, itemIndex: number, fallback: number): number {
+  return findLayoutRow(layout, itemIndex)?.columns || fallback;
+}
+
+function getScrollTopForItemIndex(
+  layout: ReturnType<typeof buildMeasurementGridLayout>,
+  itemIndex: number,
+  options: { currentScrollTop: number; viewportHeight: number },
+) {
+  const row = findLayoutRow(layout, itemIndex);
+  if (!row) return options.currentScrollTop;
+  if (row.top < options.currentScrollTop) return row.top;
+  if (row.bottom > options.currentScrollTop + options.viewportHeight) return row.bottom - options.viewportHeight;
+  return options.currentScrollTop;
+}
+
+const layout = buildMeasurementGridLayout(makeGridGroups());
 
 function measureSelectionScroll() {
   let selectedIdx = 0;

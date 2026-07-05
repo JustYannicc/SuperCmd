@@ -3,7 +3,7 @@
  * Purpose: MenuBarExtra parent component and native menu serialization/effects.
  */
 
-import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getMenuBarRuntimeDeps } from './menubar-runtime-config';
 import {
   type MBItemRegistration,
@@ -46,8 +46,6 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
       mountedRef.current = false;
       pendingRef.current = false;
       registryRef.current.clear();
-      visiblePayloadHashCacheRef.current = createMenuBarVisiblePayloadHashCache();
-      serializedStaticPayloadRef.current = null;
     };
   }, []);
 
