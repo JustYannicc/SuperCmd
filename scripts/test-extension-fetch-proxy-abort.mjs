@@ -45,7 +45,9 @@ function createTrackedAbortSignal() {
 
 function createBridgeHarness() {
   const pending = [];
+  const pendingBinary = [];
   const requests = [];
+  const binaryRequests = [];
   const canceled = [];
   const g = {
     crypto: { randomUUID: () => `uuid-${requests.length + 1}` },
@@ -61,9 +63,15 @@ function createBridgeHarness() {
     cancelHttpRequest: (requestId) => {
       canceled.push(requestId);
     },
+    httpDownloadBinary: (url, options) => {
+      binaryRequests.push({ url, options });
+      const run = deferred();
+      pendingBinary.push(run);
+      return run.promise;
+    },
   };
   installExtensionFetchBridge(g, () => electron);
-  return { canceled, g, pending, requests };
+  return { binaryRequests, canceled, g, pending, pendingBinary, requests };
 }
 
 async function flushAsync() {
@@ -120,6 +128,40 @@ test('extension fetch success path clears abort listener and does not retain req
   assert.equal(await response.text(), 'done');
   assert.equal(response.url, 'https://api.test/items');
   assert.deepEqual(canceled, []);
+  assert.equal(abort.listenerCount(), 0);
+  assert.equal(abort.signal.removeCount, 1);
+});
+
+test('extension fetch abort cancels binary download phase and clears listener after rejection', async () => {
+  const { binaryRequests, canceled, g, pending, pendingBinary, requests } = createBridgeHarness();
+  const abort = createTrackedAbortSignal();
+
+  const fetchPromise = g.fetch('https://cdn.test/image.png', { signal: abort.signal });
+  await flushAsync();
+
+  assert.equal(requests.length, 1);
+  pending[0].resolve({
+    status: 200,
+    statusText: 'OK',
+    headers: { 'content-type': 'image/png' },
+    bodyText: '',
+    url: 'https://cdn.test/image.png',
+  });
+  await flushAsync();
+
+  assert.equal(binaryRequests.length, 1);
+  assert.equal(binaryRequests[0].url, 'https://cdn.test/image.png');
+  assert.deepEqual(binaryRequests[0].options, { requestId: requests[0].requestId });
+  assert.equal(abort.listenerCount(), 1);
+
+  abort.abort();
+  assert.deepEqual(canceled, [requests[0].requestId]);
+
+  const err = new Error('Request canceled');
+  err.name = 'AbortError';
+  pendingBinary[0].reject(err);
+
+  await assert.rejects(fetchPromise, { name: 'AbortError' });
   assert.equal(abort.listenerCount(), 0);
   assert.equal(abort.signal.removeCount, 1);
 });

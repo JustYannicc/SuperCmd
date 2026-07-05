@@ -15851,17 +15851,53 @@ app.whenReady().then(async () => {
   // Download a URL to a binary buffer via Node.js (bypasses CORS — renderer fetch cannot
   // download from CDNs that don't send CORS headers, but Node.js has no such restriction).
   // Returns a Uint8Array which IPC transmits via structured clone without encoding overhead.
-  ipcMain.handle('http-download-binary', async (_event: any, url: string) => {
+  ipcMain.handle('http-download-binary', async (_event: any, url: string, options?: { requestId?: string }) => {
     const https = require('https');
     const http = require('http');
     const { execFile } = require('child_process');
     const REQUEST_TIMEOUT_MS = 30_000;
+    const requestId = typeof options?.requestId === 'string' ? options.requestId : '';
+    let canceled = false;
+    let activeCancel: (() => void) | undefined;
+    const createCanceledError = () => {
+      const err = new Error('Request canceled');
+      err.name = 'AbortError';
+      return err;
+    };
+    const setActiveCancel = (cancel: () => void) => {
+      activeCancel = cancel;
+      if (!requestId) return;
+      activeHttpRequests.set(requestId, cancel);
+    };
+    const clearActiveCancel = (cancel: () => void) => {
+      if (activeCancel === cancel) activeCancel = undefined;
+      if (requestId && activeHttpRequests.get(requestId) === cancel) {
+        activeHttpRequests.delete(requestId);
+      }
+    };
 
     const downloadUrl = async (targetUrl: string, redirectCount = 0): Promise<Uint8Array> => {
       if (redirectCount > 10) throw new Error('Too many redirects');
+      if (canceled) throw createCanceledError();
       const parsed = new URL(targetUrl);
 
       return new Promise((resolve, reject) => {
+        let settled = false;
+        let chunks: Buffer[] = [];
+        const cleanupChunks = () => {
+          chunks = [];
+        };
+        let cancelRequest: () => void = () => {
+          canceled = true;
+          cleanupChunks();
+        };
+        const settle = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          cleanupChunks();
+          clearActiveCancel(cancelRequest);
+          callback();
+        };
         const client = parsed.protocol === 'https:' ? https : http;
         const req = client.get(
           parsed.toString(),
@@ -15872,28 +15908,58 @@ app.whenReady().then(async () => {
             },
           },
           (res: any) => {
+            if (canceled) {
+              res.resume();
+              settle(() => reject(createCanceledError()));
+              return;
+            }
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
               res.resume();
               const redirectUrl = new URL(res.headers.location, parsed).toString();
-              downloadUrl(redirectUrl, redirectCount + 1).then(resolve, reject);
+              settle(() => downloadUrl(redirectUrl, redirectCount + 1).then(resolve, reject));
               return;
             }
             if (res.statusCode !== 200) {
               res.resume();
-              reject(new Error(`HTTP ${res.statusCode}`));
+              settle(() => reject(new Error(`HTTP ${res.statusCode}`)));
               return;
             }
-            const chunks: Buffer[] = [];
-            res.on('data', (chunk: Buffer) => chunks.push(chunk));
-            res.on('end', () => resolve(new Uint8Array(Buffer.concat(chunks))));
-            res.on('error', reject);
+            res.on('data', (chunk: Buffer) => {
+              if (!canceled) chunks.push(chunk);
+            });
+            res.on('end', () => {
+              if (canceled) {
+                settle(() => reject(createCanceledError()));
+                return;
+              }
+              const bodyBuffer = Buffer.concat(chunks);
+              cleanupChunks();
+              settle(() => resolve(new Uint8Array(bodyBuffer)));
+            });
+            res.on('error', (err: Error) => {
+              settle(() => reject(canceled ? createCanceledError() : err));
+            });
           }
         );
 
         req.setTimeout(REQUEST_TIMEOUT_MS, () => {
           req.destroy(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`));
         });
-        req.on('error', reject);
+        req.on('error', (err: Error) => {
+          settle(() => reject(canceled ? createCanceledError() : err));
+        });
+        cancelRequest = () => {
+          canceled = true;
+          cleanupChunks();
+          if (settled) return;
+          try {
+            req.destroy(createCanceledError());
+          } catch {
+            req.destroy();
+          }
+          settle(() => reject(createCanceledError()));
+        };
+        setActiveCancel(cancelRequest);
       });
     };
 
@@ -15901,8 +15967,17 @@ app.whenReady().then(async () => {
       try {
         return await downloadUrl(url);
       } catch (primaryErr: any) {
+        if (canceled || primaryErr?.name === 'AbortError') throw createCanceledError();
         const curlOutput = await new Promise<Uint8Array>((resolve, reject) => {
-          execFile(
+          let child: any;
+          const cancelCurl = () => {
+            canceled = true;
+            try {
+              child?.kill('SIGTERM');
+            } catch {}
+            reject(createCanceledError());
+          };
+          child = execFile(
             '/usr/bin/curl',
             [
               '-fsSL',
@@ -15914,8 +15989,17 @@ app.whenReady().then(async () => {
             ],
             { encoding: null, maxBuffer: 100 * 1024 * 1024 },
             (err: Error | null, stdout: Buffer, stderr: Buffer | string) => {
+              clearActiveCancel(cancelCurl);
+              if (canceled) {
+                reject(createCanceledError());
+                return;
+              }
               if (err) {
-                const stderrText = typeof stderr === 'string' ? stderr : String(stderr || '');
+                const stderrText = typeof stderr === 'string'
+                  ? stderr.slice(0, 4096)
+                  : Buffer.isBuffer(stderr)
+                    ? stderr.toString('utf-8', 0, Math.min(stderr.length, 4096))
+                    : String(stderr || '').slice(0, 4096);
                 reject(
                   new Error(
                     `HTTP download failed (${primaryErr?.message || 'unknown'}) and curl fallback failed (${stderrText || err.message})`
@@ -15926,12 +16010,17 @@ app.whenReady().then(async () => {
               resolve(new Uint8Array(stdout));
             }
           );
+          setActiveCancel(cancelCurl);
         });
         return curlOutput;
       }
     };
 
-    return downloadWithCurlFallback();
+    try {
+      return await downloadWithCurlFallback();
+    } finally {
+      if (requestId) activeHttpRequests.delete(requestId);
+    }
   });
 
   // Write raw binary data to a real file path (extensions use this for CLI tool downloads)
