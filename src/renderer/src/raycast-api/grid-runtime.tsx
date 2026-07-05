@@ -263,7 +263,7 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
       });
       if (Math.abs(nextScrollTop - node.scrollTop) < 1) return;
 
-      node.scrollTo({ top: nextScrollTop, behavior: 'smooth' });
+      node.scrollTo({ top: nextScrollTop, behavior: 'auto' });
       requestAnimationFrame(measureGridViewport);
     }, [filteredItems.length, gridViewport.viewportHeight, measureGridViewport, selectedIdx, virtualLayout]);
 
