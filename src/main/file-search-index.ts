@@ -1101,12 +1101,6 @@ async function applyFileSearchWatchEventBatchForPerfHarness(paths: string[]): Pr
   await applyWatchEventBatch(paths.map((candidatePath) => path.resolve(candidatePath)));
 }
 
-export const __fileSearchIndexPerfHarness = {
-  reset: resetFileSearchIndexForPerfHarness,
-  rebuild: rebuildFileSearchIndexForPerfHarness,
-  applyWatchEventBatch: applyFileSearchWatchEventBatchForPerfHarness,
-};
-
 export async function searchIndexedFiles(
   rawQuery: string,
   options?: { limit?: number }
@@ -1327,23 +1321,7 @@ export async function searchIndexedFiles(
 }
 
 export const __fileSearchIndexPerfHarness = {
-  async rebuild(options?: { homeDir?: string; includeProtectedHomeRoots?: boolean }): Promise<void> {
-    configuredHomeDir = resolveHomeDir(options?.homeDir);
-    includeProtectedHomeRoots = Boolean(options?.includeProtectedHomeRoots);
-    includeRoots = resolveIncludeRoots(configuredHomeDir);
-    lastBuildStartedAt = 0;
-    await rebuildFileSearchIndex('perf-harness');
-  },
-  applyWatchEventBatch,
-  reset(): void {
-    stopFileSearchIndexing();
-    activeIndex = null;
-    rebuildPromise = null;
-    indexing = false;
-    configuredHomeDir = '';
-    includeRoots = [];
-    lastIndexError = null;
-    lastBuildStartedAt = 0;
-    includeProtectedHomeRoots = false;
-  },
+  reset: resetFileSearchIndexForPerfHarness,
+  rebuild: rebuildFileSearchIndexForPerfHarness,
+  applyWatchEventBatch: applyFileSearchWatchEventBatchForPerfHarness,
 };

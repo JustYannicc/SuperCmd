@@ -3249,11 +3249,6 @@ for (const [key, val] of Object.entries({ ...nodeBuiltinStubs })) {
   }
 }
 
-function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
-  const normalizedName = name.startsWith('node:') ? name.slice(5) : name;
-  return normalizedName in nodeBuiltinStubs || `node:${normalizedName}` in nodeBuiltinStubs;
-}
-
 // ─── Real Node built-in bridge ──────────────────────────────────────
 // The launcher window runs with `sandbox: false` + `nodeIntegration: true`
 // + `contextIsolation: false`. In that mode Node's `require`, `process`,

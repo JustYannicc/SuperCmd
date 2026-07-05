@@ -28,6 +28,7 @@ const commandsModule = await importTs(path.join(root, 'src/main/commands.ts'), {
     './quicklink-store': `
       export function getAllQuickLinks() { return []; }
       export function getQuickLinkCommandId(link) { return 'quicklink-' + String(link?.id || link?.url || 'unknown'); }
+      export function isQuickLinkCommandId(commandId) { return String(commandId || '').startsWith('quicklink-'); }
     `,
     './script-command-runner': `
       export function discoverScriptCommands() { return []; }
