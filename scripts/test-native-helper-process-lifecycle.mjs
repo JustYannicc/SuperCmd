@@ -74,10 +74,6 @@ function appendBoundedLineBufferForTest(buffer, chunk, maxChars = NATIVE_HELPER_
   const lines = [];
 
   for (const line of rawLines) {
-    if (line.length >= maxChars) {
-      truncated = true;
-      continue;
-    }
     lines.push(line);
   }
 
@@ -397,7 +393,14 @@ test('native helper readiness wait uses one timeout and no polling interval', as
   }
 });
 
-test('native helper line buffers cap malformed partial output while preserving JSON lines', () => {
+test('native helper line buffers cap partial output while preserving complete lines', () => {
+  const oversizedCompleteLine = `{"text":"${'z'.repeat(NATIVE_HELPER_LINE_BUFFER_MAX_CHARS + 128)}"}`;
+  const complete = appendBoundedLineBufferForTest('', `${oversizedCompleteLine}\n`);
+
+  assert.equal(complete.truncated, false);
+  assert.deepEqual(complete.lines, [oversizedCompleteLine]);
+  assert.equal(complete.buffer, '');
+
   const oversizedPartial = 'x'.repeat(NATIVE_HELPER_LINE_BUFFER_MAX_CHARS + 128);
   const first = appendBoundedLineBufferForTest('', oversizedPartial);
 
@@ -406,8 +409,9 @@ test('native helper line buffers cap malformed partial output while preserving J
   assert.equal(first.buffer.length, NATIVE_HELPER_LINE_BUFFER_MAX_CHARS);
 
   const second = appendBoundedLineBufferForTest(first.buffer, '\n{"ready":true}\n{"text":"hel');
-  assert.equal(second.truncated, true, 'oversized malformed line should be dropped after newline');
-  assert.deepEqual(second.lines, ['{"ready":true}']);
+  assert.equal(second.truncated, false, 'complete newline-terminated lines should be emitted');
+  assert.equal(second.lines[0].length, NATIVE_HELPER_LINE_BUFFER_MAX_CHARS);
+  assert.equal(second.lines[1], '{"ready":true}');
   assert.equal(second.buffer, '{"text":"hel');
 
   const third = appendBoundedLineBufferForTest(second.buffer, 'lo"}\n');

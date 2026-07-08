@@ -3073,9 +3073,15 @@ for (const [key, val] of Object.entries({ ...nodeBuiltinStubs })) {
   }
 }
 
+const SUPERCMD_BUILTIN_FACADE_MODULES = new Set<string>([
+  // Keep child_process under SuperCmd's lifecycle-aware stub so spawned
+  // children can be tracked and cleaned up when the extension unmounts.
+  'child_process',
+]);
+
 function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
   const normalizedName = name.startsWith('node:') ? name.slice(5) : name;
-  return normalizedName in nodeBuiltinStubs || `node:${normalizedName}` in nodeBuiltinStubs;
+  return SUPERCMD_BUILTIN_FACADE_MODULES.has(normalizedName);
 }
 
 // ─── Real Node built-in bridge ──────────────────────────────────────
@@ -3521,6 +3527,9 @@ function createScopedHostProxy(
   const boundFunctions = new WeakMap<Function, Function>();
   const target = {};
 
+  // Extension code gets scoped window/document proxies so timer and listener
+  // APIs can be registered for lifecycle cleanup while ordinary host reads,
+  // writes, enumeration, and method calls continue to hit the real objects.
   return new Proxy(target, {
     get(_target, prop) {
       if (kind === 'window') {

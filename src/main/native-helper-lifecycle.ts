@@ -30,10 +30,6 @@ export function appendNativeHelperLineBuffer(
   const lines: string[] = [];
 
   for (const line of rawLines) {
-    if (line.length >= maxChars) {
-      truncated = true;
-      continue;
-    }
     lines.push(line);
   }
 

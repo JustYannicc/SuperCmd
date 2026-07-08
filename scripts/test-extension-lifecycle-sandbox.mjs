@@ -92,6 +92,11 @@ function createHostWindow() {
     addEventListener: windowTarget.addEventListener,
     removeEventListener: windowTarget.removeEventListener,
   };
+  Object.defineProperty(hostWindow, 'nonConfigurableProbe', {
+    value: 'descriptor-probe',
+    configurable: false,
+    enumerable: true,
+  });
 
   hostWindow.window = hostWindow;
   hostWindow.self = hostWindow;
@@ -480,6 +485,29 @@ test('extension lifecycle sandbox cleanup', async (t) => {
       globalWindowRead: true,
       defaultViewRead: true,
     });
+    assert.notEqual(lifecycleScope.scopedWindow, host.hostWindow);
+    assert.notEqual(lifecycleScope.scopedDocument, host.hostDocument);
+    assert.equal(lifecycleScope.scopedWindow.window, lifecycleScope.scopedWindow);
+    assert.equal(lifecycleScope.scopedWindow.self, lifecycleScope.scopedWindow);
+    assert.equal(lifecycleScope.scopedWindow.globalThis, lifecycleScope.scopedWindow);
+    assert.equal(lifecycleScope.scopedWindow.document, lifecycleScope.scopedDocument);
+    assert.equal(lifecycleScope.scopedDocument.defaultView, lifecycleScope.scopedWindow);
+    assert.equal(lifecycleScope.scopedWindow.nonConfigurableProbe, 'descriptor-probe');
+    assert.equal(Object.keys(lifecycleScope.scopedWindow).includes('nonConfigurableProbe'), true);
+    assert.equal(
+      Object.getOwnPropertyDescriptor(lifecycleScope.scopedWindow, 'nonConfigurableProbe')?.configurable,
+      true,
+      'scoped proxies expose host descriptors as configurable to satisfy proxy invariants'
+    );
+    lifecycleScope.scopedWindow.proxyWriteProbe = 'written-through-proxy';
+    assert.equal(host.hostWindow.proxyWriteProbe, 'written-through-proxy');
+    let methodThis = null;
+    host.hostWindow.methodProbe = function () {
+      methodThis = this;
+      return this.navigator.userAgent;
+    };
+    assert.equal(lifecycleScope.scopedWindow.methodProbe(), 'SuperCmd lifecycle harness');
+    assert.equal(methodThis, host.hostWindow);
     assert.equal(beforeClear.intervals, 1);
     assert.equal(beforeClear.windowListeners, 1);
     assert.equal(beforeClear.documentListeners, 1);
