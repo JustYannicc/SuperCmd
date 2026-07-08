@@ -99,12 +99,12 @@ test('clipboard history persistence coalesces rapid additions into async atomic 
 
   assert.equal(syncHistoryWriteSites, 0);
   assertIncludes(source, 'const HISTORY_SAVE_DEBOUNCE_MS = 250;');
+  assertIncludes(source, 'historySaveTimer = setTimeout');
   assertIncludes(source, 'let historySaveDirty = false;');
   assertIncludes(source, 'async function writeHistoryFileAtomic(serializedHistory: string): Promise<void>');
   assertIncludes(source, "await fsp.writeFile(tempPath, serializedHistory, 'utf-8');");
   assertIncludes(source, 'await fsp.rename(tempPath, historyPath);');
   assertIncludes(source, 'while (historySaveDirty)');
-  assertIncludes(source, 'historySaveTimer = setTimeout');
   assertIncludes(source, 'void flushClipboardHistoryWrites();');
   assert.equal(metrics.writeCount, 1);
 });
@@ -124,6 +124,9 @@ test('clipboard history persistence flushes on stop, clear, delete, and app quit
   assertIncludes(deleteBlock, 'saveHistory({ flush: true });');
   assertIncludes(deleteBlock, 'await flushClipboardHistoryWrites();');
   assertIncludes(beforeQuitBlock, 'hasPendingClipboardHistoryWrites()');
+  assertIncludes(beforeQuitBlock, 'const shouldBypassAsyncStorageQuitFlush = updateRestartInProgress;');
+  assertIncludes(beforeQuitBlock, 'const shouldFlushNotes = !shouldBypassAsyncStorageQuitFlush && hasPendingNotesSave();');
+  assertIncludes(beforeQuitBlock, 'const shouldFlushClipboard = !shouldBypassAsyncStorageQuitFlush && hasPendingClipboardHistoryWrites();');
   assertIncludes(beforeQuitBlock, 'event.preventDefault();');
   assertIncludes(beforeQuitBlock, 'flushClipboardHistoryWrites()');
   assertIncludes(mainSource, 'await flushClipboardHistoryWrites();');

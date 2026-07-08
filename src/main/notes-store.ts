@@ -47,6 +47,8 @@ export interface Note {
 // ─── Cache ──────────────────────────────────────────────────────────
 
 let notesCache: Note[] | null = null;
+// Notes writes are intentionally debounced off the caller path; graceful quit
+// and updater restart flows call flushNotesToDisk() to persist queued edits.
 const NOTES_SAVE_DEBOUNCE_MS = 250;
 let notesSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let notesSavePending = false;

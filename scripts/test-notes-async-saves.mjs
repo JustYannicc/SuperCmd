@@ -53,6 +53,9 @@ async function loadNotesStore({ writeDelayMs = 0 } = {}) {
   const compiledPath = path.join(testRoot, 'notes-store.cjs');
 
   const source = fs.readFileSync(notesStorePath, 'utf8');
+  assert.match(source, /flushNotesToDisk\(\) to persist queued edits/);
+  assert.match(source, /const NOTES_SAVE_DEBOUNCE_MS = 250;/);
+  assert.match(source, /notesSaveTimer = setTimeout/);
   const { code } = await transform(source, {
     loader: 'ts',
     format: 'cjs',
