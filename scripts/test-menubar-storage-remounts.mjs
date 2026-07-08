@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const MENU_BAR_HOOK_PATH = path.join(root, 'src/renderer/src/hooks/useMenuBarExtensions.ts');
 
 function depsChanged(prevDeps, nextDeps) {
   if (!prevDeps || !nextDeps || prevDeps.length !== nextDeps.length) return true;
@@ -224,6 +225,25 @@ function createMenuBarSubject() {
 }
 
 test('menu-bar storage refresh behavior', async (t) => {
+  await t.test('remount throttle timestamp is recorded before React state updates', () => {
+    const source = fs.readFileSync(MENU_BAR_HOOK_PATH, 'utf8');
+    const remountIndex = source.indexOf('const remountMenuBarExtensionsForExtension');
+    const timestampAssignment = 'menuBarRemountTimestampsRef.current[normalized] = now;';
+    const timestampIndex = source.indexOf(timestampAssignment, remountIndex);
+    const setStateIndex = source.indexOf('setMenuBarExtensions((prev) =>', remountIndex);
+    assert.ok(timestampIndex !== -1, 'remount throttle should record the timestamp synchronously');
+    assert.ok(setStateIndex !== -1, 'remount function should update menu-bar entries');
+    assert.ok(
+      timestampIndex < setStateIndex,
+      'synchronous storage events should be throttled before React flushes queued state updates'
+    );
+    assert.equal(
+      source.match(new RegExp(timestampAssignment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))?.length,
+      1,
+      'timestamp mutation should not also happen inside the state updater'
+    );
+  });
+
   await t.test('emitted storage events keep extensionName compatibility and include command origin', () => {
     const windowHarness = installWindowHarness();
     const events = [];
@@ -273,6 +293,42 @@ test('menu-bar storage refresh behavior', async (t) => {
       const after = findEntry(subject.current.menuBarExtensions, 'Demo', 'Menu')?.key;
       assert.equal(after, before, 'the writer keeps its ExtensionView key');
     } finally {
+      subject.cleanup();
+    }
+  });
+
+  await t.test('self-originated no-op writes do not throttle the next external refresh', () => {
+    const subject = createMenuBarSubject();
+    const originalNow = Date.now;
+    try {
+      let now = 1_000;
+      Date.now = () => now;
+      subject.current.upsertMenuBarExtension(makeBundle('Demo', 'Menu'));
+      subject.rerender();
+      const before = findEntry(subject.current.menuBarExtensions, 'Demo', 'Menu')?.key;
+      assert.ok(before, 'menu-bar command should be mounted');
+
+      globalThis.window.dispatchEvent(
+        new CustomEvent('sc-extension-storage-changed', {
+          detail: {
+            extensionName: 'Demo',
+            commandName: 'Menu',
+            commandMode: 'menu-bar',
+          },
+        })
+      );
+      now += 50;
+      globalThis.window.dispatchEvent(
+        new CustomEvent('sc-extension-storage-changed', {
+          detail: { extensionName: 'Demo' },
+        })
+      );
+      subject.rerender();
+
+      const after = findEntry(subject.current.menuBarExtensions, 'Demo', 'Menu')?.key;
+      assert.notEqual(after, before, 'the external update still refreshes immediately after a no-op self write');
+    } finally {
+      Date.now = originalNow;
       subject.cleanup();
     }
   });

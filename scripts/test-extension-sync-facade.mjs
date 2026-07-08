@@ -176,6 +176,25 @@ function extractFsFacadeSource() {
   return source.slice(start, end);
 }
 
+function assertFacadeFallthroughWiring() {
+  const source = fs.readFileSync(EXTENSION_VIEW_PATH, 'utf8');
+  const helperIndex = source.indexOf('function getSuperCmdBuiltinFacade');
+  assert.notEqual(helperIndex, -1, 'fakeRequire should use a facade helper with real-node fallthrough');
+  assert.notEqual(
+    source.indexOf('new Proxy(facade', helperIndex),
+    -1,
+    'SuperCmd fs/child_process facades should proxy missing members to real Node modules'
+  );
+
+  const fakeRequireIndex = source.indexOf('const fakeRequire: any = (name: string): any =>');
+  const facadeCallIndex = source.indexOf('getSuperCmdBuiltinFacade(name)', fakeRequireIndex);
+  const realRequireIndex = source.indexOf('tryRealNodeRequire(name)', fakeRequireIndex);
+  assert.ok(
+    fakeRequireIndex !== -1 && facadeCallIndex !== -1 && realRequireIndex !== -1 && facadeCallIndex < realRequireIndex,
+    'fakeRequire should resolve SuperCmd fs/child_process facades before generic real require'
+  );
+}
+
 function loadFsFacade({ nodeAvailable, electron, localStorage }) {
   const source = `
     const USE_REAL_NODE_BUILTINS = ${nodeAvailable ? 'true' : 'false'};
@@ -307,6 +326,7 @@ function formatCounts(result) {
 }
 
 const { mode, assertNodeDirect } = parseArgs();
+assertFacadeFallthroughWiring();
 const modes = mode === 'both' ? ['fallback', 'node'] : [mode];
 const results = modes.map((entry) => runScenario(entry));
 
