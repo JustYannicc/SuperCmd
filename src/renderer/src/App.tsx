@@ -346,7 +346,7 @@ const App: React.FC = () => {
   } = useCursorPrompt({
     showCursorPrompt,
     setShowCursorPrompt,
-    setAiAvailable: setAiAvailable as React.Dispatch<React.SetStateAction<boolean>>,
+    setAiAvailable,
   });
 
   const acceptCursorPrompt = applyCursorPromptResultToEditor;
@@ -754,7 +754,7 @@ const App: React.FC = () => {
     openSchedule,
     openCamera,
     openOnboarding,
-    setAiAvailable: setAiAvailable as React.Dispatch<React.SetStateAction<boolean>>,
+    setAiAvailable,
     setSelectedTextSnapshot,
     setMemoryFeedback,
     setMemoryActionLoading,
@@ -1076,10 +1076,8 @@ const App: React.FC = () => {
 
   const pinToggleForCommand = useCallback(
     async (command: CommandInfo) => {
-      console.log('[PIN-TOGGLE] called for command:', command?.id, command?.title);
       const currentPinned = pinnedCommandsRef.current;
       const exists = currentPinned.includes(command.id);
-      console.log('[PIN-TOGGLE] currentPinned:', currentPinned, 'exists:', exists);
       if (exists) {
         await updatePinnedCommands(
           currentPinned.filter((id) => id !== command.id)
@@ -1087,7 +1085,6 @@ const App: React.FC = () => {
       } else {
         await updatePinnedCommands([command.id, ...currentPinned]);
       }
-      console.log('[PIN-TOGGLE] done, new pinned:', pinnedCommandsRef.current);
     },
     [updatePinnedCommands]
   );

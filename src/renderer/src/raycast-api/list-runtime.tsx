@@ -344,10 +344,6 @@ export function createListRuntime(deps: ListRuntimeDeps) {
     useEffect(() => {
       const el = listRef.current;
       if (!el) return;
-      if (shouldUseEmojiGridValue) {
-        el.querySelector<HTMLElement>(`[data-idx="${selectedIdx}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-        return;
-      }
       const rowIdx = itemIdxToRowIdxRef.current[selectedIdx];
       if (rowIdx == null) return;
       const top = rowMetricsRef.current.offsets[rowIdx];
