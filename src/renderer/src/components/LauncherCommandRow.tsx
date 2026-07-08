@@ -14,6 +14,7 @@ type LauncherCommandRowProps = {
   flatIndex: number;
   absoluteIndex: number;
   selected: boolean;
+  style?: React.CSSProperties;
   registerItemRef: (absoluteIndex: number, el: HTMLDivElement | null) => void;
   commandAlias: string;
   commandHotkey: string;
@@ -35,6 +36,7 @@ const LauncherCommandRowComponent: React.FC<LauncherCommandRowProps> = ({
   flatIndex,
   absoluteIndex,
   selected,
+  style,
   registerItemRef,
   commandAlias,
   commandHotkey,
@@ -76,6 +78,7 @@ const LauncherCommandRowComponent: React.FC<LauncherCommandRowProps> = ({
       className={`command-item px-3 py-2 rounded-lg cursor-pointer ${
         selected ? 'selected' : ''
       }`}
+      style={style}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
     >

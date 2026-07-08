@@ -29,7 +29,13 @@ const bundlePath = path.join(tmpDir, 'bundle.mjs');
 await fs.writeFile(entryPath, `
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import LauncherCommandList from ${JSON.stringify(listPath)};
+import LauncherCommandList, {
+  LAUNCHER_CALCULATOR_CARD_HEIGHT,
+  LAUNCHER_CALCULATOR_CARD_VERTICAL_MARGIN,
+  LAUNCHER_COMMAND_ROW_BODY_HEIGHT,
+  LAUNCHER_COMMAND_ROW_HEIGHT,
+  LAUNCHER_SECTION_HEADER_HEIGHT,
+} from ${JSON.stringify(listPath)};
 
 type CommandInfo = {
   id: string;
@@ -154,6 +160,18 @@ const narrowedSections = makeSections(narrowedCommands, ['Results', 'Browser', '
 
 const scenarios = [
   { name: 'root results initial', sections: rootSections, selectedIndex: 0 },
+  {
+    name: 'calculator plus large results',
+    sections: rootSections,
+    selectedIndex: 0,
+    calcResult: {
+      kind: 'math',
+      input: '21 * 2',
+      inputLabel: 'Expression',
+      result: '42',
+      resultLabel: 'Result',
+    },
+  },
   { name: 'selection moves to middle', sections: rootSections, selectedIndex: Math.floor(rowCount / 2) },
   { name: 'selection moves to end', sections: rootSections, selectedIndex: rowCount - 1 },
   { name: 'query update same-size reshuffle', sections: querySections, selectedIndex: 0 },
@@ -176,8 +194,8 @@ function renderScenario(scenario: typeof scenarios[number]) {
       isHidden={false}
       displayCommands={displayCommands as any}
       sections={scenario.sections as any}
-      calcResult={null}
-      calcOffset={0}
+      calcResult={(scenario.calcResult || null) as any}
+      calcOffset={scenario.calcResult ? 1 : 0}
       selectedIndex={scenario.selectedIndex}
       commandAliases={{}}
       commandHotkeys={{
@@ -198,6 +216,10 @@ function renderScenario(scenario: typeof scenarios[number]) {
     rowRenderCount: globalThis.__launcherCommandListMetrics?.rowRenderCount || 0,
     commandCount: displayCommands.length,
     htmlLength: html.length,
+    hasVirtualCommandSlotHeight: html.includes(\`height:\${LAUNCHER_COMMAND_ROW_HEIGHT}px\`),
+    hasVirtualCommandBodyHeight: html.includes(\`height:\${LAUNCHER_COMMAND_ROW_BODY_HEIGHT}px\`),
+    hasVirtualSectionHeight: html.includes(\`height:\${LAUNCHER_SECTION_HEADER_HEIGHT}px\`),
+    hasVirtualCalculatorBodyHeight: html.includes(\`height:\${LAUNCHER_CALCULATOR_CARD_HEIGHT - LAUNCHER_CALCULATOR_CARD_VERTICAL_MARGIN}px\`),
   };
 }
 
@@ -217,6 +239,10 @@ const results = scenarios.map((scenario) => {
     minDurationMs: Math.min(...samples.map((sample) => sample.durationMs)),
     maxDurationMs: Math.max(...samples.map((sample) => sample.durationMs)),
     htmlLength: samples[0]?.htmlLength || 0,
+    hasVirtualCommandSlotHeight: samples.some((sample) => sample.hasVirtualCommandSlotHeight),
+    hasVirtualCommandBodyHeight: samples.some((sample) => sample.hasVirtualCommandBodyHeight),
+    hasVirtualSectionHeight: samples.some((sample) => sample.hasVirtualSectionHeight),
+    hasVirtualCalculatorBodyHeight: samples.some((sample) => sample.hasVirtualCalculatorBodyHeight),
   };
 });
 

@@ -15,6 +15,7 @@ function createIconRuntimeHarness() {
   const moduleCache = new Map();
   const existingPaths = new Set();
   let statCalls = 0;
+  let now = 1_000_000;
 
   const windowStub = {
     electron: {
@@ -29,6 +30,11 @@ function createIconRuntimeHarness() {
         };
       },
     },
+  };
+  const dateStub = class extends Date {
+    static now() {
+      return now;
+    }
   };
 
   function loadTsModule(filePath) {
@@ -70,6 +76,7 @@ function createIconRuntimeHarness() {
       require: localRequire,
       console,
       URL,
+      Date: dateStub,
       window: windowStub,
       document: {
         documentElement: {
@@ -89,6 +96,12 @@ function createIconRuntimeHarness() {
     config: loadTsModule('src/renderer/src/raycast-api/icon-runtime-config.ts'),
     addExistingPath(filePath) {
       existingPaths.add(filePath);
+    },
+    removeExistingPath(filePath) {
+      existingPaths.delete(filePath);
+    },
+    advanceTime(ms) {
+      now += ms;
     },
     get statCalls() {
       return statCalls;
@@ -132,6 +145,22 @@ test('icon asset existence cache', async (t) => {
     assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), '');
     harness.addExistingPath(iconPath);
     assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), expectedUrl);
+
+    assert.equal(harness.statCalls, 2);
+  });
+
+  await t.test('refreshes positive cache entries after ttl so deleted assets stop resolving', () => {
+    const harness = createIconRuntimeHarness();
+    const assetsPath = '/tmp/supercmd-assets';
+    const iconPath = `${assetsPath}/deleted.png`;
+    const expectedUrl = harness.assets.toScAssetUrl(iconPath);
+    harness.addExistingPath(iconPath);
+
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), expectedUrl);
+    harness.removeExistingPath(iconPath);
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), expectedUrl);
+    harness.advanceTime(harness.assets.LOCAL_PATH_EXISTS_CACHE_TTL_MS);
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), '');
 
     assert.equal(harness.statCalls, 2);
   });
