@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 
 export type FileIconSizeBucket = 'small' | 'normal' | 'large';
@@ -13,6 +14,7 @@ export type FileIconProvider = (
 ) => Promise<FileIconImageLike | null | undefined>;
 
 export type AppIconResolver = (appPath: string, size: number) => string | null;
+export type IconCacheTokenProvider = (sourcePath: string) => string | null | undefined;
 
 export const FILE_ICON_DATA_URL_CACHE_MAX_ENTRIES = 512;
 export const APP_ICON_DATA_URL_CACHE_MAX_ENTRIES = 256;
@@ -72,22 +74,56 @@ export function normalizeIconCachePath(filePath: string): string {
   return path.resolve(raw);
 }
 
-export function buildFileIconCacheKey(filePath: string, size: unknown): string {
+export function readIconPathCacheToken(filePath: string): string {
+  const normalizedPath = normalizeIconCachePath(filePath);
+  if (!normalizedPath) return 'empty';
+  try {
+    const stat = fs.statSync(normalizedPath);
+    const kind = stat.isDirectory() ? 'dir' : stat.isFile() ? 'file' : 'other';
+    return [kind, String(stat.mtimeMs), String(stat.ctimeMs), String(stat.size), String(stat.ino)].join(':');
+  } catch {
+    return 'missing';
+  }
+}
+
+function readProvidedIconCacheToken(
+  provider: IconCacheTokenProvider | undefined,
+  sourcePath: string,
+): string {
+  try {
+    if (!provider) return readIconPathCacheToken(sourcePath);
+    return String(provider(sourcePath) ?? readIconPathCacheToken(sourcePath));
+  } catch {
+    return 'metadata-error';
+  }
+}
+
+export function buildFileIconCacheKey(
+  filePath: string,
+  size: unknown,
+  cacheToken = readIconPathCacheToken(filePath),
+): string {
   const logicalSize = normalizeIconLogicalSize(size, 20);
   return [
     normalizeIconCachePath(filePath),
     String(logicalSize),
     getFileIconSizeBucket(logicalSize),
+    cacheToken,
   ].join('\0');
 }
 
-export function buildAppIconCacheKey(appPath: string, size: unknown): string {
+export function buildAppIconCacheKey(
+  appPath: string,
+  size: unknown,
+  cacheToken = readIconPathCacheToken(appPath),
+): string {
   const logicalSize = normalizeIconLogicalSize(size, 32);
-  return [normalizeIconCachePath(appPath), String(logicalSize)].join('\0');
+  return [normalizeIconCachePath(appPath), String(logicalSize), cacheToken].join('\0');
 }
 
 export function createFileIconDataUrlCache(options: {
   getFileIcon: FileIconProvider;
+  getFileIconCacheToken?: IconCacheTokenProvider;
   maxEntries?: number;
 }) {
   const cache = new BoundedIconLruCache<string>(
@@ -98,7 +134,8 @@ export function createFileIconDataUrlCache(options: {
   async function resolve(filePath: string, size: unknown = 20): Promise<string | null> {
     const logicalSize = normalizeIconLogicalSize(size, 20);
     const bucket = getFileIconSizeBucket(logicalSize);
-    const key = buildFileIconCacheKey(filePath, logicalSize);
+    const cacheToken = readProvidedIconCacheToken(options.getFileIconCacheToken, filePath);
+    const key = buildFileIconCacheKey(filePath, logicalSize, cacheToken);
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
 
@@ -139,6 +176,7 @@ export function createFileIconDataUrlCache(options: {
 
 export function createAppIconDataUrlCache(options: {
   resolveAppIconDataUrl: AppIconResolver;
+  getAppIconCacheToken?: IconCacheTokenProvider;
   maxEntries?: number;
 }) {
   const cache = new BoundedIconLruCache<string>(
@@ -158,7 +196,8 @@ export function createAppIconDataUrlCache(options: {
 
   function resolveSync(appPath: string, size: unknown = 32): string | null {
     const logicalSize = normalizeIconLogicalSize(size, 32);
-    const key = buildAppIconCacheKey(appPath, logicalSize);
+    const cacheToken = readProvidedIconCacheToken(options.getAppIconCacheToken, appPath);
+    const key = buildAppIconCacheKey(appPath, logicalSize, cacheToken);
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
     return resolveFromSource(appPath, logicalSize, key);
@@ -166,7 +205,8 @@ export function createAppIconDataUrlCache(options: {
 
   async function resolve(appPath: string, size: unknown = 32): Promise<string | null> {
     const logicalSize = normalizeIconLogicalSize(size, 32);
-    const key = buildAppIconCacheKey(appPath, logicalSize);
+    const cacheToken = readProvidedIconCacheToken(options.getAppIconCacheToken, appPath);
+    const key = buildAppIconCacheKey(appPath, logicalSize, cacheToken);
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
 

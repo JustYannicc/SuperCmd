@@ -192,6 +192,26 @@ test('main icon IPC cache', async (t) => {
     ]);
   });
 
+  await t.test('invalidates file icon cache when source metadata changes', async () => {
+    let sourceToken = 'mtime:1:size:10';
+    let calls = 0;
+    const cache = api.createFileIconDataUrlCache({
+      getFileIconCacheToken: () => sourceToken,
+      getFileIcon: async () => {
+        calls += 1;
+        return makeIcon(`data:image/png;base64,file-${sourceToken}`);
+      },
+    });
+
+    assert.equal(await cache.resolve('/tmp/supercmd-changing-file.txt', 20), 'data:image/png;base64,file-mtime:1:size:10');
+    assert.equal(await cache.resolve('/tmp/../tmp/supercmd-changing-file.txt', 20), 'data:image/png;base64,file-mtime:1:size:10');
+    assert.equal(calls, 1, 'unchanged source metadata should reuse cached data URL');
+
+    sourceToken = 'mtime:2:size:10';
+    assert.equal(await cache.resolve('/tmp/supercmd-changing-file.txt', 20), 'data:image/png;base64,file-mtime:2:size:10');
+    assert.equal(calls, 2, 'changed source metadata should fetch a fresh data URL');
+  });
+
   await t.test('does not permanently cache file icon nulls or errors', async () => {
     const recoveredDataUrl = 'data:image/png;base64,file-recovered';
     let calls = 0;
@@ -283,6 +303,36 @@ test('main icon IPC cache', async (t) => {
     assert.equal(calls, 2);
     assert.equal(cache.resolveSync('/Applications/../Applications/SuperCmd.app', 32), recovered);
     assert.equal(calls, 2);
+  });
+
+  await t.test('invalidates app icon cache when app icon metadata changes', async () => {
+    let sourceToken = 'plist:1:icns:1';
+    let calls = 0;
+    const cache = api.createAppIconDataUrlCache({
+      maxEntries: 4,
+      getAppIconCacheToken: () => sourceToken,
+      resolveAppIconDataUrl: (appPath, size) => {
+        calls += 1;
+        return `data:image/png;base64,app-${sourceToken}:${path.basename(appPath)}:${size}`;
+      },
+    });
+
+    assert.equal(
+      await cache.resolve('/Applications/SuperCmd.app', 32),
+      'data:image/png;base64,app-plist:1:icns:1:SuperCmd.app:32',
+    );
+    assert.equal(
+      cache.resolveSync('/Applications/../Applications/SuperCmd.app', 32),
+      'data:image/png;base64,app-plist:1:icns:1:SuperCmd.app:32',
+    );
+    assert.equal(calls, 1, 'unchanged app icon metadata should reuse cached data URL');
+
+    sourceToken = 'plist:1:icns:2';
+    assert.equal(
+      cache.resolveSync('/Applications/SuperCmd.app', 32),
+      'data:image/png;base64,app-plist:1:icns:2:SuperCmd.app:32',
+    );
+    assert.equal(calls, 2, 'changed app icon metadata should fetch a fresh data URL');
   });
 
   await t.test('bounds file and app icon caches with LRU eviction', async () => {
