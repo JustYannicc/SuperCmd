@@ -90,6 +90,7 @@ import {
 import {
   createAppIconDataUrlCache,
   createFileIconDataUrlCache,
+  readIconPathCacheToken,
 } from './icon-ipc-cache';
 import {
   startClipboardMonitor,
@@ -3110,23 +3111,42 @@ function scheduleNextAppUpdaterAutoCheck(lastCheckedAtMs: number): void {
 type FrontmostAppContext = { name: string; path: string; bundleId?: string };
 let lastFrontmostApp: FrontmostAppContext | null = null;
 
+/** Resolve the icon file selected by a macOS .app bundle's Info.plist, or null. */
+function resolveAppIconSourcePath(appPath: string): string | null {
+  if (!appPath) return null;
+  const plistPath = path.join(appPath, 'Contents', 'Info.plist');
+  if (!fs.existsSync(plistPath)) return null;
+  let iconFileName = '';
+  try {
+    iconFileName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plistPath], {
+      encoding: 'utf-8',
+      timeout: 3000,
+    }).trim();
+  } catch { return null; }
+  if (!iconFileName) return null;
+  if (!iconFileName.endsWith('.icns')) iconFileName += '.icns';
+  return path.join(appPath, 'Contents', 'Resources', iconFileName);
+}
+
+function readAppIconCacheToken(appPath: string): string {
+  if (!appPath) return 'empty';
+  const plistPath = path.join(appPath || '', 'Contents', 'Info.plist');
+  const iconSourcePath = resolveAppIconSourcePath(appPath);
+  if (!iconSourcePath) return ['plist', readIconPathCacheToken(plistPath), 'icon', 'missing'].join('\0');
+  return [
+    'plist',
+    readIconPathCacheToken(plistPath),
+    'icon',
+    path.resolve(iconSourcePath),
+    readIconPathCacheToken(iconSourcePath),
+  ].join('\0');
+}
+
 /** Resolve a macOS .app bundle path to a PNG data URL of its icon, or null. */
 function resolveAppIconDataUrl(appPath: string, size = 32): string | null {
   try {
-    if (!appPath) return null;
-    const plistPath = path.join(appPath, 'Contents', 'Info.plist');
-    if (!fs.existsSync(plistPath)) return null;
-    let iconFileName = '';
-    try {
-      iconFileName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plistPath], {
-        encoding: 'utf-8',
-        timeout: 3000,
-      }).trim();
-    } catch { return null; }
-    if (!iconFileName) return null;
-    if (!iconFileName.endsWith('.icns')) iconFileName += '.icns';
-    const icnsPath = path.join(appPath, 'Contents', 'Resources', iconFileName);
-    if (!fs.existsSync(icnsPath)) return null;
+    const icnsPath = resolveAppIconSourcePath(appPath);
+    if (!icnsPath || !fs.existsSync(icnsPath)) return null;
     const os = require('os');
     const tmpPng = path.join(os.tmpdir(), `sc-icon-${Date.now()}.png`);
     try {
@@ -3142,7 +3162,10 @@ function resolveAppIconDataUrl(appPath: string, size = 32): string | null {
     return null;
   }
 }
-const appIconDataUrlCache = createAppIconDataUrlCache({ resolveAppIconDataUrl });
+const appIconDataUrlCache = createAppIconDataUrlCache({
+  resolveAppIconDataUrl,
+  getAppIconCacheToken: readAppIconCacheToken,
+});
 const fileIconDataUrlCache = createFileIconDataUrlCache({
   getFileIcon: (filePath, options) => app.getFileIcon(filePath, options),
 });
