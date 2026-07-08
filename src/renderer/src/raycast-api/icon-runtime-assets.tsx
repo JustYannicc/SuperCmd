@@ -20,6 +20,8 @@ const cssRgbVarCache = new Map<string, RgbColor>();
 const readableTintColorCache = new Map<string, string>();
 let observedThemeRoot: HTMLElement | null = null;
 let themeMutationObserver: MutationObserver | null = null;
+let observedThemeHead: HTMLHeadElement | null = null;
+let themeStylesheetObserver: MutationObserver | null = null;
 let themeCacheVersion = 0;
 let lastThemeSignature = '';
 
@@ -164,6 +166,11 @@ function getDocumentElement(): HTMLElement | null {
   return document.documentElement || null;
 }
 
+function getDocumentHead(): HTMLHeadElement | null {
+  if (typeof document === 'undefined') return null;
+  return document.head || null;
+}
+
 function readPrefersDark(): boolean {
   return Boolean(getDocumentElement()?.classList?.contains('dark'));
 }
@@ -184,15 +191,19 @@ function getThemeSignature(root: HTMLElement, prefersDark: boolean): string {
 }
 
 function ensureThemeObserver(root: HTMLElement): void {
-  if (observedThemeRoot === root) return;
+  const head = getDocumentHead();
+  if (observedThemeRoot === root && observedThemeHead === head) return;
   try {
     themeMutationObserver?.disconnect();
+    themeStylesheetObserver?.disconnect();
   } catch {
     // Ignore observer cleanup failures.
   }
 
   observedThemeRoot = root;
+  observedThemeHead = head;
   themeMutationObserver = null;
+  themeStylesheetObserver = null;
 
   if (typeof MutationObserver === 'undefined') return;
 
@@ -206,6 +217,21 @@ function ensureThemeObserver(root: HTMLElement): void {
     });
   } catch {
     themeMutationObserver = null;
+  }
+
+  if (!head) return;
+  try {
+    themeStylesheetObserver = new MutationObserver(() => {
+      invalidateThemeColorCaches();
+    });
+    themeStylesheetObserver.observe(head, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ['href', 'media', 'disabled'],
+    });
+  } catch {
+    themeStylesheetObserver = null;
   }
 }
 
@@ -285,15 +311,15 @@ function parseCssColorToRgb(value: string, themeKey: string): RgbColor | null {
   if (typeof document === 'undefined' || !document.body) return null;
 
   let parsed: RgbColor | null = null;
+  let el: HTMLElement | null = null;
   try {
-    const el = document.createElement('span');
+    el = document.createElement('span');
     el.style.position = 'absolute';
     el.style.visibility = 'hidden';
     el.style.pointerEvents = 'none';
     el.style.color = value;
     document.body.appendChild(el);
     const computed = window.getComputedStyle(el).color;
-    el.remove();
 
     const match = computed.match(/rgba?\(([^)]+)\)/i);
     if (match) {
@@ -308,6 +334,8 @@ function parseCssColorToRgb(value: string, themeKey: string): RgbColor | null {
     }
   } catch {
     parsed = null;
+  } finally {
+    el?.remove();
   }
 
   return canCache ? setBoundedCacheValue(parsedCssColorCache, cacheKey, parsed) : parsed;

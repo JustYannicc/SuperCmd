@@ -48,6 +48,8 @@ export function useFetch<T = any, U = undefined>(
   const mountedRef = useRef(true);
   const runIdRef = useRef(0);
   const lastInitialRequestKeyRef = useRef<string | undefined>(undefined);
+  const lastInitialOptionsKeyRef = useRef<string | undefined>(undefined);
+  const pendingHookStateRenderRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -60,6 +62,20 @@ export function useFetch<T = any, U = undefined>(
   const optionsRef = useRef(options);
   urlRef.current = url;
   optionsRef.current = options;
+
+  const setHookState = useCallback(<V,>(
+    setter: (nextValue: V | ((previous: V) => V)) => void,
+    nextValue: V | ((previous: V) => V),
+  ) => {
+    setter((previous: V) => {
+      const next = typeof nextValue === 'function'
+        ? (nextValue as (value: V) => V)(previous)
+        : nextValue;
+      if (Object.is(previous, next)) return previous;
+      pendingHookStateRenderRef.current = true;
+      return next;
+    });
+  }, []);
 
   const resolveUrl = useCallback((
     requestUrl: typeof url,
@@ -76,8 +92,8 @@ export function useFetch<T = any, U = undefined>(
     const runId = ++runIdRef.current;
     const isCurrentRun = () => mountedRef.current && runIdRef.current === runId;
 
-    setIsLoading(true);
-    setError(undefined);
+    setHookState(setIsLoading, true);
+    setHookState(setError, undefined);
 
     try {
       const resolvedUrl = resolvedUrlOverride ?? resolveUrl(urlRef.current, pageNum, currentCursor);
@@ -109,10 +125,10 @@ export function useFetch<T = any, U = undefined>(
       if (!isCurrentRun()) return;
       if (mapped && typeof mapped === 'object' && 'data' in mapped) {
         const paginatedResult = mapped as { data: T; hasMore?: boolean; cursor?: string };
-        setHasMore(paginatedResult.hasMore ?? false);
-        setCursor(paginatedResult.cursor);
+        setHookState(setHasMore, paginatedResult.hasMore ?? false);
+        setHookState(setCursor, paginatedResult.cursor);
 
-        setAllData((prev) => {
+        setHookState(setAllData, (prev) => {
           if (pageNum === 0) return paginatedResult.data;
           if (Array.isArray(paginatedResult.data) && Array.isArray(prev)) {
             return [...prev, ...paginatedResult.data] as unknown as T;
@@ -121,19 +137,19 @@ export function useFetch<T = any, U = undefined>(
         });
         opts?.onData?.(paginatedResult.data);
       } else {
-        setAllData(mapped as T);
-        setHasMore(false);
+        setHookState(setAllData, mapped as T);
+        setHookState(setHasMore, false);
         opts?.onData?.(mapped as T);
       }
     } catch (err) {
       if (!isCurrentRun()) return;
       const e = err instanceof Error ? err : new Error(String(err));
-      setError(e);
+      setHookState(setError, e);
       opts?.onError?.(e);
     } finally {
-      if (isCurrentRun()) setIsLoading(false);
+      if (isCurrentRun()) setHookState(setIsLoading, false);
     }
-  }, [resolveUrl]);
+  }, [resolveUrl, setHookState]);
 
   const optionsKey = useMemo(() => {
     try {
@@ -149,12 +165,25 @@ export function useFetch<T = any, U = undefined>(
   }, [options?.execute, options?.method, options?.headers, options?.body]);
 
   useEffect(() => {
+    const isHookStateRender = pendingHookStateRenderRef.current;
+    pendingHookStateRenderRef.current = false;
+    const previousOptionsKey = lastInitialOptionsKeyRef.current;
+    lastInitialOptionsKeyRef.current = optionsKey;
+    if (
+      isHookStateRender &&
+      typeof url === 'function' &&
+      lastInitialRequestKeyRef.current !== undefined &&
+      previousOptionsKey === optionsKey
+    ) {
+      return;
+    }
+
     if (options?.execute === false) {
       runIdRef.current += 1;
       lastInitialRequestKeyRef.current = undefined;
-      setIsLoading(false);
-      setError(undefined);
-      setAllData(options?.initialData);
+      setHookState(setIsLoading, false);
+      setHookState(setError, undefined);
+      setHookState(setAllData, options?.initialData);
       return;
     }
 
@@ -171,38 +200,38 @@ export function useFetch<T = any, U = undefined>(
     if (lastInitialRequestKeyRef.current === initialRequestKey) return;
     lastInitialRequestKeyRef.current = initialRequestKey;
 
-    setPage(0);
-    setCursor(undefined);
-    setAllData(options?.initialData);
+    setHookState(setPage, 0);
+    setHookState(setCursor, undefined);
+    setHookState(setAllData, options?.initialData);
     fetchData(0, undefined, initialResolvedUrl);
-  }, [fetchData, url, optionsKey]);
+  }, [fetchData, url, optionsKey, setHookState]);
 
   const revalidate = useCallback(() => {
-    setPage(0);
-    setCursor(undefined);
-    setAllData(undefined);
+    setHookState(setPage, 0);
+    setHookState(setCursor, undefined);
+    setHookState(setAllData, undefined);
     fetchData(0, undefined);
-  }, [fetchData]);
+  }, [fetchData, setHookState]);
 
   const mutate = useCallback(async (asyncUpdate?: Promise<T>, mutateOptions?: { optimisticUpdate?: (data: T | undefined) => T; rollbackOnError?: boolean | ((data: T | undefined) => T); shouldRevalidateAfter?: boolean }) => {
     const prevData = allData;
     if (mutateOptions?.optimisticUpdate) {
-      setAllData(mutateOptions.optimisticUpdate(allData));
+      setHookState(setAllData, mutateOptions.optimisticUpdate(allData));
     }
 
     if (asyncUpdate) {
       try {
         const result = await asyncUpdate;
         if (mutateOptions?.shouldRevalidateAfter !== false) {
-          setAllData(result);
+          setHookState(setAllData, result);
         }
         return result;
       } catch (e) {
         if (mutateOptions?.rollbackOnError !== false) {
           if (typeof mutateOptions?.rollbackOnError === 'function') {
-            setAllData(mutateOptions.rollbackOnError(prevData));
+            setHookState(setAllData, mutateOptions.rollbackOnError(prevData));
           } else {
-            setAllData(prevData);
+            setHookState(setAllData, prevData);
           }
         }
         throw e;
@@ -216,10 +245,10 @@ export function useFetch<T = any, U = undefined>(
   const onLoadMore = useCallback(() => {
     if (hasMore && !isLoading) {
       const nextPage = page + 1;
-      setPage(nextPage);
+      setHookState(setPage, nextPage);
       fetchData(nextPage, cursor);
     }
-  }, [hasMore, isLoading, page, cursor, fetchData]);
+  }, [hasMore, isLoading, page, cursor, fetchData, setHookState]);
 
   const pagination = useMemo(() => ({
     page,

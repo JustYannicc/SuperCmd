@@ -96,7 +96,10 @@ function createIconTintHarness() {
   let rootStyleVersion = 0;
   let elementCreations = 0;
   let bodyAppends = 0;
+  let bodyChildCount = 0;
   let computedStyleCalls = 0;
+  let throwOnElementComputedStyle = false;
+  const observerCallbacks = new Map();
 
   const documentElement = {
     get className() {
@@ -112,21 +115,32 @@ function createIconTintHarness() {
       return `--style-version: ${rootStyleVersion}`;
     },
   };
+  const documentHead = {};
+  const documentBody = {
+    appendChild(element) {
+      bodyAppends += 1;
+      if (element.parentNode !== this) bodyChildCount += 1;
+      element.parentNode = this;
+    },
+    removeChild(element) {
+      if (element.parentNode === this) {
+        bodyChildCount -= 1;
+        element.parentNode = null;
+      }
+    },
+  };
 
   const documentStub = {
     documentElement,
-    body: {
-      appendChild(element) {
-        bodyAppends += 1;
-        element.parentNode = this;
-      },
-    },
+    head: documentHead,
+    body: documentBody,
     createElement() {
       elementCreations += 1;
       return {
         parentNode: null,
         style: createStyleDeclaration(),
         remove() {
+          this.parentNode?.removeChild?.(this);
           this.parentNode = null;
         },
       };
@@ -144,6 +158,7 @@ function createIconTintHarness() {
           },
         };
       }
+      if (throwOnElementComputedStyle) throw new Error('forced getComputedStyle failure');
       return {
         color: resolveComputedColor(target?.style?.color, cssVariables),
         getPropertyValue() {
@@ -154,8 +169,21 @@ function createIconTintHarness() {
   };
 
   class MutationObserverStub {
-    observe() {}
-    disconnect() {}
+    constructor(callback) {
+      this.callback = callback;
+      this.target = null;
+    }
+
+    observe(target) {
+      this.target = target;
+      if (!observerCallbacks.has(target)) observerCallbacks.set(target, new Set());
+      observerCallbacks.get(target).add(this.callback);
+    }
+
+    disconnect() {
+      if (this.target) observerCallbacks.get(this.target)?.delete(this.callback);
+      this.target = null;
+    }
   }
 
   function loadTsModule(filePath) {
@@ -216,9 +244,21 @@ function createIconTintHarness() {
     rootStyleVersion += 1;
   }
 
+  function setStylesheetCssVariable(variableName, value) {
+    cssVariables.set(variableName, value);
+    for (const callback of observerCallbacks.get(documentHead) || []) {
+      callback([{ type: 'childList', target: documentHead }]);
+    }
+  }
+
+  function setThrowOnElementComputedStyle(shouldThrow) {
+    throwOnElementComputedStyle = shouldThrow;
+  }
+
   function resetCounts() {
     elementCreations = 0;
     bodyAppends = 0;
+    bodyChildCount = 0;
     computedStyleCalls = 0;
   }
 
@@ -226,11 +266,14 @@ function createIconTintHarness() {
     assets: loadTsModule('src/renderer/src/raycast-api/icon-runtime-assets.tsx'),
     setDark,
     setCssVariable,
+    setStylesheetCssVariable,
+    setThrowOnElementComputedStyle,
     resetCounts,
     get counts() {
       return {
         elementCreations,
         bodyAppends,
+        bodyChildCount,
         computedStyleCalls,
       };
     },
@@ -337,5 +380,28 @@ test('icon tint color cache', async (t) => {
     assert.notEqual(dark, darker);
     assert.ok(darkCounts.computedStyleCalls > lightCounts.computedStyleCalls);
     assert.ok(harness.counts.computedStyleCalls > darkCounts.computedStyleCalls);
+  });
+
+  await t.test('invalidates readable tint results when stylesheet variables change', () => {
+    const harness = createIconTintHarness();
+    const { resolveReadableTintColor } = harness.assets;
+
+    const light = resolveReadableTintColor('#777777', { minContrast: 4.25 });
+    const lightCounts = harness.counts;
+    harness.setStylesheetCssVariable('--surface-base-rgb', '5, 5, 5');
+    const darker = resolveReadableTintColor('#777777', { minContrast: 4.25 });
+
+    assert.equal(darker, '#777777');
+    assert.notEqual(light, darker);
+    assert.ok(harness.counts.computedStyleCalls > lightCounts.computedStyleCalls);
+  });
+
+  await t.test('removes temporary color parse element when computed style throws', () => {
+    const harness = createIconTintHarness();
+    const { resolveReadableTintColor } = harness.assets;
+
+    harness.setThrowOnElementComputedStyle(true);
+    assert.equal(resolveReadableTintColor('#777777', { minContrast: 4.25 }), '#777777');
+    assert.equal(harness.counts.bodyChildCount, 0);
   });
 });
