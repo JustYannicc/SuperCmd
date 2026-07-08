@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createStreamFlushScheduler } from '../../utils/streamFlushScheduler';
 
 type AICreativity = 'none' | 'low' | 'medium' | 'high' | 'maximum' | number;
 
@@ -21,6 +22,7 @@ export interface RaycastAIStreamBatcherOptions {
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof globalThis.setTimeout>;
   clearTimer?: (handle: ReturnType<typeof globalThis.setTimeout>) => void;
   flushDelayMs?: number;
+  isDocumentHidden?: () => boolean;
 }
 
 export interface RaycastAIStreamBatcher {
@@ -30,32 +32,17 @@ export interface RaycastAIStreamBatcher {
   reset: (data?: string) => void;
 }
 
-function createDefaultRequestFrame(): ((callback: () => void) => number) | undefined {
-  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
-    return undefined;
-  }
-  return (callback) => window.requestAnimationFrame(() => callback());
-}
-
-function createDefaultCancelFrame(): ((handle: number) => void) | undefined {
-  if (typeof window === 'undefined' || typeof window.cancelAnimationFrame !== 'function') {
-    return undefined;
-  }
-  return (handle) => window.cancelAnimationFrame(handle);
-}
-
 export function createRaycastAIStreamBatcher({
   dataRef,
   setVisibleData,
-  requestFrame = createDefaultRequestFrame(),
-  cancelFrame = createDefaultCancelFrame(),
+  requestFrame,
+  cancelFrame,
   setTimer = globalThis.setTimeout.bind(globalThis),
   clearTimer = globalThis.clearTimeout.bind(globalThis),
   flushDelayMs = RAYCAST_AI_STREAM_FLUSH_INTERVAL_MS,
+  isDocumentHidden,
 }: RaycastAIStreamBatcherOptions): RaycastAIStreamBatcher {
   let visibleData = dataRef.current;
-  let pendingFrame: number | null = null;
-  let pendingTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   const publishVisibleData = () => {
     const nextData = dataRef.current;
@@ -64,37 +51,22 @@ export function createRaycastAIStreamBatcher({
     setVisibleData(nextData);
   };
 
-  const cancelPendingFlush = () => {
-    if (pendingFrame !== null) {
-      cancelFrame?.(pendingFrame);
-      pendingFrame = null;
-    }
-    if (pendingTimer !== null) {
-      clearTimer(pendingTimer);
-      pendingTimer = null;
-    }
-  };
+  const scheduler = createStreamFlushScheduler(publishVisibleData, {
+    requestFrame,
+    cancelFrame: cancelFrame as ((handle: unknown) => void) | undefined,
+    setTimer,
+    clearTimer,
+    flushDelayMs,
+    isDocumentHidden,
+  });
 
   const flush = () => {
-    cancelPendingFlush();
-    publishVisibleData();
-  };
-
-  const runScheduledFlush = () => {
-    pendingFrame = null;
-    pendingTimer = null;
+    scheduler.cancel();
     publishVisibleData();
   };
 
   const scheduleFlush = () => {
-    if (pendingFrame !== null || pendingTimer !== null) return;
-
-    if (requestFrame) {
-      pendingFrame = requestFrame(runScheduledFlush);
-      return;
-    }
-
-    pendingTimer = setTimer(runScheduledFlush, flushDelayMs);
+    scheduler.schedule();
   };
 
   return {
@@ -103,10 +75,10 @@ export function createRaycastAIStreamBatcher({
       dataRef.current += chunk;
       scheduleFlush();
     },
-    cancelPendingFlush,
+    cancelPendingFlush: scheduler.cancel,
     flush,
     reset(data = '') {
-      cancelPendingFlush();
+      scheduler.cancel();
       dataRef.current = data;
       visibleData = data;
       setVisibleData(data);

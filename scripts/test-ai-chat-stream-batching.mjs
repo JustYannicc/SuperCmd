@@ -1,32 +1,29 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const ts = require('typescript');
+const { buildSync } = require('esbuild');
 
 const CHUNK_COUNT = 240;
 
 function loadTsModule(filePath) {
   const resolvedPath = path.resolve(filePath);
-  const source = fs.readFileSync(resolvedPath, 'utf8');
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
-    },
-    fileName: resolvedPath,
+  const bundled = buildSync({
+    bundle: true,
+    entryPoints: [resolvedPath],
+    format: 'cjs',
+    platform: 'node',
+    target: 'es2022',
+    write: false,
   });
 
   const module = { exports: {} };
-  vm.runInNewContext(transpiled.outputText, {
+  vm.runInNewContext(bundled.outputFiles[0].text, {
     module,
     exports: module.exports,
     require,
