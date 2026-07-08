@@ -3378,6 +3378,17 @@ for (const [key, val] of Object.entries({ ...nodeBuiltinStubs })) {
   }
 }
 
+const SUPERCMD_BUILTIN_FACADE_MODULES = new Set<string>([
+  // Keep child_process under SuperCmd's lifecycle-aware stub so spawned
+  // children can be tracked and cleaned up when the extension unmounts.
+  'child_process',
+]);
+
+function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
+  const normalizedName = name.startsWith('node:') ? name.slice(5) : name;
+  return SUPERCMD_BUILTIN_FACADE_MODULES.has(normalizedName);
+}
+
 // ─── Real Node built-in bridge ──────────────────────────────────────
 // The launcher window runs with `sandbox: false` + `nodeIntegration: true`
 // + `contextIsolation: false`. In that mode Node's `require`, `process`,
@@ -3424,64 +3435,6 @@ function isNodeBuiltinRequest(name: string): boolean {
     if (KNOWN_NODE_BUILTINS.has(base)) return true;
   }
   return false;
-}
-
-function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
-  const normalized = name.startsWith('node:') ? name.slice(5) : name;
-  return normalized === 'fs' || normalized === 'fs/promises' || normalized === 'child_process';
-}
-
-const superCmdBuiltinFacadeCache = new Map<string, any>();
-
-function getSuperCmdBuiltinFacade(name: string): any | undefined {
-  if (!shouldUseSuperCmdBuiltinFacade(name)) return undefined;
-  const normalized = name.startsWith('node:') ? name.slice(5) : name;
-  const facade = nodeBuiltinStubs[normalized] || nodeBuiltinStubs[name] || nodeBuiltinStubs[`node:${normalized}`];
-  if (!facade) return undefined;
-
-  const realModule = getRealNodeBuiltin(name) || getRealNodeBuiltin(normalized);
-  if (!realModule || typeof realModule !== 'object') return facade;
-
-  const cacheKey = normalized;
-  const cached = superCmdBuiltinFacadeCache.get(cacheKey);
-  if (cached?.realModule === realModule && cached?.facade === facade) {
-    return cached.proxy;
-  }
-
-  const proxy = new Proxy(facade, {
-    get(target, prop, receiver) {
-      if (prop === Symbol.toStringTag && prop in realModule) return realModule[prop as any];
-      if (Reflect.has(target, prop)) {
-        const value = Reflect.get(target, prop, receiver);
-        const realValue = realModule[prop as any];
-        if (
-          prop === 'constants' &&
-          value &&
-          realValue &&
-          typeof value === 'object' &&
-          typeof realValue === 'object'
-        ) {
-          return { ...realValue, ...value };
-        }
-        return value;
-      }
-      return realModule[prop as any];
-    },
-    has(target, prop) {
-      return Reflect.has(target, prop) || prop in realModule;
-    },
-    ownKeys(target) {
-      return Array.from(new Set([...Reflect.ownKeys(realModule), ...Reflect.ownKeys(target)]));
-    },
-    getOwnPropertyDescriptor(target, prop) {
-      const targetDescriptor = Reflect.getOwnPropertyDescriptor(target, prop);
-      if (targetDescriptor) return targetDescriptor;
-      const realDescriptor = Reflect.getOwnPropertyDescriptor(realModule, prop);
-      return realDescriptor ? { ...realDescriptor, configurable: true } : undefined;
-    },
-  });
-  superCmdBuiltinFacadeCache.set(cacheKey, { facade, realModule, proxy });
-  return proxy;
 }
 
 // Capture real Node globals once, then remove them from globalThis so
@@ -3879,6 +3832,9 @@ function createScopedHostProxy(
   const boundFunctions = new WeakMap<Function, Function>();
   const target = {};
 
+  // Extension code gets scoped window/document proxies so timer and listener
+  // APIs can be registered for lifecycle cleanup while ordinary host reads,
+  // writes, enumeration, and method calls continue to hit the real objects.
   return new Proxy(target, {
     get(_target, prop) {
       if (kind === 'window') {
