@@ -3923,6 +3923,8 @@ export function createExtensionLifecycleScope(
   const nativeClearTimeout = hostWindow.clearTimeout.bind(hostWindow);
   const nativeRequestAnimationFrame = hostWindow.requestAnimationFrame.bind(hostWindow);
   const nativeCancelAnimationFrame = hostWindow.cancelAnimationFrame.bind(hostWindow);
+  let scopedWindow: any;
+  let scopedDocument: any;
 
   const trackInterval = (handler: TimerHandler, timeout?: number, ...args: any[]) => {
     const id = nativeSetInterval(handler as any, timeout as any, ...args);
@@ -3944,14 +3946,18 @@ export function createExtensionLifecycleScope(
     }
   };
   const runTimeoutHandler = (handler: TimerHandler, thisArg: any, callbackArgs: any[]) => {
+    const scopedThis = scopedWindow ?? thisArg;
     if (typeof handler === 'function') {
-      return handler.apply(thisArg, callbackArgs);
+      return handler.apply(scopedThis, callbackArgs);
     }
     const source = String(handler);
-    if (typeof hostWindow.eval === 'function') {
-      return hostWindow.eval(source);
-    }
-    return Function(source).call(thisArg);
+    return Function('window', 'self', 'globalThis', 'document', source).call(
+      scopedThis,
+      scopedWindow ?? hostWindow,
+      scopedWindow ?? hostWindow,
+      scopedWindow ?? hostWindow,
+      scopedDocument ?? hostDocument,
+    );
   };
   const trackTimeout = (handler: TimerHandler, timeout?: number, ...args: any[]) => {
     let id: ExtensionTimerHandle | undefined;
@@ -3981,7 +3987,7 @@ export function createExtensionLifecycleScope(
     let id: ExtensionTimerHandle | undefined;
     const wrappedCallback = function (this: any, timestamp: DOMHighResTimeStamp) {
       untrackRaf(id);
-      callback.call(this, timestamp);
+      callback.call(scopedWindow ?? this, timestamp);
     };
     id = nativeRequestAnimationFrame(wrappedCallback);
     registry?.rafs.add(id);
@@ -4005,8 +4011,6 @@ export function createExtensionLifecycleScope(
     cancelAnimationFrame: trackCancelRaf,
   };
 
-  let scopedWindow: any;
-  let scopedDocument: any;
   scopedDocument = createScopedHostProxy(
     hostDocument,
     registry,
@@ -4580,11 +4584,23 @@ function loadExtensionExport(
     // bundle resolves bare timers and `window.*`/`document.*` event listeners
     // against this ExtensionView instance instead of the host renderer globals.
     const lifecycleScope = createExtensionLifecycleScope(timerRegistry);
+    const {
+      scopedWindow,
+      scopedDocument,
+      setImmediate: trackSetImmediate,
+      clearImmediate: trackClearImmediate,
+      setInterval: trackInterval,
+      clearInterval: trackClearInterval,
+      setTimeout: trackTimeout,
+      clearTimeout: trackClearTimeout,
+      requestAnimationFrame: trackRaf,
+      cancelAnimationFrame: trackCancelRaf,
+    } = lifecycleScope;
 
     // Execute the CJS bundle in a function scope.
     // We pass all the standard CJS arguments plus `process`, `Buffer`,
-    // and `global` to ensure they are always in scope even when the
-    // extension code references them without importing.
+    // `global`, and scoped browser globals to ensure they are always in scope
+    // even when the extension code references them without importing.
     // Browser-detection bypass — the OpenAI v4 SDK (and several other
     // "isomorphic" SDKs) refuse to start unless the caller passes
     // `dangerouslyAllowBrowser: true`. The check is
@@ -4610,18 +4626,19 @@ function loadExtensionExport(
       '/extension',
       bundleProcess,
       bundleBuffer,
-      lifecycleScope.scopedWindow,
-      lifecycleScope.scopedWindow,
-      lifecycleScope.setImmediate,
-      lifecycleScope.clearImmediate,
-      lifecycleScope.setInterval,
-      lifecycleScope.clearInterval,
-      lifecycleScope.setTimeout,
-      lifecycleScope.clearTimeout,
-      lifecycleScope.requestAnimationFrame,
-      lifecycleScope.cancelAnimationFrame,
-      lifecycleScope.scopedWindow,
-      lifecycleScope.scopedDocument,
+      scopedWindow,
+      scopedWindow,
+      scopedWindow,
+      scopedWindow,
+      scopedDocument,
+      trackSetImmediate,
+      trackClearImmediate,
+      trackInterval,
+      trackClearInterval,
+      trackTimeout,
+      trackClearTimeout,
+      trackRaf,
+      trackCancelRaf,
       undefined, // navigator — see comment above
       scDynamicImport,
     );

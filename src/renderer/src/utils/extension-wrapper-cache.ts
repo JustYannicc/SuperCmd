@@ -10,6 +10,9 @@ export const EXTENSION_WRAPPER_ARGUMENTS = [
   'Buffer',
   'global',
   'globalThis',
+  'window',
+  'self',
+  'document',
   'setImmediate',
   'clearImmediate',
   'setInterval',
@@ -18,8 +21,6 @@ export const EXTENSION_WRAPPER_ARGUMENTS = [
   'clearTimeout',
   'requestAnimationFrame',
   'cancelAnimationFrame',
-  'window',
-  'document',
   'navigator',
   '__scDynamicImport',
 ] as const;

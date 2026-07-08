@@ -232,6 +232,9 @@ const EXTENSION_WRAPPER_ARGUMENTS = [
   'Buffer',
   'global',
   'globalThis',
+  'window',
+  'self',
+  'document',
   'setImmediate',
   'clearImmediate',
   'setInterval',
@@ -240,8 +243,6 @@ const EXTENSION_WRAPPER_ARGUMENTS = [
   'clearTimeout',
   'requestAnimationFrame',
   'cancelAnimationFrame',
-  'window',
-  'document',
   'navigator',
   '__scDynamicImport',
 ];
@@ -311,6 +312,9 @@ function runWrapper({ lifecycleScope, registry, scoped }) {
     Buffer,
     globalObject,
     globalObject,
+    wrapperWindow,
+    wrapperWindow,
+    wrapperDocument,
     bareTimerApi.setImmediate,
     bareTimerApi.clearImmediate,
     bareTimerApi.setInterval,
@@ -319,8 +323,6 @@ function runWrapper({ lifecycleScope, registry, scoped }) {
     bareTimerApi.clearTimeout,
     bareTimerApi.requestAnimationFrame,
     bareTimerApi.cancelAnimationFrame,
-    wrapperWindow,
-    wrapperDocument,
     undefined,
     async () => ({}),
   );
@@ -329,6 +331,20 @@ function runWrapper({ lifecycleScope, registry, scoped }) {
 }
 
 test('extension lifecycle sandbox cleanup', async (t) => {
+  await t.test('production wrapper wires the lifecycle scope', () => {
+    const source = fs.readFileSync(extensionViewPath, 'utf8');
+    const start = source.indexOf('function loadExtensionExport(');
+    const end = source.indexOf('// Get the default export', start);
+    assert.notEqual(start, -1, 'Could not locate loadExtensionExport start marker');
+    assert.notEqual(end, -1, 'Could not locate loadExtensionExport wrapper marker');
+    const wrapperSource = source.slice(start, end);
+
+    assert.match(wrapperSource, /const lifecycleScope = createExtensionLifecycleScope\(timerRegistry\)/);
+    assert.match(wrapperSource, /'window',\s*'self',\s*'document'/);
+    assert.match(wrapperSource, /bundleBuffer,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedDocument,/);
+    assert.doesNotMatch(wrapperSource, /const trackTimeout = \(cb: any, ms\?: any/);
+  });
+
   await t.test('documents the pre-fix window API leak', () => {
     host.reset();
     const registry = createTimerRegistry();
@@ -417,6 +433,7 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     let timeoutCalls = 0;
     let timeoutThis = null;
     let timeoutArgs = null;
+    let stringTimeoutScoped = false;
     for (let i = 0; i < oneShotCount; i += 1) {
       lifecycleScope.setTimeout(function (...args) {
         timeoutCalls += 1;
@@ -426,16 +443,19 @@ test('extension lifecycle sandbox cleanup', async (t) => {
         }
       }, 0, i, 'timeout-arg');
     }
+    lifecycleScope.setTimeout('globalThis.__stringTimeoutScoped = document.defaultView === window', 0);
 
     assert.equal(registry.intervals.size, 1);
-    assert.equal(registry.timeouts.size, oneShotCount);
-    assert.equal(registry.timeoutClearers.size, oneShotCount);
+    assert.equal(registry.timeouts.size, oneShotCount + 1);
+    assert.equal(registry.timeoutClearers.size, oneShotCount + 1);
 
     host.flushTimeouts();
+    stringTimeoutScoped = lifecycleScope.scopedWindow.__stringTimeoutScoped === true;
 
     assert.equal(timeoutCalls, oneShotCount);
-    assert.equal(timeoutThis, host.hostWindow);
+    assert.equal(timeoutThis, lifecycleScope.scopedWindow);
     assert.deepEqual(timeoutArgs, [0, 'timeout-arg']);
+    assert.equal(stringTimeoutScoped, true);
     assert.equal(registry.timeouts.size, 0);
     assert.equal(registry.timeoutClearers.size, 0);
     assert.equal(registry.intervals.size, 1, 'interval remains tracked after one-shot timeouts fire');
@@ -460,7 +480,7 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     host.flushRafs(123.4);
 
     assert.equal(rafCalls, oneShotCount);
-    assert.equal(rafThis, host.hostWindow);
+    assert.equal(rafThis, lifecycleScope.scopedWindow);
     assert.equal(rafTimestamp, 123.4);
     assert.equal(registry.rafs.size, 0);
     assert.equal(registry.rafClearers.size, 0);
