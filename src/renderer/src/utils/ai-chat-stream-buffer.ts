@@ -1,3 +1,5 @@
+import { createStreamFlushScheduler } from './streamFlushScheduler';
+
 export const AI_CHAT_STREAM_FLUSH_MS = 40;
 
 export interface AiChatStreamBufferOptions {
@@ -24,28 +26,29 @@ export function createAiChatStreamBuffer({
 }: AiChatStreamBufferOptions): AiChatStreamBuffer {
   let content = '';
   let visibleContent = '';
-  let flushHandle: unknown = null;
 
-  const clearScheduledFlush = () => {
-    if (flushHandle === null) return;
-    cancelFlush(flushHandle);
-    flushHandle = null;
-  };
-
-  const flushNow = () => {
-    clearScheduledFlush();
+  const publishVisibleContent = () => {
     if (visibleContent === content) return false;
     visibleContent = content;
     onFlush(content);
     return true;
   };
 
+  const scheduler = createStreamFlushScheduler(publishVisibleContent, {
+    flushDelayMs: flushIntervalMs,
+    requestFrame: undefined,
+    cancelFrame: undefined,
+    setTimer: (callback, delayMs) => scheduleFlush(callback, delayMs) as ReturnType<typeof globalThis.setTimeout>,
+    clearTimer: (handle) => cancelFlush(handle),
+  });
+
+  const flushNow = () => {
+    scheduler.cancel();
+    return publishVisibleContent();
+  };
+
   const scheduleNextFlush = () => {
-    if (flushHandle !== null) return;
-    flushHandle = scheduleFlush(() => {
-      flushHandle = null;
-      flushNow();
-    }, flushIntervalMs);
+    scheduler.schedule();
   };
 
   return {
@@ -55,17 +58,17 @@ export function createAiChatStreamBuffer({
       scheduleNextFlush();
     },
     cancel() {
-      clearScheduledFlush();
+      scheduler.cancel();
     },
     flushNow,
     getContent() {
       return content;
     },
     hasPendingFlush() {
-      return flushHandle !== null;
+      return scheduler.isPending();
     },
     reset(nextContent = '') {
-      clearScheduledFlush();
+      scheduler.cancel();
       content = nextContent;
       visibleContent = nextContent;
     },

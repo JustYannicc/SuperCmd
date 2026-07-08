@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { transform } from 'esbuild';
+import { build, transform } from 'esbuild';
 
 const CHUNK_COUNT = 600;
 
@@ -101,7 +101,19 @@ async function importUseAiModule(absPath) {
     format: 'esm',
     target: 'es2020',
   });
-  const dataUrl = 'data:text/javascript;base64,' + Buffer.from(code).toString('base64');
+  const bundled = await build({
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    stdin: {
+      contents: code,
+      loader: 'js',
+      resolveDir: path.dirname(absPath),
+    },
+    target: 'es2020',
+    write: false,
+  });
+  const dataUrl = 'data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64');
   return import(dataUrl);
 }
 
@@ -126,6 +138,32 @@ function createManualFrameScheduler() {
       return queuedCallbacks.length;
     },
     pendingFrameCount() {
+      return callbacks.size;
+    },
+  };
+}
+
+function createManualTimerScheduler() {
+  let nextTimerId = 1;
+  const callbacks = new Map();
+
+  return {
+    setTimer(callback) {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      callbacks.set(id, callback);
+      return id;
+    },
+    clearTimer(id) {
+      callbacks.delete(id);
+    },
+    flushTimers() {
+      const queuedCallbacks = Array.from(callbacks.values());
+      callbacks.clear();
+      for (const callback of queuedCallbacks) callback();
+      return queuedCallbacks.length;
+    },
+    pendingTimerCount() {
       return callbacks.size;
     },
   };
@@ -423,6 +461,35 @@ test('Raycast useAI stream batcher coalesces many chunks into one visible frame 
   assert.equal(visibleUpdateCount, 1);
   assert.ok(visibleUpdateCount < CHUNK_COUNT / 10);
   console.log(`batched useAI visible updates: ${visibleUpdateCount} for ${CHUNK_COUNT} chunks`);
+});
+
+test('Raycast useAI stream batcher uses timer flushes while the document is hidden', () => {
+  const frameScheduler = createManualFrameScheduler();
+  const timerScheduler = createManualTimerScheduler();
+  const dataRef = { current: '' };
+  let visibleData = '';
+  let visibleUpdateCount = 0;
+  const batcher = createRaycastAIStreamBatcher({
+    dataRef,
+    setVisibleData(nextData) {
+      visibleData = nextData;
+      visibleUpdateCount += 1;
+    },
+    requestFrame: frameScheduler.requestFrame,
+    cancelFrame: frameScheduler.cancelFrame,
+    setTimer: timerScheduler.setTimer,
+    clearTimer: timerScheduler.clearTimer,
+    isDocumentHidden: () => true,
+  });
+
+  batcher.appendChunk('background ');
+  batcher.appendChunk('stream');
+
+  assert.equal(frameScheduler.pendingFrameCount(), 0);
+  assert.equal(timerScheduler.pendingTimerCount(), 1);
+  assert.equal(timerScheduler.flushTimers(), 1);
+  assert.equal(visibleData, 'background stream');
+  assert.equal(visibleUpdateCount, 1);
 });
 
 test('useAI flushes complete final data and preserves final onData behavior', async () => {

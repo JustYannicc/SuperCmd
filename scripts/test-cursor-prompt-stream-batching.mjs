@@ -54,6 +54,34 @@ function createManualFrameScheduler() {
   };
 }
 
+function createManualTimerScheduler() {
+  let nextTimerId = 1;
+  const callbacks = new Map();
+
+  return {
+    setTimer(callback) {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      callbacks.set(id, callback);
+      return id;
+    },
+    clearTimer(id) {
+      callbacks.delete(id);
+    },
+    flushTimers() {
+      const queuedCallbacks = Array.from(callbacks.values());
+      callbacks.clear();
+      for (const callback of queuedCallbacks) {
+        callback();
+      }
+      return queuedCallbacks.length;
+    },
+    pendingTimerCount() {
+      return callbacks.size;
+    },
+  };
+}
+
 function createBatcherHarness() {
   const scheduler = createManualFrameScheduler();
   const resultRef = { current: '' };
@@ -73,6 +101,38 @@ function createBatcherHarness() {
     batcher,
     resultRef,
     scheduler,
+    get visibleResult() {
+      return visibleResult;
+    },
+    get visibleUpdateCount() {
+      return visibleUpdateCount;
+    },
+  };
+}
+
+function createHiddenDocumentBatcherHarness() {
+  const frameScheduler = createManualFrameScheduler();
+  const timerScheduler = createManualTimerScheduler();
+  const resultRef = { current: '' };
+  let visibleResult = '';
+  let visibleUpdateCount = 0;
+  const batcher = createCursorPromptResultBatcher({
+    resultRef,
+    setVisibleResult(nextResult) {
+      visibleResult = nextResult;
+      visibleUpdateCount += 1;
+    },
+    requestFrame: frameScheduler.requestFrame,
+    cancelFrame: frameScheduler.cancelFrame,
+    setTimer: timerScheduler.setTimer,
+    clearTimer: timerScheduler.clearTimer,
+    isDocumentHidden: () => true,
+  });
+
+  return {
+    batcher,
+    frameScheduler,
+    timerScheduler,
     get visibleResult() {
       return visibleResult;
     },
@@ -152,4 +212,17 @@ test('cursor prompt result batching can cancel a pending repaint without changin
   assert.equal(harness.scheduler.flushFrames(), 0);
   assert.equal(harness.visibleResult, '');
   assert.equal(harness.visibleUpdateCount, 0);
+});
+
+test('cursor prompt result batching uses timer flushes while the document is hidden', () => {
+  const harness = createHiddenDocumentBatcherHarness();
+
+  harness.batcher.appendChunk('background ');
+  harness.batcher.appendChunk('update');
+
+  assert.equal(harness.frameScheduler.pendingFrameCount(), 0);
+  assert.equal(harness.timerScheduler.pendingTimerCount(), 1);
+  assert.equal(harness.timerScheduler.flushTimers(), 1);
+  assert.equal(harness.visibleResult, 'background update');
+  assert.equal(harness.visibleUpdateCount, 1);
 });

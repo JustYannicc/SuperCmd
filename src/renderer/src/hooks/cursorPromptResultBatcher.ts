@@ -1,3 +1,5 @@
+import { createStreamFlushScheduler } from '../utils/streamFlushScheduler';
+
 export const CURSOR_PROMPT_RESULT_FLUSH_INTERVAL_MS = 32;
 
 export interface CursorPromptResultRef {
@@ -12,6 +14,7 @@ export interface CursorPromptResultBatcherOptions {
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof globalThis.setTimeout>;
   clearTimer?: (handle: ReturnType<typeof globalThis.setTimeout>) => void;
   flushDelayMs?: number;
+  isDocumentHidden?: () => boolean;
 }
 
 export interface CursorPromptResultBatcher {
@@ -22,32 +25,17 @@ export interface CursorPromptResultBatcher {
   dispose: () => void;
 }
 
-function createDefaultRequestFrame(): ((callback: () => void) => number) | undefined {
-  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
-    return undefined;
-  }
-  return (callback) => window.requestAnimationFrame(() => callback());
-}
-
-function createDefaultCancelFrame(): ((handle: number) => void) | undefined {
-  if (typeof window === 'undefined' || typeof window.cancelAnimationFrame !== 'function') {
-    return undefined;
-  }
-  return (handle) => window.cancelAnimationFrame(handle);
-}
-
 export function createCursorPromptResultBatcher({
   resultRef,
   setVisibleResult,
-  requestFrame = createDefaultRequestFrame(),
-  cancelFrame = createDefaultCancelFrame(),
+  requestFrame,
+  cancelFrame,
   setTimer = globalThis.setTimeout.bind(globalThis),
   clearTimer = globalThis.clearTimeout.bind(globalThis),
   flushDelayMs = CURSOR_PROMPT_RESULT_FLUSH_INTERVAL_MS,
+  isDocumentHidden,
 }: CursorPromptResultBatcherOptions): CursorPromptResultBatcher {
   let visibleResult = resultRef.current;
-  let pendingFrame: number | null = null;
-  let pendingTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   const publishVisibleResult = () => {
     const nextResult = resultRef.current;
@@ -56,32 +44,17 @@ export function createCursorPromptResultBatcher({
     setVisibleResult(nextResult);
   };
 
-  const cancelPendingFlush = () => {
-    if (pendingFrame !== null) {
-      cancelFrame?.(pendingFrame);
-      pendingFrame = null;
-    }
-    if (pendingTimer !== null) {
-      clearTimer(pendingTimer);
-      pendingTimer = null;
-    }
-  };
-
-  const runScheduledFlush = () => {
-    pendingFrame = null;
-    pendingTimer = null;
-    publishVisibleResult();
-  };
+  const scheduler = createStreamFlushScheduler(publishVisibleResult, {
+    requestFrame,
+    cancelFrame: cancelFrame as ((handle: unknown) => void) | undefined,
+    setTimer,
+    clearTimer,
+    flushDelayMs,
+    isDocumentHidden,
+  });
 
   const scheduleFlush = () => {
-    if (pendingFrame !== null || pendingTimer !== null) return;
-
-    if (requestFrame) {
-      pendingFrame = requestFrame(runScheduledFlush);
-      return;
-    }
-
-    pendingTimer = setTimer(runScheduledFlush, flushDelayMs);
+    scheduler.schedule();
   };
 
   return {
@@ -91,16 +64,16 @@ export function createCursorPromptResultBatcher({
       scheduleFlush();
     },
     flush() {
-      cancelPendingFlush();
+      scheduler.cancel();
       publishVisibleResult();
     },
     reset(nextResult = '') {
-      cancelPendingFlush();
+      scheduler.cancel();
       resultRef.current = nextResult;
       visibleResult = nextResult;
       setVisibleResult(nextResult);
     },
-    cancelPendingFlush,
-    dispose: cancelPendingFlush,
+    cancelPendingFlush: scheduler.cancel,
+    dispose: scheduler.cancel,
   };
 }
