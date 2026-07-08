@@ -19,6 +19,36 @@ function sourceWindow(source, anchor, radius = 900) {
 }
 
 test('selected-item scrolls do not queue smooth animations', () => {
+  const listSelectionScroll = sourceWindow(
+    readRepoFile('src/renderer/src/raycast-api/list-runtime.tsx'),
+    'const rowIdx = itemIdxToRowIdxRef.current[selectedIdx]'
+  );
+  assert.match(
+    listSelectionScroll,
+    /el\.scrollTo\(\{\s*top,\s*behavior:\s*'auto'\s*\}\);/,
+    'Raycast list selection correction should scroll instantly to the selected virtual row'
+  );
+  assert.match(
+    listSelectionScroll,
+    /el\.scrollTo\(\{\s*top:\s*top \+ rowH - el\.clientHeight,\s*behavior:\s*'auto'\s*\}\);/,
+    'Raycast list selection correction should scroll instantly when the selected virtual row is below the viewport'
+  );
+  assert.doesNotMatch(
+    listSelectionScroll,
+    /querySelector<HTMLElement>\(`\[data-idx="\$\{selectedIdx\}"\]`\)/,
+    'Raycast list selection correction must not rely on virtualized selected cells being mounted'
+  );
+  assert.doesNotMatch(
+    listSelectionScroll,
+    /scrollIntoView/,
+    'Raycast list selection correction must use virtual row offsets for large jumps'
+  );
+  assert.doesNotMatch(
+    listSelectionScroll,
+    /behavior:\s*['"]smooth['"]/,
+    'Raycast list selection correction must not queue smooth scroll animations'
+  );
+
   const gridSelectionScroll = sourceWindow(
     readRepoFile('src/renderer/src/raycast-api/grid-runtime.tsx'),
     'querySelector(`[data-idx="${selectedIdx}"]`)'
