@@ -320,3 +320,33 @@ test('useFetch refetches when a function URL resolves to a new request input', a
 
   host.unmount();
 });
+
+test('useFetch does not loop when a function URL resolves non-deterministically', async () => {
+  const pending = [];
+  const requestedUrls = [];
+  let nonce = 0;
+
+  windowShim.electron.httpRequest = (request) => {
+    requestedUrls.push(request.url);
+    const run = deferred();
+    pending.push(run);
+    return run.promise;
+  };
+
+  const host = new HookHost(() => useFetch(() => `https://api.test/search?nonce=${nonce++}`));
+
+  host.render();
+  await flushAsync();
+  assert.equal(pending.length, 1);
+  assert.deepEqual(requestedUrls, ['https://api.test/search?nonce=0']);
+
+  pending[0].resolve(httpResponse({ value: 'loaded' }));
+  await flushAsync();
+
+  assert.deepEqual(host.output.data, { value: 'loaded' });
+  assert.equal(host.output.isLoading, false);
+  assert.equal(pending.length, 1);
+  assert.deepEqual(requestedUrls, ['https://api.test/search?nonce=0']);
+
+  host.unmount();
+});
