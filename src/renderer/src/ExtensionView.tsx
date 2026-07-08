@@ -3614,6 +3614,8 @@ export function createExtensionLifecycleScope(
   const nativeClearTimeout = hostWindow.clearTimeout.bind(hostWindow);
   const nativeRequestAnimationFrame = hostWindow.requestAnimationFrame.bind(hostWindow);
   const nativeCancelAnimationFrame = hostWindow.cancelAnimationFrame.bind(hostWindow);
+  let scopedWindow: any;
+  let scopedDocument: any;
 
   const trackInterval = (handler: TimerHandler, timeout?: number, ...args: any[]) => {
     const id = nativeSetInterval(handler as any, timeout as any, ...args);
@@ -3635,14 +3637,18 @@ export function createExtensionLifecycleScope(
     }
   };
   const runTimeoutHandler = (handler: TimerHandler, thisArg: any, callbackArgs: any[]) => {
+    const scopedThis = scopedWindow ?? thisArg;
     if (typeof handler === 'function') {
-      return handler.apply(thisArg, callbackArgs);
+      return handler.apply(scopedThis, callbackArgs);
     }
     const source = String(handler);
-    if (typeof hostWindow.eval === 'function') {
-      return hostWindow.eval(source);
-    }
-    return Function(source).call(thisArg);
+    return Function('window', 'self', 'globalThis', 'document', source).call(
+      scopedThis,
+      scopedWindow ?? hostWindow,
+      scopedWindow ?? hostWindow,
+      scopedWindow ?? hostWindow,
+      scopedDocument ?? hostDocument,
+    );
   };
   const trackTimeout = (handler: TimerHandler, timeout?: number, ...args: any[]) => {
     let id: ExtensionTimerHandle | undefined;
@@ -3672,7 +3678,7 @@ export function createExtensionLifecycleScope(
     let id: ExtensionTimerHandle | undefined;
     const wrappedCallback = function (this: any, timestamp: DOMHighResTimeStamp) {
       untrackRaf(id);
-      callback.call(this, timestamp);
+      callback.call(scopedWindow ?? this, timestamp);
     };
     id = nativeRequestAnimationFrame(wrappedCallback);
     registry?.rafs.add(id);
@@ -3696,8 +3702,6 @@ export function createExtensionLifecycleScope(
     cancelAnimationFrame: trackCancelRaf,
   };
 
-  let scopedWindow: any;
-  let scopedDocument: any;
   scopedDocument = createScopedHostProxy(
     hostDocument,
     registry,
@@ -4250,49 +4254,24 @@ function loadExtensionExport(
       throw new Error(`Unsupported dynamic import in extension runtime: ${id}`);
     };
 
-    // Sandboxed timer APIs — passed as named parameters so the extension's
-    // bundle resolves bare `setInterval`/`setTimeout`/`requestAnimationFrame`
-    // references against this scope instead of the host `window`. Handles are
-    // tracked in `timerRegistry` so the consumer (ExtensionView) can clear
-    // anything still pending on unmount, defending against extensions that
-    // forget their own cleanup (e.g. raycast/timers).
-    const trackInterval = (cb: any, ms?: any, ...rest: any[]) => {
-      const id = window.setInterval(cb as any, ms as any, ...rest);
-      timerRegistry?.intervals.add(id);
-      return id;
-    };
-    const trackClearInterval = (id: any) => {
-      if (typeof id === 'number') timerRegistry?.intervals.delete(id);
-      window.clearInterval(id);
-    };
-    const trackTimeout = (cb: any, ms?: any, ...rest: any[]) => {
-      const id = window.setTimeout(cb as any, ms as any, ...rest);
-      timerRegistry?.timeouts.add(id);
-      return id;
-    };
-    const trackClearTimeout = (id: any) => {
-      if (typeof id === 'number') timerRegistry?.timeouts.delete(id);
-      window.clearTimeout(id);
-    };
-    const trackRaf = (cb: FrameRequestCallback) => {
-      const id = window.requestAnimationFrame(cb);
-      timerRegistry?.rafs.add(id);
-      return id;
-    };
-    const trackCancelRaf = (id: any) => {
-      if (typeof id === 'number') timerRegistry?.rafs.delete(id);
-      window.cancelAnimationFrame(id);
-    };
-    // setImmediate / clearImmediate are Node-isms not on `window` — polyfill
-    // via setTimeout(0) and route through the same registry.
-    const trackSetImmediate = (cb: Function, ...args: any[]) =>
-      trackTimeout(() => cb(...args), 0);
-    const trackClearImmediate = (id: any) => trackClearTimeout(id);
+    const lifecycleScope = createExtensionLifecycleScope(timerRegistry);
+    const {
+      scopedWindow,
+      scopedDocument,
+      setImmediate: trackSetImmediate,
+      clearImmediate: trackClearImmediate,
+      setInterval: trackInterval,
+      clearInterval: trackClearInterval,
+      setTimeout: trackTimeout,
+      clearTimeout: trackClearTimeout,
+      requestAnimationFrame: trackRaf,
+      cancelAnimationFrame: trackCancelRaf,
+    } = lifecycleScope;
 
     // Execute the CJS bundle in a function scope.
     // We pass all the standard CJS arguments plus `process`, `Buffer`,
-    // and `global` to ensure they are always in scope even when the
-    // extension code references them without importing.
+    // `global`, and scoped browser globals to ensure they are always in scope
+    // even when the extension code references them without importing.
     // Browser-detection bypass — the OpenAI v4 SDK (and several other
     // "isomorphic" SDKs) refuse to start unless the caller passes
     // `dangerouslyAllowBrowser: true`. The check is
@@ -4313,6 +4292,9 @@ function loadExtensionExport(
       'Buffer',
       'global',
       'globalThis',
+      'window',
+      'self',
+      'document',
       'setImmediate',
       'clearImmediate',
       'setInterval',
@@ -4334,8 +4316,11 @@ function loadExtensionExport(
       '/extension',
       bundleProcess,
       bundleBuffer,
-      globalThis,
-      globalThis,
+      scopedWindow,
+      scopedWindow,
+      scopedWindow,
+      scopedWindow,
+      scopedDocument,
       trackSetImmediate,
       trackClearImmediate,
       trackInterval,
