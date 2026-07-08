@@ -67,6 +67,7 @@ test("package manager parity passes for npm lockfile and matching installed pack
   const result = checkPackageManagerParity({
     rootDir,
     env: {
+      CI: "true",
       npm_config_user_agent: "npm/11.12.1 node/v22.22.3 darwin arm64 workspaces/false",
       npm_execpath: "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js",
     },
@@ -74,6 +75,8 @@ test("package manager parity passes for npm lockfile and matching installed pack
 
   assert.equal(result.ok, true);
   assert.equal(result.checkedInstalledPackages, 2);
+  assert.equal(result.strictInstalledVersions, true);
+  assert.equal(result.expectedPackageManager, "npm@11.12.1");
 });
 
 test("package manager parity blocks pnpm lifecycle execution", () => {
@@ -121,8 +124,48 @@ test("package manager parity catches installed package versions that differ from
     version: "1.104.21",
   });
 
-  const result = checkPackageManagerParity({ rootDir, env: {} });
+  const result = checkPackageManagerParity({ rootDir, env: { CI: "true" } });
 
   assert.equal(result.ok, false);
   assert.match(result.failures.join("\n"), /@raycast\/api is installed at 1\.104\.21/);
+});
+
+test("package manager parity skips installed package version drift for local lifecycle commands", () => {
+  const rootDir = createFixture();
+  writeJson(path.join(rootDir, "node_modules/@raycast/api/package.json"), {
+    name: "@raycast/api",
+    version: "1.104.21",
+  });
+
+  const result = checkPackageManagerParity({ rootDir, env: {} });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.checkedInstalledPackages, 0);
+  assert.equal(result.strictInstalledVersions, false);
+});
+
+test("package manager parity reads the expected npm version from package.json", () => {
+  const rootDir = createFixture();
+  const packageJsonPath = path.join(rootDir, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  packageJson.packageManager = "npm@11.13.0";
+  writeJson(packageJsonPath, packageJson);
+
+  const result = checkPackageManagerParity({ rootDir, env: {} });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.expectedPackageManager, "npm@11.13.0");
+});
+
+test("package manager parity requires packageManager to name npm", () => {
+  const rootDir = createFixture();
+  const packageJsonPath = path.join(rootDir, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  packageJson.packageManager = "pnpm@11.7.0";
+  writeJson(packageJsonPath, packageJson);
+
+  const result = checkPackageManagerParity({ rootDir, env: {} });
+
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /packageManager must use npm/);
 });

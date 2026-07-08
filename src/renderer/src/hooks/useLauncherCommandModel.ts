@@ -349,7 +349,6 @@ export function useLauncherCommandModel({
       }),
     [sourceCommands, hiddenListOnlyCommandIds, hasSearchQuery, t, webSearchDefaultBangKey, effectiveSearchBangs]
   );
-
   const fileResultCommands = useMemo<CommandInfo[]>(
     () =>
       launcherFileResults.map((result) => {
