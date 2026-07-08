@@ -3,36 +3,99 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
-const USE_FORM_PATH = 'src/renderer/src/raycast-api/hooks/use-form.ts';
-const FORM_RUNTIME_STATE_PATH = 'src/renderer/src/raycast-api/form-runtime-state.ts';
+const require = createRequire(import.meta.url);
+const ts = require('typescript');
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const USE_FORM_PATH = path.join(repoRoot, 'src/renderer/src/raycast-api/hooks/use-form.ts');
+const FORM_RUNTIME_STATE_PATH = path.join(repoRoot, 'src/renderer/src/raycast-api/form-runtime-state.ts');
 const FIELD_CHANGE_COUNTS = [10, 100, 1000];
 
 function importStateHelpers() {
   const source = fs.readFileSync(FORM_RUNTIME_STATE_PATH, 'utf8');
-  const executableSource = source
-    .replace(/export type FormErrorMap = Record<string, string>;\n\n/, '')
-    .replace(/export function /g, 'function ')
-    .replace(/: FormErrorMap/g, '')
-    .replace(/: string/g, '');
-
-  const context = {};
-  vm.runInNewContext(`${executableSource}\nthis.clearFormFieldError = clearFormFieldError;\nthis.setFormFieldError = setFormFieldError;`, context);
+  const transpiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+    fileName: 'form-runtime-state.ts',
+  });
+  const context = { exports: {} };
+  vm.runInNewContext(transpiled.outputText, context);
   return {
-    clearFormFieldError: context.clearFormFieldError,
-    setFormFieldError: context.setFormFieldError,
+    clearFormFieldError: context.exports.clearFormFieldError,
+    setFormFieldError: context.exports.setFormFieldError,
   };
 }
 
+function parseUseFormSource() {
+  return ts.createSourceFile(
+    USE_FORM_PATH,
+    fs.readFileSync(USE_FORM_PATH, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+}
+
+function isIdentifier(node, name) {
+  return ts.isIdentifier(node) && node.text === name;
+}
+
+function walk(node, visitor) {
+  visitor(node);
+  ts.forEachChild(node, (child) => walk(child, visitor));
+}
+
+function importsStateHelpers(sourceFile) {
+  let found = false;
+  walk(sourceFile, (node) => {
+    if (found || !ts.isImportDeclaration(node)) return;
+    if (!ts.isStringLiteral(node.moduleSpecifier) || node.moduleSpecifier.text !== '../form-runtime-state') return;
+    const namedBindings = node.importClause?.namedBindings;
+    if (!namedBindings || !ts.isNamedImports(namedBindings)) return;
+    const importedNames = new Set(namedBindings.elements.map((element) => element.name.text));
+    found = importedNames.has('clearFormFieldError') && importedNames.has('setFormFieldError');
+  });
+  return found;
+}
+
+function callContainsHelper(node, helperName) {
+  let found = false;
+  walk(node, (child) => {
+    if (
+      !found &&
+      ts.isCallExpression(child) &&
+      isIdentifier(child.expression, helperName)
+    ) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+function countSetErrorsHelperUses(sourceFile, helperName) {
+  let count = 0;
+  walk(sourceFile, (node) => {
+    if (!ts.isCallExpression(node) || !isIdentifier(node.expression, 'setErrors')) return;
+    const updater = node.arguments[0];
+    if (!updater) return;
+    if (callContainsHelper(updater, helperName)) count += 1;
+  });
+  return count;
+}
+
 function analyzeUseFormSource() {
-  const source = fs.readFileSync(USE_FORM_PATH, 'utf8');
+  const sourceFile = parseUseFormSource();
   return {
-    importsStateHelpers: source.includes("from '../form-runtime-state'"),
-    usesClearHelper: source.includes('clearFormFieldError(prev, key as string)'),
-    usesSetValidationErrorHelper: source.includes('setFormFieldError(prev, key as string, error)'),
-    usesBlurSetHelper: source.includes('setFormFieldError(prev, key as string, err)'),
-    removedCloneDeleteClear: !source.includes('const next = { ...prev };\n      delete next[key];\n      return next;'),
+    importsStateHelpers: importsStateHelpers(sourceFile),
+    clearHelperSetErrorsCalls: countSetErrorsHelperUses(sourceFile, 'clearFormFieldError'),
+    setHelperSetErrorsCalls: countSetErrorsHelperUses(sourceFile, 'setFormFieldError'),
   };
 }
 
@@ -99,8 +162,7 @@ if (process.argv.includes('--report')) {
   test('useForm setValue skips error state updates when the field has no error', () => {
     const source = analyzeUseFormSource();
     assert.equal(source.importsStateHelpers, true, 'useForm should import the guarded error state helpers');
-    assert.equal(source.usesClearHelper, true, 'useForm setValue should use the guarded error clear helper');
-    assert.equal(source.removedCloneDeleteClear, true, 'useForm setValue should not clone errors for no-op clears');
+    assert.equal(source.clearHelperSetErrorsCalls, 1, 'useForm setValue should use the guarded error clear helper');
 
     for (const metric of getMetrics().noExistingErrors) {
       assert.equal(metric.beforeIdentityChanges, metric.fieldChanges, `${metric.fieldChanges} previous no-error changes cloned errors every time`);
@@ -117,8 +179,7 @@ if (process.argv.includes('--report')) {
 
   test('useForm validation error writes skip same-value updates but publish changed errors', () => {
     const source = analyzeUseFormSource();
-    assert.equal(source.usesSetValidationErrorHelper, true, 'useForm setValidationError should use the guarded error set helper');
-    assert.equal(source.usesBlurSetHelper, true, 'useForm onBlur validation should use the guarded error set helper');
+    assert.equal(source.setHelperSetErrorsCalls, 2, 'useForm validation paths should use the guarded error set helper');
 
     const metrics = getMetrics();
     assert.equal(metrics.setSameError.changedIdentity, false, 'setting the same error should keep the previous errors object');
