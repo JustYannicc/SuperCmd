@@ -40,6 +40,7 @@ export function createAiChatStreamBuffer({
     cancelFrame: undefined,
     setTimer: (callback, delayMs) => scheduleFlush(callback, delayMs) as ReturnType<typeof globalThis.setTimeout>,
     clearTimer: (handle) => cancelFlush(handle),
+    useAnimationFrame: false,
   });
 
   const flushNow = () => {

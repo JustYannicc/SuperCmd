@@ -11,7 +11,7 @@ const { buildSync } = require('esbuild');
 
 const CHUNK_COUNT = 240;
 
-function loadTsModule(filePath) {
+function loadTsModule(filePath, context = {}) {
   const resolvedPath = path.resolve(filePath);
   const bundled = buildSync({
     bundle: true,
@@ -30,6 +30,7 @@ function loadTsModule(filePath) {
     console,
     setTimeout,
     clearTimeout,
+    ...context,
   }, { filename: resolvedPath });
   return module.exports;
 }
@@ -218,6 +219,36 @@ test('scheduled flush exposes partial streaming content', () => {
   assert.equal(harness.flushScheduled(), true);
   assert.equal(harness.messages[1].content, 'Hello world');
   assert.equal(harness.counters.visibleUpdates, 2);
+});
+
+test('chat stream batching preserves timer scheduling when requestAnimationFrame exists', () => {
+  let frameRequests = 0;
+  const browserLikeModule = loadTsModule('src/renderer/src/utils/ai-chat-stream-buffer.ts', {
+    window: {
+      document: { hidden: false },
+      requestAnimationFrame(callback) {
+        frameRequests += 1;
+        return setTimeout(callback, 0);
+      },
+      cancelAnimationFrame(handle) {
+        clearTimeout(handle);
+      },
+    },
+    document: { hidden: false },
+  });
+  const scheduler = createManualScheduler();
+  const buffer = browserLikeModule.createAiChatStreamBuffer({
+    flushIntervalMs: browserLikeModule.AI_CHAT_STREAM_FLUSH_MS,
+    onFlush() {},
+    scheduleFlush: scheduler.schedule,
+    cancelFlush: scheduler.cancel,
+  });
+
+  buffer.append('visible browser chunk');
+
+  assert.equal(frameRequests, 0);
+  assert.equal(scheduler.size, 1);
+  buffer.cancel();
 });
 
 test('completion forces final flush before persistence', () => {
