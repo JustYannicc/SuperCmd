@@ -358,13 +358,12 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
       return () => {
         mountedRef.current = false;
         pendingRef.current = false;
-        registryRef.current.clear();
         lastSnapshotRef.current = '';
       };
     }, []);
 
     const scheduleUpdate = useCallback(() => {
-      if (!mountedRef.current || pendingRef.current) return;
+      if (pendingRef.current) return;
 
       pendingRef.current = true;
       queueMicrotask(() => {
@@ -385,7 +384,6 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
     const registryAPI = useMemo<ActionRegistryAPI>(
       () => ({
         register(id, data) {
-          if (!mountedRef.current) return;
           const existing = registryRef.current.get(id);
           if (existing) {
             existing.title = data.title;
@@ -401,7 +399,6 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
           scheduleUpdate();
         },
         unregister(id) {
-          if (!mountedRef.current) return;
           if (!registryRef.current.has(id)) return;
           registryRef.current.delete(id);
           scheduleUpdate();

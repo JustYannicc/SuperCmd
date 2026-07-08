@@ -55,12 +55,11 @@ export function useListRegistry() {
     return () => {
       mountedRef.current = false;
       pendingRef.current = false;
-      registryRef.current.clear();
     };
   }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
-    if (!mountedRef.current || pendingRef.current) return;
+    if (pendingRef.current) return;
     pendingRef.current = true;
     queueMicrotask(() => {
       if (!mountedRef.current) {
@@ -93,7 +92,6 @@ export function useListRegistry() {
 
   const registryAPI = useMemo<ListRegistryAPI>(() => ({
     set(id, data) {
-      if (!mountedRef.current) return;
       const existing = registryRef.current.get(id);
       if (existing) {
         // Hot path: an unrelated re-render (e.g. hover changing selection)
@@ -114,7 +112,6 @@ export function useListRegistry() {
       scheduleRegistryUpdate();
     },
     delete(id) {
-      if (!mountedRef.current) return;
       if (!registryRef.current.has(id)) return;
       registryRef.current.delete(id);
       scheduleRegistryUpdate();
