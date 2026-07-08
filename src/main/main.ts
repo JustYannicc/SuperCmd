@@ -19404,8 +19404,11 @@ app.on('before-quit', (event: any) => {
   prepareWindowsForAppQuit();
 
   const updateRestartInProgress = Boolean(appUpdaterRestartPromise) || appUpdaterStatusSnapshot.state === 'restarting';
-  const shouldFlushNotes = hasPendingNotesSave();
-  const shouldFlushClipboard = !updateRestartInProgress && hasPendingClipboardHistoryWrites();
+  // Update restarts flush async storage before quitAndInstall(); do not intercept
+  // the updater's own before-quit after that handoff has started.
+  const shouldBypassAsyncStorageQuitFlush = updateRestartInProgress;
+  const shouldFlushNotes = !shouldBypassAsyncStorageQuitFlush && hasPendingNotesSave();
+  const shouldFlushClipboard = !shouldBypassAsyncStorageQuitFlush && hasPendingClipboardHistoryWrites();
 
   if (
     pendingAsyncStorageQuitFlushComplete ||

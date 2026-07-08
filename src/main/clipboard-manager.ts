@@ -88,6 +88,8 @@ export interface ClipboardItem {
 
 const MAX_ITEMS = 1000;
 const POLL_INTERVAL = 1000; // 1 second
+// History writes are intentionally debounced off the clipboard poll path;
+// graceful quit and destructive history actions flush queued writes.
 const HISTORY_SAVE_DEBOUNCE_MS = 250;
 const MAX_TEXT_LENGTH = 100_000; // Don't store huge text items
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB max per image
