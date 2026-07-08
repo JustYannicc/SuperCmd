@@ -52,5 +52,8 @@ jobs:
       - name: Build main process
         run: npm run build:main
 
+      - name: Typecheck renderer
+        run: npm exec -- tsc -p tsconfig.renderer.json --noEmit
+
       - name: Build renderer
         run: npm run build:renderer

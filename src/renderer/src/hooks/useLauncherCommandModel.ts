@@ -187,7 +187,7 @@ function getFileDepthPenalty(result: IndexedFileSearchResult): number {
 
 type BrowserLauncherProfile = {
   id?: string;
-  browserId?: BrowserSearchSource;
+  browserId?: BrowserSearchSource | string;
   displayName: string;
   detectedName?: string;
   profileId: string;
