@@ -175,6 +175,28 @@ test('legacy invalidation path starts structural discovery from stale fallback',
   assert.equal(commandsModule.__getCommandDiscoveryStartCountForTesting(), 1);
 });
 
+test('command metadata fallback invalidates when the target is absent from a fresh cache', async () => {
+  commandsModule.__resetCommandCacheForTesting();
+  let structuralDiscoveryRuns = 0;
+  commandsModule.__setCommandDiscoveryRunnerForTesting(async () => {
+    structuralDiscoveryRuns += 1;
+    return makeCommands();
+  });
+  const commands = makeCommands(1_000);
+  seedFreshCache(commands);
+
+  const patchResult = commandsModule.applyCommandMetadataUpdateWithCacheFallback('missing-extension-command', {
+    subtitle: 'Queued subtitle',
+  });
+  const returnedCommands = await commandsModule.getAvailableCommands();
+
+  assert.equal(patchResult.matchedCommands, 0);
+  assert.equal(patchResult.changedCommands, 0);
+  assert.equal(returnedCommands, commands);
+  assert.equal(structuralDiscoveryRuns, 1);
+  assert.equal(commandsModule.__getCommandDiscoveryStartCountForTesting(), 1);
+});
+
 test('command metadata cache benchmark', async () => {
   const commandCount = 5_000;
   const iterations = 60;

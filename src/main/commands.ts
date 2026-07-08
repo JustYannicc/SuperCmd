@@ -371,6 +371,17 @@ export function applyCommandMetadataUpdate(
   };
 }
 
+export function applyCommandMetadataUpdateWithCacheFallback(
+  commandId: string,
+  metadata: CommandRuntimeMetadata
+): CommandMetadataPatchResult {
+  const patchResult = applyCommandMetadataUpdate(commandId, metadata);
+  if (patchResult.matchedCommands === 0) {
+    invalidateCache();
+  }
+  return patchResult;
+}
+
 export function __seedCommandCacheForTesting(
   commands: CommandInfo[],
   options: { cacheTimestamp?: number; staleCommandsFallback?: CommandInfo[] | null } = {}

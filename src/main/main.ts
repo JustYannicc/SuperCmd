@@ -21,7 +21,17 @@ import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { createAerospaceWorkspaceMover } from './aerospace-workspace';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
 import { createLocalAsrHelperStatusProbeCache } from './local-model-status-probe';
-import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow, applyCommandMetadataUpdate, refreshCommandsForExtensionChange } from './commands';
+import {
+  getAvailableCommands,
+  executeCommand,
+  invalidateCache,
+  initCommandsCache,
+  getInflightDiscovery,
+  refreshCommandsNow,
+  applyCommandMetadataUpdate,
+  applyCommandMetadataUpdateWithCacheFallback,
+  refreshCommandsForExtensionChange,
+} from './commands';
 import {
   loadSettings,
   saveSettings,
@@ -15421,8 +15431,9 @@ app.whenReady().then(async () => {
 
         saveSettings({ commandMetadata: settings.commandMetadata });
 
-        // Notify all windows to refresh command list
-        const patchResult = applyCommandMetadataUpdate(commandId, metadata);
+        // Patch the live command list when present; otherwise invalidate so the
+        // next command fetch re-applies the persisted metadata after discovery.
+        const patchResult = applyCommandMetadataUpdateWithCacheFallback(commandId, metadata);
         if (patchResult.changedCommands > 0) {
           broadcastCommandsUpdated();
         }
