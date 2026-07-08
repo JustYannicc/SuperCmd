@@ -111,6 +111,7 @@ const { scoreRootSearchFields } = ranking;
 const COMMAND_COUNT = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_COMMANDS || 2000);
 const ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_ITERATIONS || 1);
 const WARMUP_ITERATIONS = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_WARMUPS || 0);
+const INDEXED_SPEEDUP_MIN = Number(process.env.SUPERCMD_ROOT_SEARCH_PERF_INDEXED_SPEEDUP_MIN || 0);
 
 const QUERIES = [
   'notes',
@@ -265,25 +266,24 @@ function indexedRootCommandMatches(index, query) {
     }));
 }
 
-function signature(matches) {
+function orderedSignature(matches) {
   return matches
-    .map((match) => `${match.id}:${match.matchKind}:${match.matchScore}`)
-    .sort();
+    .map((match) => `${match.id}:${match.matchKind}:${match.matchScore}`);
 }
 
 function assertSameRootCommandMatches(commands, aliases) {
   const index = createRootCommandScoreIndex(commands, aliases);
   for (const query of QUERIES) {
-    const legacySignature = signature(legacyRootCommandMatches(commands, query, aliases));
+    const legacySignature = orderedSignature(legacyRootCommandMatches(commands, query, aliases));
     assert.deepEqual(
-      signature(optimizedRootCommandMatches(commands, query, aliases)),
+      orderedSignature(optimizedRootCommandMatches(commands, query, aliases)),
       legacySignature,
-      `root command matches changed for query "${query}"`
+      `root command match order changed for query "${query}"`
     );
     assert.deepEqual(
-      signature(indexedRootCommandMatches(index, query)),
+      orderedSignature(indexedRootCommandMatches(index, query)),
       legacySignature,
-      `indexed root command matches changed for query "${query}"`
+      `indexed root command match order changed for query "${query}"`
     );
   }
 }
@@ -373,3 +373,10 @@ console.log(`${compile.label}: median=${compile.median.toFixed(2)}ms min=${compi
 console.log(`legacy-vs-optimized-speedup=${optimizedSpeedup.toFixed(2)}x`);
 console.log(`legacy-vs-indexed-speedup=${indexedSpeedup.toFixed(2)}x`);
 console.log(`optimized-vs-indexed-speedup=${indexedVsOptimizedSpeedup.toFixed(2)}x`);
+
+if (INDEXED_SPEEDUP_MIN > 0) {
+  assert.ok(
+    indexedSpeedup >= INDEXED_SPEEDUP_MIN,
+    `indexed root command scoring should be at least ${INDEXED_SPEEDUP_MIN.toFixed(2)}x faster than legacy, got ${indexedSpeedup.toFixed(2)}x`
+  );
+}

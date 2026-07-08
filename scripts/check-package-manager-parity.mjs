@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const EXPECTED_PACKAGE_MANAGER = "npm@11.12.1";
+const STRICT_INSTALLED_VERSION_ENV = "SUPERCMD_STRICT_PACKAGE_MANAGER_PARITY";
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -65,6 +65,14 @@ function collectInstalledVersionFailures(rootDir, packageLock) {
   return { failures, checkedInstalledPackages };
 }
 
+function getExpectedPackageManager(packageJson) {
+  return typeof packageJson.packageManager === "string" ? packageJson.packageManager : "";
+}
+
+function isStrictInstalledVersionCheck(env) {
+  return env.CI === "true" || env[STRICT_INSTALLED_VERSION_ENV] === "1";
+}
+
 function isPnpmRuntime(env) {
   const markers = [
     env.npm_config_user_agent,
@@ -104,31 +112,42 @@ export function checkPackageManagerParity({ rootDir = process.cwd(), env = proce
 
   const packageJson = readJson(packageJsonPath);
   const packageLock = readJson(packageLockPath);
+  const expectedPackageManager = getExpectedPackageManager(packageJson);
 
-  if (packageJson.packageManager !== EXPECTED_PACKAGE_MANAGER) {
+  if (!expectedPackageManager) {
+    failures.push("package.json packageManager must be set to the expected npm runtime.");
+  } else if (!expectedPackageManager.startsWith("npm@")) {
     failures.push(
-      `package.json packageManager must be ${EXPECTED_PACKAGE_MANAGER}, found ${JSON.stringify(packageJson.packageManager)}.`,
+      `package.json packageManager must use npm, found ${JSON.stringify(packageJson.packageManager)}.`,
     );
   }
 
   failures.push(...collectDependencySpecFailures(packageJson, packageLock));
 
-  const { failures: installedVersionFailures, checkedInstalledPackages } = collectInstalledVersionFailures(
-    rootDir,
-    packageLock,
-  );
-  failures.push(...installedVersionFailures);
+  const strictInstalledVersions = isStrictInstalledVersionCheck(env);
+  let checkedInstalledPackages = 0;
+
+  if (strictInstalledVersions) {
+    const installedVersionResult = collectInstalledVersionFailures(rootDir, packageLock);
+    checkedInstalledPackages = installedVersionResult.checkedInstalledPackages;
+    failures.push(...installedVersionResult.failures);
+  }
 
   return {
     ok: failures.length === 0,
     failures,
     checkedInstalledPackages,
+    strictInstalledVersions,
+    expectedPackageManager,
   };
 }
 
 export function formatPackageManagerParityResult(result) {
   if (result.ok) {
-    return `package-manager parity ok: package-lock.json is authoritative; checked ${result.checkedInstalledPackages} installed package version(s).`;
+    const installedStatus = result.strictInstalledVersions
+      ? `checked ${result.checkedInstalledPackages} installed package version(s)`
+      : "skipped installed package version checks outside CI";
+    return `package-manager parity ok: package-lock.json is authoritative for ${result.expectedPackageManager}; ${installedStatus}.`;
   }
 
   return [

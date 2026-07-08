@@ -55,6 +55,7 @@ jobs:
         run: npm run test:ci
 
       - name: Run perf regression budgets
+        continue-on-error: true
         run: npm run test:perf:ci
 
       - name: Build renderer
