@@ -53,7 +53,6 @@ type IndexSnapshot = {
   entries: IndexedEntry[];
   prefixToEntryIds: Map<string, number[]>;
   pathToEntryId: Map<string, number>;
-  deletedNormalizedNameCounts?: Map<string, number>;
   builtAt: number;
 };
 
@@ -269,24 +268,15 @@ function addPrefixIndexValue(prefixToEntryIds: Map<string, number[]>, key: strin
   bucket.push(entryId);
 }
 
-function addDeletedNameCount(snapshot: IndexSnapshot, normalizedName: string): void {
-  if (!normalizedName) return;
-  if (!snapshot.deletedNormalizedNameCounts) {
-    snapshot.deletedNormalizedNameCounts = new Map<string, number>();
+function ensurePrefixIndexValue(prefixToEntryIds: Map<string, number[]>, key: string, entryId: number): void {
+  if (!key) return;
+  const bucket = prefixToEntryIds.get(key);
+  if (!bucket) {
+    prefixToEntryIds.set(key, [entryId]);
+    return;
   }
-  snapshot.deletedNormalizedNameCounts.set(
-    normalizedName,
-    (snapshot.deletedNormalizedNameCounts.get(normalizedName) || 0) + 1
-  );
-}
-
-function removeDeletedNameCount(snapshot: IndexSnapshot, normalizedName: string): void {
-  if (!normalizedName || !snapshot.deletedNormalizedNameCounts) return;
-  const nextCount = (snapshot.deletedNormalizedNameCounts.get(normalizedName) || 0) - 1;
-  if (nextCount <= 0) {
-    snapshot.deletedNormalizedNameCounts.delete(normalizedName);
-  } else {
-    snapshot.deletedNormalizedNameCounts.set(normalizedName, nextCount);
+  if (!bucket.includes(entryId)) {
+    bucket.push(entryId);
   }
 }
 
@@ -363,22 +353,28 @@ function indexEntry(
   snapshot: IndexSnapshot,
   entry: Omit<IndexedEntry, 'normalizedName' | 'normalizedPath' | 'normalizedTildePath' | 'compactName' | 'tokens' | 'pathTokens' | 'deleted'>
 ): void {
+  const entryPath = normalizeIndexedPath(entry.path);
+  if (!entryPath) return;
+  const parentPath = normalizeIndexedPath(entry.parentPath) || path.dirname(entryPath);
   const normalizedName = normalizeSearchText(entry.name);
   if (!normalizedName) return;
-  const normalizedPath = normalizePathSearchText(entry.path);
+  const normalizedPath = normalizePathSearchText(entryPath);
   if (!normalizedPath) return;
   const normalizedTildePath = normalizePathSearchText(asTildePath(entry.path, configuredHomeDir));
 
-  const existingId = snapshot.pathToEntryId.get(entry.path);
+  const existingId = snapshot.pathToEntryId.get(entryPath);
   if (existingId !== undefined) {
     const existing = snapshot.entries[existingId];
     if (existing) {
-      if (existing.deleted) {
-        removeDeletedNameCount(snapshot, existing.normalizedName);
-      }
+      const wasDeleted = Boolean(existing.deleted);
       existing.deleted = false;
       existing.isDirectory = entry.isDirectory;
-      existing.parentPath = entry.parentPath;
+      existing.parentPath = parentPath;
+      if (wasDeleted) {
+        for (const key of getEntryPrefixIndexKeys(existing)) {
+          ensurePrefixIndexValue(snapshot.prefixToEntryIds, key, existingId);
+        }
+      }
       return;
     }
   }
@@ -386,12 +382,14 @@ function indexEntry(
   if (snapshot.entries.length >= MAX_INDEX_ENTRIES) return;
 
   const tokens = tokenizeSearchText(entry.name);
-  const pathTokens = tokenizeSearchText(entry.path);
+  const pathTokens = tokenizeSearchText(entryPath);
   const compactName = normalizedName.replace(/\s+/g, '');
   const entryId = snapshot.entries.length;
 
   const nextEntry: IndexedEntry = {
     ...entry,
+    path: entryPath,
+    parentPath,
     normalizedName,
     normalizedPath,
     normalizedTildePath,
@@ -400,7 +398,7 @@ function indexEntry(
     pathTokens,
   };
   snapshot.entries.push(nextEntry);
-  snapshot.pathToEntryId.set(entry.path, entryId);
+  snapshot.pathToEntryId.set(entryPath, entryId);
 
   for (const key of getEntryPrefixIndexKeys(nextEntry)) {
     addPrefixIndexValue(snapshot.prefixToEntryIds, key, entryId);
@@ -988,10 +986,14 @@ function hasDeletedPathAncestor(candidatePath: string, deletedPathSet: Set<strin
   return false;
 }
 
-function normalizeDeletedPath(candidatePath: string): string | null {
+function normalizeIndexedPath(candidatePath: string): string | null {
   const rawPath = String(candidatePath || '');
   if (!rawPath) return null;
   return path.resolve(rawPath);
+}
+
+function normalizeDeletedPath(candidatePath: string): string | null {
+  return normalizeIndexedPath(candidatePath);
 }
 
 function collapseNestedDeletedPaths(deletePaths: string[]): string[] {
@@ -1026,7 +1028,6 @@ function getDescendantPathPrefix(rootPath: string): string {
 function markEntryDeleted(snapshot: IndexSnapshot, entry: IndexedEntry, deletedEntries: IndexedEntry[]): void {
   if (entry.deleted) return;
   entry.deleted = true;
-  addDeletedNameCount(snapshot, entry.normalizedName);
   deletedEntries.push(entry);
 }
 
@@ -1081,6 +1082,29 @@ function tombstoneDeletedPaths(snapshot: IndexSnapshot, deletePaths: string[]): 
 
   markDescendantEntriesDeleted(snapshot, deletedRootPaths, deletedEntries);
   compactPrefixBucketsForEntries(snapshot, deletedEntries);
+}
+
+function isDeletedIndexedPathOrDescendant(snapshot: IndexSnapshot | null, candidatePath: string): boolean {
+  if (!snapshot) return false;
+  const normalizedPath = normalizeIndexedPath(candidatePath);
+  if (!normalizedPath) return false;
+
+  let currentPath = normalizedPath;
+  while (currentPath) {
+    const entryId = snapshot.pathToEntryId.get(currentPath);
+    if (entryId !== undefined) {
+      const entry = snapshot.entries[entryId];
+      if (entry?.deleted && (currentPath === normalizedPath || entry.isDirectory)) {
+        return true;
+      }
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) break;
+    currentPath = parentPath;
+  }
+
+  return false;
 }
 
 async function walkAddedDirectory(snapshot: IndexSnapshot, dirPath: string): Promise<void> {
@@ -1210,7 +1234,6 @@ export async function searchIndexedFiles(
   }
 
   const indexedResults: IndexedFileSearchResult[] = [];
-  let hasExactDeletedIndexMatch = false;
   const snapshot = activeIndex;
   if (snapshot) {
     if (pathLikeQuery) {
@@ -1266,12 +1289,7 @@ export async function searchIndexedFiles(
         for (const entryId of candidateIds) {
           const entry = snapshot.entries[entryId];
           if (!entry) continue;
-          if (entry.deleted) {
-            if (entry.normalizedName === normalizedQuery) {
-              hasExactDeletedIndexMatch = true;
-            }
-            continue;
-          }
+          if (entry.deleted) continue;
           const score = scoreEntryMatch(entry, normalizedQuery, terms);
           if (score <= 0) continue;
           scored.push({ entry, score });
@@ -1302,13 +1320,6 @@ export async function searchIndexedFiles(
     return indexedResults;
   }
   if (!configuredHomeDir) {
-    return indexedResults;
-  }
-  if (
-    !pathLikeQuery &&
-    indexedResults.length === 0 &&
-    (hasExactDeletedIndexMatch || Boolean(snapshot?.deletedNormalizedNameCounts?.has(normalizedQuery)))
-  ) {
     return indexedResults;
   }
   if (indexedResults.length >= limit) {
@@ -1358,6 +1369,7 @@ export async function searchIndexedFiles(
 
     const candidatePath = path.resolve(candidateRawPath);
     if (existingPaths.has(candidatePath)) continue;
+    if (isDeletedIndexedPathOrDescendant(snapshot, candidatePath)) continue;
     if (shouldSkipPathForSearch(candidatePath, configuredHomeDir)) continue;
 
     const candidateName = path.basename(candidatePath);

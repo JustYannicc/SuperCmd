@@ -293,6 +293,16 @@ function getRuntimeMetadataBaseSubtitle(command: CommandInfo): { known: boolean;
   return { known: false };
 }
 
+function restoreRuntimeMetadataBaseSubtitle(command: CommandInfo): void {
+  const baseSubtitle = getRuntimeMetadataBaseSubtitle(command);
+  if (!baseSubtitle.known) return;
+  if (baseSubtitle.subtitle) {
+    command.subtitle = baseSubtitle.subtitle;
+  } else {
+    delete command.subtitle;
+  }
+}
+
 function getStoredRuntimeSubtitle(
   command: CommandInfo,
   commandMetadata: CommandRuntimeMetadataStore
@@ -1885,6 +1895,7 @@ function rebuildCommandsWithFreshQuickLinks(
   baseCommands.forEach((command, index) => {
     if (isQuickLinkCommandId(command.id)) return;
     const cloned = cloneCommandForTargetedRefresh(command);
+    restoreRuntimeMetadataBaseSubtitle(cloned);
     if (index < insertionIndex) {
       beforeQuickLinks.push(cloned);
     } else {

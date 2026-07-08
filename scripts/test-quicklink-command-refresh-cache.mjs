@@ -242,6 +242,41 @@ test('quicklink command refresh swaps quicklinks without structural rediscovery'
   assert.equal(diskDocsCommand.iconDataUrl, undefined);
 });
 
+test('quicklink command refresh keeps runtime subtitle overlays out of the cached base', async () => {
+  commandsModule.__resetCommandCacheForTesting();
+  setQuickLinks(makeQuickLinks(1));
+
+  globalThis.__superCmdQuickLinkRefreshSettings = {
+    commandMetadata: {
+      'ext-existing-search': { subtitle: 'Live Extension Subtitle' },
+    },
+  };
+
+  commandsModule.__seedCommandCacheForTesting(makeBaseCommands(), { cacheTimestamp: Date.now() });
+  const overlaid = await commandsModule.refreshCommandsForQuickLinkChange();
+  assert.equal(
+    overlaid.find((command) => command.id === 'ext-existing-search')?.subtitle,
+    'Live Extension Subtitle'
+  );
+
+  globalThis.__superCmdQuickLinkRefreshSettings = {};
+  setQuickLinks([
+    {
+      ...makeQuickLinks(1)[0],
+      name: 'Docs Updated',
+      updatedAt: 1_700_000_010_000,
+    },
+  ]);
+
+  const restored = await commandsModule.refreshCommandsForQuickLinkChange();
+  const extensionCommand = restored.find((command) => command.id === 'ext-existing-search');
+  assert.equal(extensionCommand?.subtitle, 'Existing Extension');
+
+  const diskCache = JSON.parse(fs.readFileSync(path.join(tempRoot, 'commands-disk-cache.json'), 'utf8'));
+  const diskExtensionCommand = diskCache.commands.find((command) => command.id === 'ext-existing-search');
+  assert.equal(diskExtensionCommand.subtitle, 'Existing Extension');
+});
+
 test('quicklink command refresh inserts newly created quicklinks before built-in system commands', async () => {
   commandsModule.__resetCommandCacheForTesting();
   globalThis.__superCmdQuickLinkRefreshSettings = {};

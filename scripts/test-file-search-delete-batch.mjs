@@ -12,6 +12,10 @@ const ts = require('typescript');
 
 function loadFileSearchIndexInternals() {
   const filePath = path.resolve('src/main/file-search-index.ts');
+  const testState = {
+    spotlightCalls: [],
+    spotlightStdout: '',
+  };
   const source = `${fs.readFileSync(filePath, 'utf8')}
 
 exports.__test = {
@@ -49,10 +53,23 @@ exports.__test = {
   });
 
   const module = { exports: {} };
+  const testProcess = Object.create(process);
+  Object.defineProperty(testProcess, 'platform', { value: 'darwin' });
+  const localRequire = (request) => {
+    if (request === 'child_process') {
+      return {
+        execFile(file, args, options, callback) {
+          testState.spotlightCalls.push({ file, args, options });
+          callback(null, { stdout: testState.spotlightStdout, stderr: '' });
+        },
+      };
+    }
+    return require(request);
+  };
   const sandbox = {
     module,
     exports: module.exports,
-    require,
+    require: localRequire,
     console,
     Date,
     Map,
@@ -60,11 +77,16 @@ exports.__test = {
     Set,
     clearInterval,
     clearTimeout,
-    process,
+    process: testProcess,
     setInterval,
     setTimeout,
   };
   vm.runInNewContext(transpiled.outputText, sandbox, { filename: filePath });
+  module.exports.__test.setSpotlightStdout = (stdout) => {
+    testState.spotlightStdout = stdout;
+    testState.spotlightCalls = [];
+  };
+  module.exports.__test.getSpotlightCalls = () => [...testState.spotlightCalls];
   return module.exports.__test;
 }
 
@@ -81,7 +103,7 @@ function addEntry(snapshot, filePath, isDirectory = false) {
 }
 
 function entryForPath(snapshot, filePath) {
-  const id = snapshot.pathToEntryId.get(filePath);
+  const id = snapshot.pathToEntryId.get(path.resolve(filePath));
   assert.notEqual(id, undefined, `${filePath} should be indexed`);
   return snapshot.entries[id];
 }
@@ -239,6 +261,34 @@ test('non-matching delete paths do not tombstone prefix-like neighbors', async (
   assert.equal(results[0].path, searchable);
 });
 
+test('delete path matching uses the same resolved form as indexed entries', () => {
+  const snapshot = api.makeSnapshot();
+  const rawIndexedPath = `${homeDir}/normalized/../normalized/same-name.txt`;
+  const resolvedPath = path.resolve(rawIndexedPath);
+
+  addEntry(snapshot, rawIndexedPath);
+  api.tombstoneDeletedPaths(snapshot, [resolvedPath]);
+
+  assert.equal(isDeleted(snapshot, resolvedPath), true);
+});
+
+test('deleted-name tombstones do not suppress Spotlight fallback for live same-name files', async () => {
+  const snapshot = api.makeSnapshot();
+  const deletedPath = path.join(homeDir, 'old', 'shared-name.txt');
+  const livePath = path.join(homeDir, 'new', 'shared-name.txt');
+
+  addEntry(snapshot, deletedPath);
+  api.tombstoneDeletedPaths(snapshot, [deletedPath]);
+  api.setActiveIndex(snapshot, homeDir);
+  api.setSpotlightStdout(`${deletedPath}\n${livePath}\n`);
+
+  const results = await api.searchIndexedFiles('shared-name.txt', { limit: 3 });
+
+  assert.equal(api.getSpotlightCalls().length, 1);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].path, livePath);
+});
+
 test('large tombstone batches compact deleted-heavy prefix buckets before post-delete queries', async () => {
   const snapshot = api.makeSnapshot();
   const deletedFiles = [];
@@ -268,4 +318,16 @@ test('large tombstone batches compact deleted-heavy prefix buckets before post-d
   const results = await api.searchIndexedFiles('launch plan alpha survivor', { limit: 3 });
   assert.equal(results.length, 1);
   assert.equal(results[0].path, survivor);
+
+  const restoredFile = deletedFiles[42];
+  api.indexEntry(snapshot, {
+    path: restoredFile,
+    name: path.basename(restoredFile),
+    parentPath: path.dirname(restoredFile),
+    isDirectory: false,
+  });
+
+  const restoredResults = await api.searchIndexedFiles('launch plan alpha deleted 42', { limit: 3 });
+  assert.equal(restoredResults.length, 1);
+  assert.equal(restoredResults[0].path, restoredFile);
 });

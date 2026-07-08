@@ -199,19 +199,15 @@ type SearchCandidate = {
 export type RankedCommand = {
   command: CommandInfo;
   score: number;
-  matchKind: MatchKind;
-  matchScore: number;
+  matchKind?: MatchKind;
+  matchScore?: number;
 };
 
-export type IndexedRankedCommand = RankedCommand & {
-  matchKind: MatchKind;
-  matchScore: number;
-};
+export type IndexedRankedCommand = RankedCommand;
 
 export type RootCommandScoreIndexEntry = {
   command: CommandInfo;
   rankingFields: PrecompiledRootSearchScoringField[];
-  scoringFields: PrecompiledRootSearchScoringField[];
   normalizedAlias: string;
 };
 
@@ -236,14 +232,9 @@ export function createRootCommandScoreIndex(
     entries: commands.map((command) => {
       const alias = aliasLookup[command.id] || '';
       const rankingFields = precompileRootSearchScoringFields(getRootSearchCommandRankingFields(command, alias));
-      const scoringFields = rankingFields.map((field, index) => {
-        const scoringWeight = index === 1 ? 1.08 : index >= 3 ? 0.68 : field.weight;
-        return scoringWeight === field.weight ? field : { ...field, weight: scoringWeight };
-      });
       return {
         command,
         rankingFields,
-        scoringFields,
         normalizedAlias: normalizeSearchText(alias),
       };
     }),
@@ -417,12 +408,9 @@ export function rankCommandsWithIndex(index: RootCommandScoreIndex, query: strin
     .map((entry): RankedCommandSortEntry | null => {
       const ranked = scorePrecompiledRootSearchFields(compiledQuery, entry.rankingFields);
       if (!ranked.matched) return null;
-      const scored = scorePrecompiledRootSearchFields(compiledQuery, entry.scoringFields);
       return {
         command: entry.command,
         score: ranked.matchScore,
-        matchKind: scored.matched ? scored.matchKind : ranked.matchKind,
-        matchScore: scored.matched ? scored.matchScore : ranked.matchScore,
         hasExactAliasMatch: entry.normalizedAlias === normalizedQuery,
       };
     })
@@ -435,11 +423,9 @@ export function rankCommandsWithIndex(index: RootCommandScoreIndex, query: strin
       if (b.score !== a.score) return b.score - a.score;
       return a.command.title.localeCompare(b.command.title);
     })
-    .map(({ command, score, matchKind, matchScore }) => ({
+    .map(({ command, score }) => ({
       command,
       score,
-      matchKind,
-      matchScore,
     }));
 }
 
