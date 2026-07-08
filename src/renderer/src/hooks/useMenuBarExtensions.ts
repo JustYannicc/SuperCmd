@@ -144,12 +144,20 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
   ) => {
     const normalized = (extensionName || '').trim();
     if (!normalized) return;
-    const now = Date.now();
-    const lastTs = menuBarRemountTimestampsRef.current[normalized] || 0;
-    if (now - lastTs < 200) return;
     const sourceCommandName = (options?.sourceCommandName || '').trim();
     const sourceCommandMode = (options?.sourceCommandMode || '').trim();
     const skipSourceCommand = sourceCommandMode === 'menu-bar' && Boolean(sourceCommandName);
+    const hasRemountTarget = menuBarExtensions.some((entry) => {
+      const entryExt = (entry.bundle.extName || entry.bundle.extensionName || '').trim();
+      if (!entryExt || entryExt !== normalized) return false;
+      const cmdName = (entry.bundle.cmdName || entry.bundle.commandName || '').trim();
+      return !(skipSourceCommand && cmdName === sourceCommandName);
+    });
+    if (!hasRemountTarget) return;
+    const now = Date.now();
+    const lastTs = menuBarRemountTimestampsRef.current[normalized] || 0;
+    if (now - lastTs < 200) return;
+    menuBarRemountTimestampsRef.current[normalized] = now;
     setMenuBarExtensions((prev) => {
       let changed = false;
       const next = prev.map((entry) => {
@@ -163,10 +171,9 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
           bundle: entry.bundle,
         };
       });
-      if (changed) menuBarRemountTimestampsRef.current[normalized] = now;
       return changed ? next : prev;
     });
-  }, []);
+  }, [menuBarExtensions]);
 
   // Note: no auto-mount on app startup. Menu-bar extensions are per-session — the
   // user must explicitly run each command from the launcher to mount it.
