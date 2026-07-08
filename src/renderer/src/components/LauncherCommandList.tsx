@@ -9,12 +9,15 @@ export type LauncherCommandSection = {
   items: CommandInfo[];
 };
 
-const COMMAND_ROW_HEIGHT = 38;
-const SECTION_HEADER_HEIGHT = 26;
-const CALCULATOR_CARD_HEIGHT = 124;
+export const LAUNCHER_COMMAND_ROW_BODY_HEIGHT = 36;
+export const LAUNCHER_COMMAND_ROW_GAP = 2;
+export const LAUNCHER_COMMAND_ROW_HEIGHT = LAUNCHER_COMMAND_ROW_BODY_HEIGHT + LAUNCHER_COMMAND_ROW_GAP;
+export const LAUNCHER_SECTION_HEADER_HEIGHT = 26;
+export const LAUNCHER_CALCULATOR_CARD_HEIGHT = 124;
+export const LAUNCHER_CALCULATOR_CARD_VERTICAL_MARGIN = 10;
 const DEFAULT_VIEWPORT_HEIGHT = 420;
 const VIRTUALIZATION_THRESHOLD = 120;
-const VIRTUALIZATION_OVERSCAN_PX = COMMAND_ROW_HEIGHT * 6;
+const VIRTUALIZATION_OVERSCAN_PX = LAUNCHER_COMMAND_ROW_HEIGHT * 6;
 
 type LauncherVirtualEntry =
   | {
@@ -60,10 +63,10 @@ function buildVirtualEntries(
       kind: 'calculator',
       key: 'calculator',
       top,
-      height: CALCULATOR_CARD_HEIGHT,
+      height: LAUNCHER_CALCULATOR_CARD_HEIGHT,
       absoluteIndex: 0,
     });
-    top += CALCULATOR_CARD_HEIGHT;
+    top += LAUNCHER_CALCULATOR_CARD_HEIGHT;
   }
 
   sections.forEach((section, sectionIndex) => {
@@ -74,9 +77,9 @@ function buildVirtualEntries(
         key: `section-${sectionIndex}-${sectionStartIndex}-${section.title}`,
         title: section.title,
         top,
-        height: SECTION_HEADER_HEIGHT,
+        height: LAUNCHER_SECTION_HEADER_HEIGHT,
       });
-      top += SECTION_HEADER_HEIGHT;
+      top += LAUNCHER_SECTION_HEADER_HEIGHT;
     }
 
     section.items.forEach((command, itemIndex) => {
@@ -88,9 +91,9 @@ function buildVirtualEntries(
         flatIndex,
         absoluteIndex: flatIndex + calcOffset,
         top,
-        height: COMMAND_ROW_HEIGHT,
+        height: LAUNCHER_COMMAND_ROW_HEIGHT,
       });
-      top += COMMAND_ROW_HEIGHT;
+      top += LAUNCHER_COMMAND_ROW_HEIGHT;
     });
     flatIndexCursor += section.items.length;
   });
@@ -235,11 +238,6 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
         : virtualList.entries,
     [scrollTop, selectedIndex, shouldVirtualize, viewportHeight, virtualList.entries]
   );
-  const selectedEntry = React.useMemo(
-    () => virtualList.entries.find((entry) => entry.kind !== 'section' && entry.absoluteIndex === selectedIndex),
-    [selectedIndex, virtualList.entries]
-  );
-
   const registerItemRef = React.useCallback(
     (absoluteIndex: number, el: HTMLDivElement | null) => {
       itemRefs.current[absoluteIndex] = el;
@@ -289,25 +287,6 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
     };
   }, [listRef, shouldVirtualize]);
 
-  React.useEffect(() => {
-    const element = listRef.current;
-    if (!element || !shouldVirtualize || !selectedEntry) return;
-
-    const currentTop = element.scrollTop;
-    const currentBottom = currentTop + (element.clientHeight || viewportHeight);
-    let nextTop: number | null = null;
-
-    if (selectedEntry.top < currentTop) {
-      nextTop = selectedEntry.top;
-    } else if (selectedEntry.top + selectedEntry.height > currentBottom) {
-      nextTop = selectedEntry.top + selectedEntry.height - (element.clientHeight || viewportHeight);
-    }
-
-    if (nextTop !== null) {
-      element.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
-    }
-  }, [listRef, selectedEntry, shouldVirtualize, viewportHeight]);
-
   const renderEntry = (entry: LauncherVirtualEntry, virtualized: boolean): React.ReactNode => {
     let node: React.ReactNode;
     if (entry.kind === 'calculator') {
@@ -315,6 +294,11 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
         <LauncherCalculatorCard
           result={calcResult as CalcResult}
           selected={selectedIndex === 0}
+          style={
+            virtualized
+              ? { height: LAUNCHER_CALCULATOR_CARD_HEIGHT - LAUNCHER_CALCULATOR_CARD_VERTICAL_MARGIN }
+              : undefined
+          }
           itemRef={registerCalculatorRef}
           onCopy={onCalculatorCopy}
           t={t}
@@ -322,7 +306,10 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
       );
     } else if (entry.kind === 'section') {
       node = (
-        <div className="px-3 pt-2 pb-1 text-[0.6875rem] uppercase tracking-wider text-[var(--text-subtle)] font-medium">
+        <div
+          className="px-3 pt-2 pb-1 text-[0.6875rem] leading-none uppercase tracking-wider text-[var(--text-subtle)] font-medium"
+          style={virtualized ? { height: LAUNCHER_SECTION_HEADER_HEIGHT } : undefined}
+        >
           {entry.title}
         </div>
       );
@@ -335,6 +322,7 @@ const LauncherCommandList: React.FC<LauncherCommandListProps> = ({
           flatIndex={entry.flatIndex}
           absoluteIndex={entry.absoluteIndex}
           selected={entry.absoluteIndex === selectedIndex}
+          style={virtualized ? { height: LAUNCHER_COMMAND_ROW_BODY_HEIGHT } : undefined}
           registerItemRef={registerItemRef}
           commandAlias={commandAlias}
           commandHotkey={commandHotkey}

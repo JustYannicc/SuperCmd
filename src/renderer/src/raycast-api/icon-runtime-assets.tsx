@@ -7,7 +7,8 @@ import React from 'react';
 import { getIconRuntimeContext } from './icon-runtime-config';
 
 const LOCAL_PATH_EXISTS_CACHE_MAX = 4096;
-const positiveLocalPathExistsCache = new Set<string>();
+export const LOCAL_PATH_EXISTS_CACHE_TTL_MS = 30_000;
+const positiveLocalPathExistsCache = new Map<string, number>();
 const LOCAL_PATH_MISS_CACHE_MAX = 4096;
 const LOCAL_PATH_MISS_CACHE_TTL_MS = 250;
 const negativeLocalPathExistsCache = new Map<string, number>();
@@ -66,9 +67,13 @@ export function toScAssetUrl(filePath: string): string {
 
 function localPathExists(filePath: string): boolean {
   if (!filePath) return false;
-  if (positiveLocalPathExistsCache.has(filePath)) return true;
-
   const nowMs = getLocalPathCacheNowMs();
+  const cachedAt = positiveLocalPathExistsCache.get(filePath);
+  if (cachedAt !== undefined && nowMs - cachedAt < LOCAL_PATH_EXISTS_CACHE_TTL_MS) return true;
+  if (cachedAt !== undefined) {
+    positiveLocalPathExistsCache.delete(filePath);
+  }
+
   const missExpiresAt = negativeLocalPathExistsCache.get(filePath);
   if (typeof missExpiresAt === 'number') {
     if (missExpiresAt > nowMs) return false;
@@ -82,7 +87,7 @@ function localPathExists(filePath: string): boolean {
       if (positiveLocalPathExistsCache.size >= LOCAL_PATH_EXISTS_CACHE_MAX) {
         positiveLocalPathExistsCache.clear();
       }
-      positiveLocalPathExistsCache.add(filePath);
+      positiveLocalPathExistsCache.set(filePath, nowMs);
       negativeLocalPathExistsCache.delete(filePath);
     } else {
       cacheLocalPathMiss(filePath, nowMs);

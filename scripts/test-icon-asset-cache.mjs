@@ -97,6 +97,9 @@ function createIconRuntimeHarness() {
     addExistingPath(filePath) {
       existingPaths.add(filePath);
     },
+    removeExistingPath(filePath) {
+      existingPaths.delete(filePath);
+    },
     advanceTime(ms) {
       nowMs += ms;
     },
@@ -145,6 +148,22 @@ test('icon asset existence cache', async (t) => {
 
     harness.advanceTime(300);
     assert.equal(harness.assets.resolveIconSrc('late.png', assetsPath), expectedUrl);
+
+    assert.equal(harness.statCalls, 2);
+  });
+
+  await t.test('refreshes positive cache entries after ttl so deleted assets stop resolving', () => {
+    const harness = createIconRuntimeHarness();
+    const assetsPath = '/tmp/supercmd-assets';
+    const iconPath = `${assetsPath}/deleted.png`;
+    const expectedUrl = harness.assets.toScAssetUrl(iconPath);
+    harness.addExistingPath(iconPath);
+
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), expectedUrl);
+    harness.removeExistingPath(iconPath);
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), expectedUrl);
+    harness.advanceTime(harness.assets.LOCAL_PATH_EXISTS_CACHE_TTL_MS);
+    assert.equal(harness.assets.resolveIconSrc('deleted.png', assetsPath), '');
 
     assert.equal(harness.statCalls, 2);
   });
