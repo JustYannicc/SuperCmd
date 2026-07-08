@@ -276,13 +276,25 @@ function optimizedRootCommandMatches(commands, query, aliases) {
     });
 }
 
-function indexedRootCommandMatches(index, query) {
+function indexedRootCommandMatches(index, query, aliases) {
   return rankCommandsWithIndex(index, query)
-    .map((entry) => ({
-      id: entry.command.id,
-      matchKind: entry.matchKind,
-      matchScore: entry.matchScore,
-    }));
+    .map((entry) => {
+      if (typeof entry.matchKind === 'string' && typeof entry.matchScore === 'number') {
+        return {
+          id: entry.command.id,
+          matchKind: entry.matchKind,
+          matchScore: entry.matchScore,
+        };
+      }
+
+      const scored = scoreRootSearchFields(query, rootCommandFields(entry.command, aliases[entry.command.id] || ''));
+      assert.equal(scored.matched, true, `${entry.command.id} lost its indexed fallback match for ${query}`);
+      return {
+        id: entry.command.id,
+        matchKind: scored.matchKind,
+        matchScore: scored.matchScore,
+      };
+    });
 }
 
 function signature(matches) {
@@ -301,7 +313,7 @@ function assertSameRootCommandMatches(commands, aliases) {
       `root command matches changed for query "${query}"`
     );
     assert.deepEqual(
-      signature(indexedRootCommandMatches(index, query)),
+      signature(indexedRootCommandMatches(index, query, aliases)),
       legacySignature,
       `indexed root command matches changed for query "${query}"`
     );
@@ -413,7 +425,7 @@ const optimized = measure('optimized command scoring path', (query) => {
 });
 
 const indexed = measure('indexed command scoring path', (query) => {
-  const matches = indexedRootCommandMatches(commandScoreIndex, query);
+  const matches = indexedRootCommandMatches(commandScoreIndex, query, aliases);
   return matches.length;
 });
 
