@@ -379,6 +379,26 @@ function readScriptCommandHeader(filePath: string): string | null {
   }
 }
 
+function readScriptCommandFirstLine(filePath: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const chunk = Buffer.allocUnsafe(SCRIPT_COMMAND_HEADER_READ_CHUNK_BYTES);
+    const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, 0);
+    if (bytesRead <= 0) return '';
+
+    const raw = chunk.subarray(0, bytesRead).toString('utf8');
+    const lineEnd = raw.search(/\r?\n/);
+    return lineEnd >= 0 ? raw.slice(0, lineEnd) : raw;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+}
+
 function parseScriptCommandFile(filePath: string): ScriptCommandInfo | null {
   const scriptPath = path.resolve(filePath);
   const scriptDir = path.dirname(scriptPath);
@@ -586,12 +606,16 @@ export async function executeScriptCommand(
   };
 
   const cwd = cmd.currentDirectoryPath || cmd.scriptDir;
+  const firstLine = readScriptCommandFirstLine(cmd.scriptPath);
+  const freshShebang = firstLine !== null ? shebangArgs(firstLine) : [];
+  const interpreter = firstLine !== null ? freshShebang[0] : cmd.interpreter;
+  const interpreterArgs = firstLine !== null ? freshShebang.slice(1) : (cmd.interpreterArgs || []);
 
   const spawnCommand =
-    cmd.interpreter ? cmd.interpreter : '/bin/bash';
+    interpreter ? interpreter : '/bin/bash';
   const spawnArgs =
-    cmd.interpreter
-      ? [...(cmd.interpreterArgs || []), cmd.scriptPath, ...args]
+    interpreter
+      ? [...interpreterArgs, cmd.scriptPath, ...args]
       : [cmd.scriptPath, ...args];
 
   const run = await new Promise<{

@@ -121,6 +121,8 @@ const QUERIES = [
   'timer',
   'gh',
   'cmd 42',
+  '...',
+  '@@',
 ];
 
 const WORDS = [
@@ -266,8 +268,7 @@ function indexedRootCommandMatches(index, query) {
 }
 
 function signature(matches) {
-  return matches
-    .map((match) => `${match.id}:${match.matchKind}:${match.matchScore}`)
+  return Array.from(matches, (match) => `${match.id}:${match.matchKind}:${match.matchScore}`)
     .sort();
 }
 

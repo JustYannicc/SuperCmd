@@ -402,6 +402,7 @@ type RankedCommandSortEntry = IndexedRankedCommand & {
 export function rankCommandsWithIndex(index: RootCommandScoreIndex, query: string): IndexedRankedCommand[] {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) {
+    if (query.trim()) return [];
     return index.entries.map(({ command }) => ({
       command,
       score: command.alwaysOnTop ? Number.MAX_SAFE_INTEGER : 0,

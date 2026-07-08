@@ -163,19 +163,68 @@ console.log('ok');
     ]);
   });
 
-  await t.test('executes shebang scripts', async (t) => {
-    const { module: runner } = await withScriptCommandRunner(t, {
+  await t.test('executes shebang scripts with a bounded first-line interpreter lookup', async (t) => {
+    const { module: runner, metrics, resetMetrics } = await withScriptCommandRunner(t, {
       'with-shebang.sh': `#!/bin/bash
 ${scriptHeader({ title: 'Shebang Command' })}
 echo "shebang:$RAYCAST_TITLE"
 `,
-    });
+    }, { instrumentFs: true });
 
     const [command] = runner.discoverScriptCommands();
+    assert.equal(command.interpreter, '/bin/bash');
+    assert.deepEqual(command.interpreterArgs, []);
 
+    resetMetrics();
     const result = await runner.executeScriptCommand(command.id);
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout.trim(), 'shebang:Shebang Command');
+    assert.equal(metrics.readFileSyncBytes, 0);
+    assert.ok(
+      metrics.readSyncBytes <= 8 * 1024,
+      `expected only a bounded first-line read, got ${metrics.readSyncBytes} bytes`,
+    );
+  });
+
+  await t.test('uses updated shebangs within the discovery cache window', async (t) => {
+    const { module: runner, scriptsDir } = await withScriptCommandRunner(t, {
+      'fresh-shebang.sh': `#!/bin/sh
+${scriptHeader({ title: 'Fresh Shebang' })}
+[[ "$RAYCAST_TITLE" == "Fresh Shebang" ]] && echo "fresh"
+`,
+    });
+
+    const [command] = runner.discoverScriptCommands();
+    assert.equal(command.interpreter, '/bin/sh');
+
+    fs.writeFileSync(path.join(scriptsDir, 'fresh-shebang.sh'), `#!/bin/bash
+${scriptHeader({ title: 'Fresh Shebang' })}
+[[ "$RAYCAST_TITLE" == "Fresh Shebang" ]] && echo "fresh"
+`, { mode: 0o755 });
+
+    const result = await runner.executeScriptCommand(command.id);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), 'fresh');
+  });
+
+  await t.test('uses the bash fallback when a cached shebang is removed', async (t) => {
+    const { module: runner, scriptsDir } = await withScriptCommandRunner(t, {
+      'removed-shebang.sh': `#!/bin/false
+${scriptHeader({ title: 'Removed Shebang' })}
+echo "removed"
+`,
+    });
+
+    const [command] = runner.discoverScriptCommands();
+    assert.equal(command.interpreter, '/bin/false');
+
+    fs.writeFileSync(path.join(scriptsDir, 'removed-shebang.sh'), `${scriptHeader({ title: 'Removed Shebang' })}
+echo "removed"
+`, { mode: 0o755 });
+
+    const result = await runner.executeScriptCommand(command.id);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), 'removed');
   });
 
   await t.test('executes no-shebang scripts with the bash fallback', async (t) => {
