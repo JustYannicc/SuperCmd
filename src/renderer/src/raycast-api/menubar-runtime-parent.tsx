@@ -51,12 +51,11 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
     return () => {
       mountedRef.current = false;
       pendingRef.current = false;
-      registryRef.current.clear();
     };
   }, []);
 
   const scheduleRegistryUpdate = useCallback(() => {
-    if (!mountedRef.current || pendingRef.current) return;
+    if (pendingRef.current) return;
 
     pendingRef.current = true;
     queueMicrotask(() => {
@@ -71,12 +70,10 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
 
   const registryAPI = useMemo<MBRegistryAPI>(() => ({
     register: (item: MBItemRegistration) => {
-      if (!mountedRef.current) return;
       registryRef.current.set(item.id, item);
       scheduleRegistryUpdate();
     },
     unregister: (id: string) => {
-      if (!mountedRef.current) return;
       registryRef.current.delete(id);
       scheduleRegistryUpdate();
     },

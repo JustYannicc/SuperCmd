@@ -177,8 +177,8 @@ function createHookRuntime(label) {
       hookIndex = 0;
       return callback();
     },
-    unmount() {
-      mounted = false;
+    cleanupEffects({ markUnmounted = false } = {}) {
+      if (markUnmounted) mounted = false;
       for (let index = hooks.length - 1; index >= 0; index -= 1) {
         const cleanup = hooks[index]?.cleanup;
         if (typeof cleanup === 'function') {
@@ -186,6 +186,17 @@ function createHookRuntime(label) {
           hooks[index].cleanup = undefined;
         }
       }
+    },
+    rerunEffects() {
+      mounted = true;
+      for (const hook of hooks) {
+        if (typeof hook?.effect !== 'function') continue;
+        const cleanup = hook.effect();
+        hook.cleanup = cleanup;
+      }
+    },
+    unmount() {
+      runtime.cleanupEffects({ markUnmounted: true });
     },
     useCallback(callback, deps) {
       return runtime.useMemo(() => callback, deps);
@@ -200,7 +211,7 @@ function createHookRuntime(label) {
       if (existing && !depsChanged(existing.deps, deps)) return;
       if (typeof existing?.cleanup === 'function') existing.cleanup();
       const cleanup = effect();
-      hooks[index] = { deps, cleanup };
+      hooks[index] = { deps, effect, cleanup };
     },
     useMemo(factory, deps) {
       const index = hookIndex;
@@ -358,4 +369,97 @@ test('registry microtasks scheduled before unmount are suppressed by runtime hoo
   }
 
   console.log(JSON.stringify({ mode: 'registry-microtask-lifecycle-fixed', metrics }, null, 2));
+});
+
+test('registry APIs republish static registrations across StrictMode passive cleanup replay', async () => {
+  const [actionModule, listModule, gridModule, menuBarModule] = await Promise.all([
+    importBundledModule('src/renderer/src/raycast-api/action-runtime-registry.tsx'),
+    importBundledModule('src/renderer/src/raycast-api/list-runtime-hooks.ts'),
+    importBundledModule('src/renderer/src/raycast-api/grid-runtime-hooks.ts'),
+    importBundledModule('src/renderer/src/raycast-api/menubar-runtime-parent.tsx', [menuBarStubsPlugin()]),
+  ]);
+
+  const actionRuntime = createHookRuntime('actions-strictmode');
+  installRuntime(actionRuntime);
+  const actionRegistryRuntime = actionModule.createActionRegistryRuntime({
+    snapshotExtensionContext: () => ({}),
+    withExtensionContext: (_ctx, callback) => callback(),
+    ExtensionInfoReactContext: { _currentValue: { extId: 'ext/cmd', assetsPath: '', commandMode: 'view' } },
+    getFormValues: () => ({}),
+    Clipboard: { copy: () => {} },
+    trash: () => {},
+    getGlobalNavigation: () => ({ push: () => {} }),
+  });
+  let actionHook = actionRuntime.render(() => actionRegistryRuntime.useCollectedActions());
+  actionHook.registryAPI.register('action-1', { title: 'Action', execute: () => {}, order: 1 });
+  actionRuntime.cleanupEffects();
+  actionHook.registryAPI.register('action-1', { title: 'Action', execute: () => {}, order: 1 });
+  actionRuntime.rerunEffects();
+  await flushMicrotasks();
+  actionHook = actionRuntime.render(() => actionRegistryRuntime.useCollectedActions());
+  assert.deepEqual(actionHook.collectedActions.map((item) => item.title), ['Action']);
+
+  const listRuntime = createHookRuntime('list-strictmode');
+  installRuntime(listRuntime);
+  let listHook = listRuntime.render(() => listModule.useListRegistry());
+  listHook.registryAPI.set('list-1', { props: { id: 'list-1', title: 'List' }, order: 1 });
+  listRuntime.cleanupEffects();
+  listHook.registryAPI.set('list-1', { props: { id: 'list-1', title: 'List' }, order: 1 });
+  listRuntime.rerunEffects();
+  await flushMicrotasks();
+  listHook = listRuntime.render(() => listModule.useListRegistry());
+  assert.deepEqual(listHook.allItems.map((item) => item.props.title), ['List']);
+
+  const gridRuntime = createHookRuntime('grid-strictmode');
+  installRuntime(gridRuntime);
+  let gridHook = gridRuntime.render(() => gridModule.useGridRegistry());
+  gridHook.registryAPI.set('grid-1', { props: { id: 'grid-1', title: 'Grid' }, order: 1 });
+  gridRuntime.cleanupEffects();
+  gridHook.registryAPI.set('grid-1', { props: { id: 'grid-1', title: 'Grid' }, order: 1 });
+  gridRuntime.rerunEffects();
+  await flushMicrotasks();
+  gridHook = gridRuntime.render(() => gridModule.useGridRegistry());
+  assert.deepEqual(gridHook.allItems.map((item) => item.props.title), ['Grid']);
+
+  const menuPayloads = [];
+  const menuBarRuntime = createHookRuntime('menubar-strictmode');
+  globalThis.window = {
+    electron: {
+      removeMenuBar: () => {},
+      updateMenuBar: (payload) => menuPayloads.push(payload),
+    },
+  };
+  globalThis.__SUPERCMD_MENUBAR_DEPS__ = {
+    ExtensionInfoReactContext: { _currentValue: { extId: 'ext/cmd', assetsPath: '', commandMode: 'menu-bar' } },
+    getExtensionContext: () => ({ extensionName: 'ext', commandName: 'cmd', assetsPath: '', commandMode: 'menu-bar' }),
+    setExtensionContext: () => {},
+    isEmojiOrSymbol: () => false,
+  };
+  installRuntime(menuBarRuntime);
+  let menuTree = menuBarRuntime.render(() => menuBarModule.MenuBarExtraComponent({ children: null, title: 'Menu' }));
+  const menuRegistryAPI = menuTree.props.value;
+  menuRegistryAPI.register({ id: 'menu-1', type: 'item', title: 'Menu Item', order: 1 });
+  menuBarRuntime.cleanupEffects();
+  menuRegistryAPI.register({ id: 'menu-1', type: 'item', title: 'Menu Item', order: 1 });
+  menuBarRuntime.rerunEffects();
+  await flushMicrotasks();
+  menuTree = menuBarRuntime.render(() => menuBarModule.MenuBarExtraComponent({ children: null, title: 'Menu' }));
+  assert.ok(menuTree.props.value, 'menubar registry provider should remain available after StrictMode replay');
+  await flushMicrotasks();
+  assert.ok(
+    menuPayloads.some((payload) => payload.items?.some((item) => item.title === 'Menu Item')),
+    'menubar payload should include the static item registered during StrictMode replay',
+  );
+
+  const metrics = {
+    actions: actionRuntime.counters,
+    list: listRuntime.counters,
+    grid: gridRuntime.counters,
+    menubar: menuBarRuntime.counters,
+  };
+  for (const [label, counters] of Object.entries(metrics)) {
+    assert.equal(counters.postUnmountSetStateCalls, 0, `${label} should not count StrictMode replay as post-unmount state`);
+  }
+
+  console.log(JSON.stringify({ mode: 'registry-strictmode-passive-replay', metrics }, null, 2));
 });
