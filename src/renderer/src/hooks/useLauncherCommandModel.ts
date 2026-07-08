@@ -148,7 +148,7 @@ function inferCommandSubtype(command: CommandInfo): RootSearchSubtype {
 
 type BrowserLauncherProfile = {
   id?: string;
-  browserId?: BrowserSearchSource;
+  browserId?: BrowserSearchSource | string;
   displayName: string;
   detectedName?: string;
   profileId: string;
