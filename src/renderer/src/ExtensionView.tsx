@@ -1098,9 +1098,30 @@ const fsStub: Record<string, any> = {
     return fsStatResult(false);
   },
   realpathSync: (p: string) => resolveFsLookupPath(p),
-  unlinkSync: (p: string) => { removeStoredText(resolveFsLookupPath(p)); },
-  rmdirSync: noop,
-  rmSync: (p: string) => { removeStoredText(resolveFsLookupPath(p)); },
+  unlinkSync: (p: string) => {
+    const path = resolveFsLookupPath(p);
+    const hadVirtual = getStoredText(path) !== null;
+    removeStoredText(path);
+    if (!hadVirtual) {
+      const fs = getRealNodeFsModule();
+      if (fs && typeof fs.unlinkSync === 'function') fs.unlinkSync(path);
+    }
+  },
+  rmdirSync: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.rmdirSync === 'function') {
+      return fs.rmdirSync(resolveFsLookupPath(p), ...args);
+    }
+  },
+  rmSync: (p: string, ...args: any[]) => {
+    const path = resolveFsLookupPath(p);
+    const hadVirtual = getStoredText(path) !== null;
+    removeStoredText(path);
+    if (!hadVirtual) {
+      const fs = getRealNodeFsModule();
+      if (fs && typeof fs.rmSync === 'function') return fs.rmSync(path, ...args);
+    }
+  },
   renameSync: (oldPath: string, newPath: string) => {
     const src = resolveFsLookupPath(oldPath);
     const dest = resolveFsLookupPath(newPath);
@@ -1108,15 +1129,28 @@ const fsStub: Record<string, any> = {
     if (content !== null) {
       setStoredText(dest, content);
       removeStoredText(src);
+      return;
     }
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.renameSync === 'function') fs.renameSync(src, dest);
   },
   copyFileSync: (src: string, dest: string) => {
     const source = resolveFsLookupPath(src);
     const destination = resolveFsLookupPath(dest);
     const content = getStoredText(source);
-    if (content !== null) setStoredText(destination, content);
+    if (content !== null) {
+      setStoredText(destination, content);
+      return;
+    }
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.copyFileSync === 'function') fs.copyFileSync(source, destination);
   },
-  chmodSync: noop,
+  chmodSync: (p: string, mode: string | number) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.chmodSync === 'function') {
+      fs.chmodSync(resolveFsLookupPath(p), mode);
+    }
+  },
   accessSync: (p: any) => {
     const path = resolveFsLookupPath(p);
     if (getStoredText(path) !== null) return;
@@ -1127,14 +1161,35 @@ const fsStub: Record<string, any> = {
     err.code = 'ENOENT';
     throw err;
   },
-  openSync: () => 0,
-  closeSync: noop,
-  readSync: () => 0,
-  writeSync: () => 0,
-  createReadStream: (p: any) => {
+  openSync: (p: any, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.openSync === 'function') {
+      return fs.openSync(resolveFsLookupPath(p), ...args);
+    }
+    return 0;
+  },
+  closeSync: (fd: number) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.closeSync === 'function') fs.closeSync(fd);
+  },
+  readSync: (...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.readSync === 'function') return fs.readSync(...args);
+    return 0;
+  },
+  writeSync: (...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.writeSync === 'function') return fs.writeSync(...args);
+    return 0;
+  },
+  createReadStream: (p: any, ...args: any[]) => {
     const path = resolveFsLookupPath(p);
-    const s: any = new (nodeBuiltinStubs?.stream?.Readable || class {})();
     const content = getStoredText(path);
+    const fs = getRealNodeFsModule();
+    if (content == null && fs && typeof fs.createReadStream === 'function') {
+      return fs.createReadStream(path, ...args);
+    }
+    const s: any = new (nodeBuiltinStubs?.stream?.Readable || class {})();
     setTimeout(() => {
       if (content != null) {
         const bytes = toUint8Array(content);
@@ -1145,8 +1200,12 @@ const fsStub: Record<string, any> = {
     }, 0);
     return s;
   },
-  createWriteStream: (p: any) => {
+  createWriteStream: (p: any, ...args: any[]) => {
     const filePath = resolveFsLookupPath(p);
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.createWriteStream === 'function') {
+      return fs.createWriteStream(filePath, ...args);
+    }
     const s: any = new WritableStub();
     const chunks: Uint8Array[] = [];
     const defer = (fn: () => void) => {
@@ -1323,9 +1382,25 @@ const fsStub: Record<string, any> = {
     fsStub.renameSync(oldPath, newPath);
     if (typeof cb === 'function') cb(null);
   },
-  watch: () => ({ close: noop, on: noop }),
-  watchFile: noop,
-  unwatchFile: noop,
+  watch: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.watch === 'function') {
+      return fs.watch(resolveFsLookupPath(p), ...args);
+    }
+    return { close: noop, on: noop };
+  },
+  watchFile: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.watchFile === 'function') {
+      return fs.watchFile(resolveFsLookupPath(p), ...args);
+    }
+  },
+  unwatchFile: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.unwatchFile === 'function') {
+      return fs.unwatchFile(resolveFsLookupPath(p), ...args);
+    }
+  },
   constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
   promises: {
     readFile: async (p: string, opts?: any) => {
@@ -1418,7 +1493,13 @@ const fsStub: Record<string, any> = {
         throw new Error(result.stderr || `chmod failed with exit code ${result.exitCode}`);
       }
     },
-    open: noopAsync,
+    open: async (p: string, ...args: any[]) => {
+      const fs = getRealNodeFsModule();
+      if (fs?.promises && typeof fs.promises.open === 'function') {
+        return fs.promises.open(resolveFsLookupPath(p), ...args);
+      }
+      return noopAsync();
+    },
   },
 };
 
@@ -2439,7 +2520,13 @@ const childProcessStub = {
       error: undefined,
     };
   },
-  fork: () => createStubChildProcess(),
+  fork: (...args: any[]) => {
+    const childProcess = getRealNodeChildProcessModule();
+    if (childProcess && typeof childProcess.fork === 'function') {
+      return childProcess.fork(...args);
+    }
+    return createStubChildProcess();
+  },
 };
 
 // ── timers stubs ────────────────────────────────────────────────
@@ -3248,6 +3335,59 @@ function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
   return normalized === 'fs' || normalized === 'fs/promises' || normalized === 'child_process';
 }
 
+const superCmdBuiltinFacadeCache = new Map<string, any>();
+
+function getSuperCmdBuiltinFacade(name: string): any | undefined {
+  if (!shouldUseSuperCmdBuiltinFacade(name)) return undefined;
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  const facade = nodeBuiltinStubs[normalized] || nodeBuiltinStubs[name] || nodeBuiltinStubs[`node:${normalized}`];
+  if (!facade) return undefined;
+
+  const realModule = getRealNodeBuiltin(name) || getRealNodeBuiltin(normalized);
+  if (!realModule || typeof realModule !== 'object') return facade;
+
+  const cacheKey = normalized;
+  const cached = superCmdBuiltinFacadeCache.get(cacheKey);
+  if (cached?.realModule === realModule && cached?.facade === facade) {
+    return cached.proxy;
+  }
+
+  const proxy = new Proxy(facade, {
+    get(target, prop, receiver) {
+      if (prop === Symbol.toStringTag && prop in realModule) return realModule[prop as any];
+      if (Reflect.has(target, prop)) {
+        const value = Reflect.get(target, prop, receiver);
+        const realValue = realModule[prop as any];
+        if (
+          prop === 'constants' &&
+          value &&
+          realValue &&
+          typeof value === 'object' &&
+          typeof realValue === 'object'
+        ) {
+          return { ...realValue, ...value };
+        }
+        return value;
+      }
+      return realModule[prop as any];
+    },
+    has(target, prop) {
+      return Reflect.has(target, prop) || prop in realModule;
+    },
+    ownKeys(target) {
+      return Array.from(new Set([...Reflect.ownKeys(realModule), ...Reflect.ownKeys(target)]));
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      const targetDescriptor = Reflect.getOwnPropertyDescriptor(target, prop);
+      if (targetDescriptor) return targetDescriptor;
+      const realDescriptor = Reflect.getOwnPropertyDescriptor(realModule, prop);
+      return realDescriptor ? { ...realDescriptor, configurable: true } : undefined;
+    },
+  });
+  superCmdBuiltinFacadeCache.set(cacheKey, { facade, realModule, proxy });
+  return proxy;
+}
+
 // Capture real Node globals once, then remove them from globalThis so
 // extensions can't reach around fakeRequire. Runs at module load, before
 // any extension code executes.
@@ -3960,7 +4100,7 @@ function loadExtensionExport(
       // has Node enabled. Falls back to the stub if the module isn't a
       // recognised built-in, or if real require throws.
       if (shouldUseSuperCmdBuiltinFacade(name)) {
-        const facade = nodeBuiltinStubs[name] || nodeBuiltinStubs[`node:${name}`];
+        const facade = getSuperCmdBuiltinFacade(name);
         if (facade) return facade;
       }
       const realModule = tryRealNodeRequire(name);
@@ -4183,7 +4323,9 @@ function loadExtensionExport(
       code,
       executableCode,
     });
-    console.debug(`[loadExtensionExport] Wrapper cache ${cacheHit ? 'hit' : 'miss'} for ${extensionIdentity}`);
+    if ((globalThis as any).__SUPERCMD_DEBUG_EXTENSION_WRAPPER_CACHE) {
+      console.debug(`[loadExtensionExport] Wrapper cache ${cacheHit ? 'hit' : 'miss'} for ${extensionIdentity}`);
+    }
 
     fn(
       moduleExports,
