@@ -102,4 +102,48 @@ echo ok
       `expected changed icon to be read again, got ${metrics.readFileSyncBytes} bytes`,
     );
   });
+
+  await t.test('does not cache transient icon read failures', async (t) => {
+    const { module: runner, scriptsDir, metrics, resetMetrics } = await withScriptCommandRunner(t, {}, {
+      instrumentFs: true,
+    });
+    const iconsDir = path.join(scriptsDir, '.icons');
+    const iconPath = path.join(iconsDir, 'icon.png');
+    const scriptPath = path.join(scriptsDir, 'with-transient-icon.sh');
+    const icon = Buffer.alloc(2048, 3);
+
+    fs.mkdirSync(iconsDir, { recursive: true });
+    fs.writeFileSync(iconPath, icon);
+    fs.writeFileSync(scriptPath, `#!/bin/bash
+${scriptHeader({
+  title: 'Transient Icon Command',
+  extra: '# @raycast.icon .icons/icon.png\n',
+})}
+echo ok
+`, { mode: 0o755 });
+
+    fs.chmodSync(iconPath, 0o000);
+    try {
+      fs.readFileSync(iconPath);
+      t.skip('filesystem permits reading chmod 000 files');
+      return;
+    } catch {}
+
+    resetMetrics();
+    const [initialCommand] = runner.discoverScriptCommands();
+    assert.equal(initialCommand.title, 'Transient Icon Command');
+    assert.equal(initialCommand.iconDataUrl, undefined);
+    assert.equal(metrics.readFileSyncErrors, 1);
+
+    fs.chmodSync(iconPath, 0o644);
+    resetMetrics();
+    runner.invalidateScriptCommandsCache();
+    const [recoveredCommand] = runner.discoverScriptCommands();
+    assert.ok(recoveredCommand.iconDataUrl?.startsWith('data:image/png;base64,'));
+    assert.equal(metrics.readFileSyncErrors, 0);
+    assert.ok(
+      metrics.readFileSyncBytes >= icon.byteLength,
+      `expected readable icon to be retried, got ${metrics.readFileSyncBytes} bytes`,
+    );
+  });
 });

@@ -57,10 +57,15 @@ function makeInstrumentedFsSource(metricsKey) {
     export const closeSync = realFs.closeSync.bind(realFs);
     export const accessSync = realFs.accessSync.bind(realFs);
     export const readFileSync = (filePath, options) => {
-      const value = realFs.readFileSync(filePath, options);
       metrics.readFileSyncCalls += 1;
-      metrics.readFileSyncBytes += countReadFile(value, options);
-      return value;
+      try {
+        const value = realFs.readFileSync(filePath, options);
+        metrics.readFileSyncBytes += countReadFile(value, options);
+        return value;
+      } catch (error) {
+        metrics.readFileSyncErrors += 1;
+        throw error;
+      }
     };
     export const readSync = (...args) => {
       const bytesRead = realFs.readSync(...args);
@@ -107,6 +112,7 @@ export async function loadScriptCommandRunner({
   const metrics = {
     readFileSyncCalls: 0,
     readFileSyncBytes: 0,
+    readFileSyncErrors: 0,
     readSyncCalls: 0,
     readSyncBytes: 0,
     openSyncCalls: 0,

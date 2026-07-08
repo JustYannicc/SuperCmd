@@ -58,6 +58,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 let cache: { fetchedAt: number; commands: ScriptCommandInfo[] } | null = null;
 const iconDataUrlCache = new Map<string, { signature: string; dataUrl?: string }>();
+const MAX_ICON_DATA_URL_CACHE_ENTRIES = 512;
 
 function getSuperCmdScriptsDir(): string {
   const dir = path.join(app.getPath('userData'), 'script-commands');
@@ -149,6 +150,15 @@ function getCachedIconDataUrl(iconPath: string): string | undefined {
   }
 
   const dataUrl = fileToDataUrl(iconPath);
+  if (!dataUrl) {
+    iconDataUrlCache.delete(iconPath);
+    return undefined;
+  }
+
+  if (!iconDataUrlCache.has(iconPath) && iconDataUrlCache.size >= MAX_ICON_DATA_URL_CACHE_ENTRIES) {
+    const oldestKey = iconDataUrlCache.keys().next().value;
+    if (oldestKey) iconDataUrlCache.delete(oldestKey);
+  }
   iconDataUrlCache.set(iconPath, { signature, dataUrl });
   return dataUrl;
 }
