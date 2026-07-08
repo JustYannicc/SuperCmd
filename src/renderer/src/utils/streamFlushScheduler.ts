@@ -9,6 +9,7 @@ export interface StreamFlushSchedulerOptions {
   clearTimer?: (handle: TimerHandle) => void;
   flushDelayMs?: number;
   isDocumentHidden?: () => boolean;
+  useAnimationFrame?: boolean;
 }
 
 export interface StreamFlushScheduler {
@@ -52,6 +53,7 @@ export function createStreamFlushScheduler(
     clearTimer = globalThis.clearTimeout.bind(globalThis),
     flushDelayMs = DEFAULT_STREAM_FLUSH_INTERVAL_MS,
     isDocumentHidden = createDefaultDocumentHiddenGetter(),
+    useAnimationFrame = true,
   }: StreamFlushSchedulerOptions = {}
 ): StreamFlushScheduler {
   let pendingFrame: unknown = null;
@@ -82,7 +84,7 @@ export function createStreamFlushScheduler(
     schedule() {
       if (pendingFrame !== null || pendingTimer !== null) return;
 
-      if (requestFrame && !isDocumentHidden()) {
+      if (useAnimationFrame && requestFrame && !isDocumentHidden()) {
         pendingFrame = requestFrame(run);
         return;
       }
