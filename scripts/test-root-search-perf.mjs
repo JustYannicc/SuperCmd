@@ -300,8 +300,7 @@ function indexedRootCommandMatches(index, query, aliases) {
 }
 
 function orderedSignature(matches) {
-  return matches
-    .map((match) => `${match.id}:${match.matchKind}:${match.matchScore}`);
+  return Array.from(matches, (match) => `${match.id}:${match.matchKind}:${match.matchScore}`);
 }
 
 function assertSameRootCommandMatches(commands, aliases) {

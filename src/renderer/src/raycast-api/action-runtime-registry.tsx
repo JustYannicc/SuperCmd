@@ -406,7 +406,8 @@ export function createActionRegistryRuntime(deps: RegistryDeps) {
       return () => {
         mountedRef.current = false;
         pendingRef.current = false;
-        lastSnapshotRef.current = '';
+        registryRef.current.clear();
+        visibleSignatureRef.current.clear();
       };
     }, []);
 

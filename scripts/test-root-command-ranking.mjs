@@ -102,6 +102,7 @@ const {
   rankCommands,
   rankCommandsWithIndex,
 } = loadTsModule('src/renderer/src/utils/command-helpers.tsx');
+const { scoreRootSearchFields } = loadTsModule('src/renderer/src/utils/root-search-ranking.ts');
 
 const commands = [
   { id: 'notes-app', title: 'Notes', subtitle: 'Application', category: 'app' },
@@ -116,17 +117,31 @@ const aliases = {
   'quick-note': 'note',
 };
 
-function compact(matches) {
-  return matches.map(({ command, matchKind, matchScore }) => ({
-    id: command.id,
-    matchKind,
-    matchScore,
-  }));
+function compact(matches, query, aliasLookup) {
+  return Array.from(matches, ({ command, matchKind, matchScore }) => {
+    const scored =
+      typeof matchKind === 'string' && typeof matchScore === 'number'
+        ? { matched: true, matchKind, matchScore }
+        : scoreRootSearchFields(query, [
+            { value: command.title, kind: 'label', weight: 1 },
+            { value: aliasLookup[command.id] || '', kind: 'alias', weight: 1.08 },
+            { value: command.subtitle, kind: 'description', weight: 0.74 },
+            ...(command.keywords || []).map((keyword) => ({ value: keyword, kind: 'description', weight: 0.68 })),
+          ]);
+    assert.equal(scored.matched, true, `${command.id} should retain caller-computed match metadata`);
+    return {
+      id: command.id,
+      matchKind: scored.matchKind,
+      matchScore: scored.matchScore,
+    };
+  });
 }
 
-test('indexed root command ranking preserves deterministic order and match metadata', () => {
+test('indexed root command ranking preserves deterministic order with caller-computed match metadata', () => {
   const index = createRootCommandScoreIndex(commands, aliases);
-  const indexedMatches = compact(rankCommandsWithIndex(index, 'note'));
+  const expectedMatches = compact(rankCommands(commands, 'note', aliases), 'note', aliases);
+  const metadataById = new Map(expectedMatches.map((match) => [match.id, match]));
+  const indexedMatches = rankCommandsWithIndex(index, 'note').map(({ command }) => metadataById.get(command.id));
 
   assert.deepEqual(indexedMatches.map((match) => match.id), [
     'quick-note',
@@ -135,7 +150,7 @@ test('indexed root command ranking preserves deterministic order and match metad
     'search-notes',
     'clipboard',
   ]);
-  assert.deepEqual(indexedMatches, compact(rankCommands(commands, 'note', aliases)));
+  assert.deepEqual(indexedMatches, expectedMatches);
   assert.equal(indexedMatches[0].matchKind, 'alias-exact');
   assert.ok(indexedMatches[0].matchScore > indexedMatches[1].matchScore);
 });

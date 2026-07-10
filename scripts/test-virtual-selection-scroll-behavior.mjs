@@ -51,13 +51,14 @@ test('selected-item scrolls do not queue smooth animations', () => {
 
   const gridSelectionScroll = sourceWindow(
     readRepoFile('src/renderer/src/raycast-api/grid-runtime.tsx'),
-    'querySelector(`[data-idx="${selectedIdx}"]`)'
+    'const nextScrollTop = getScrollTopForItemIndex(virtualLayout, selectedIdx'
   );
   assert.match(
     gridSelectionScroll,
-    /scrollIntoView\(\{\s*block:\s*'nearest',\s*behavior:\s*'auto'\s*\}\);/,
-    'Raycast grid selection correction should scroll instantly'
+    /node\.scrollTo\(\{\s*top:\s*nextScrollTop,\s*behavior:\s*'auto'\s*\}\);/,
+    'Raycast grid selection correction should scroll instantly to the selected virtual row'
   );
+  assert.doesNotMatch(gridSelectionScroll, /scrollIntoView/, 'Raycast grid selection correction should use virtual row offsets');
   assert.doesNotMatch(
     gridSelectionScroll,
     /behavior:\s*['"]smooth['"]/,

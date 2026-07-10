@@ -178,20 +178,22 @@ function extractFsFacadeSource() {
 
 function assertFacadeFallthroughWiring() {
   const source = fs.readFileSync(EXTENSION_VIEW_PATH, 'utf8');
-  const helperIndex = source.indexOf('function getSuperCmdBuiltinFacade');
-  assert.notEqual(helperIndex, -1, 'fakeRequire should use a facade helper with real-node fallthrough');
-  assert.notEqual(
-    source.indexOf('new Proxy(facade', helperIndex),
-    -1,
-    'SuperCmd fs/child_process facades should proxy missing members to real Node modules'
+  assert.match(
+    source,
+    /const SUPERCMD_BUILTIN_FACADE_MODULES = new Set<string>\(\[\s*[\s\S]*?'child_process',[\s\S]*?\]\);/,
+    'only lifecycle-aware child_process should bypass real Node builtins'
   );
 
   const fakeRequireIndex = source.indexOf('const fakeRequire: any = (name: string): any =>');
-  const facadeCallIndex = source.indexOf('getSuperCmdBuiltinFacade(name)', fakeRequireIndex);
+  const facadeCallIndex = source.indexOf('shouldUseSuperCmdBuiltinFacade(name)', fakeRequireIndex);
   const realRequireIndex = source.indexOf('tryRealNodeRequire(name)', fakeRequireIndex);
+  const stubFallbackIndex = source.indexOf('if (name in nodeBuiltinStubs)', fakeRequireIndex);
   assert.ok(
-    fakeRequireIndex !== -1 && facadeCallIndex !== -1 && realRequireIndex !== -1 && facadeCallIndex < realRequireIndex,
-    'fakeRequire should resolve SuperCmd fs/child_process facades before generic real require'
+    fakeRequireIndex !== -1 &&
+      facadeCallIndex !== -1 &&
+      realRequireIndex > facadeCallIndex &&
+      stubFallbackIndex > realRequireIndex,
+    'fakeRequire should reserve child_process, prefer real Node for fs, then use compatibility stubs'
   );
 }
 

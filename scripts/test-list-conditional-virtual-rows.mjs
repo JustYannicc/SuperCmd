@@ -133,8 +133,8 @@ function hasRenderedEmojiCellScroll(sourceFile) {
 
 function analyzeListRuntimeSource() {
   const sourceFile = parseListRuntimeSource();
-  const flatRowsDeclaration = findVariableDeclaration(sourceFile, 'flatRows');
-  const { callback, deps } = getUseMemoArguments(flatRowsDeclaration);
+  const listRowsDeclaration = findVariableDeclaration(sourceFile, 'listRows');
+  const { callback, deps } = getUseMemoArguments(listRowsDeclaration);
   return {
     skipsFlatRowsForEmojiGrid: flatRowsSkipsEmojiGrid(callback),
     tracksEmojiGridDependency:
@@ -164,9 +164,9 @@ function measureAvoidedRows() {
 
 test('list runtime skips unused linear rows for emoji-grid mode', () => {
   const source = analyzeListRuntimeSource();
-  assert.equal(source.skipsFlatRowsForEmojiGrid, true, 'flat row construction should short-circuit in emoji-grid mode');
-  assert.equal(source.tracksEmojiGridDependency, true, 'flat row memo should update when the layout mode changes');
-  assert.equal(source.scrollsRenderedEmojiCell, true, 'emoji-grid selection should still scroll the rendered selected cell');
+  assert.equal(source.skipsFlatRowsForEmojiGrid, true, 'linear row construction should short-circuit in emoji-grid mode');
+  assert.equal(source.tracksEmojiGridDependency, true, 'linear row memo should update when the layout mode changes');
+  assert.equal(source.scrollsRenderedEmojiCell, false, 'virtualized emoji selection should use row offsets even when the cell is not rendered');
 
   const measurements = measureAvoidedRows();
   for (const measurement of measurements) {

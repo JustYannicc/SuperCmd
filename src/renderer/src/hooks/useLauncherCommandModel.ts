@@ -505,6 +505,21 @@ export function useLauncherCommandModel({
     if (!shouldIndexRootCommands) return [];
     return rankCommandsWithIndex(rootCommandScoreIndex, searchQuery)
       .map(({ command, matchKind, matchScore }) => {
+        const scoredMatch =
+          typeof matchKind === 'string' && typeof matchScore === 'number'
+            ? { matched: true as const, matchKind, matchScore }
+            : scoreRootSearchFields(searchQuery, [
+                { value: command.title, kind: 'label', weight: 1 },
+                { value: commandAliases[command.id] || '', kind: 'alias', weight: 1.08 },
+                { value: command.subtitle, kind: 'description', weight: 0.74 },
+                ...(command.keywords || []).map((keyword) => ({
+                  value: keyword,
+                  kind: 'description' as const,
+                  weight: 0.68,
+                })),
+              ]);
+        if (!scoredMatch.matched) return null;
+
         const subtype = inferCommandSubtype(command);
         const stableKey = `command:${command.id}`;
         return scoreRootSearchCandidate({
@@ -520,8 +535,8 @@ export function useLauncherCommandModel({
           label: command.title,
           description: command.subtitle,
           pathOrUrl: command.path,
-          matchKind,
-          matchScore,
+          matchKind: scoredMatch.matchKind,
+          matchScore: scoredMatch.matchScore,
           sourceQualityBoost: command.alwaysOnTop ? 80 : 0,
           freshnessBoost: 0,
           pathLocationBoost: 0,
@@ -530,7 +545,7 @@ export function useLauncherCommandModel({
         }, searchQuery, rootSearchRanking);
       })
       .filter((candidate): candidate is RootSearchCandidate => Boolean(candidate));
-  }, [shouldIndexRootCommands, rootCommandScoreIndex, searchQuery, rootSearchRanking]);
+  }, [shouldIndexRootCommands, rootCommandScoreIndex, searchQuery, rootSearchRanking, commandAliases]);
 
   const fileCandidates = useMemo<RootSearchCandidate[]>(() => {
     if (!hasSearchQuery || aiMode || rootBangState.mode !== 'none') return [];
