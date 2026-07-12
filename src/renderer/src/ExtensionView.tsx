@@ -16,6 +16,7 @@ import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import * as RaycastAPI from './raycast-api';
 import { NavigationContext, setExtensionContext, setGlobalNavigation, ExtensionContextType, ExtensionInfoReactContext } from './raycast-api';
 import { withExtensionContext } from './raycast-api/context-scope-runtime';
+import { getCompiledExtensionWrapper } from './utils/extension-wrapper-cache';
 
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
@@ -529,6 +530,203 @@ function fsStatResult(
 
 const commandPathCache = new Map<string, string | null>();
 
+type SyncCommandResult = { stdout: string; stderr: string; exitCode: number };
+type RealFsStatPayload = {
+  exists: boolean;
+  isDirectory: boolean;
+  isFile: boolean;
+  size: number;
+  mode?: number;
+  uid?: number;
+  gid?: number;
+  dev?: number;
+  ino?: number;
+  nlink?: number;
+  atimeMs?: number;
+  mtimeMs?: number;
+  ctimeMs?: number;
+  birthtimeMs?: number;
+};
+
+let realNodeFsModule: any | undefined;
+let realNodeChildProcessModule: any | undefined;
+
+function getRealNodeRequire(): ((id: string) => any) | null {
+  if (!USE_REAL_NODE_BUILTINS) return null;
+  if (typeof _realNodeRequire === 'function') return _realNodeRequire;
+  if (typeof window !== 'undefined' && typeof (window as any).__scNodeRequire === 'function') {
+    return (window as any).__scNodeRequire;
+  }
+  return null;
+}
+
+function getRealNodeBuiltin(name: string): any | null {
+  const realRequire = getRealNodeRequire();
+  if (!realRequire) return null;
+  try {
+    return realRequire(name);
+  } catch {
+    return null;
+  }
+}
+
+function getRealNodeFsModule(): any | null {
+  if (realNodeFsModule !== undefined) return realNodeFsModule;
+  const mod = getRealNodeBuiltin('fs');
+  if (mod) realNodeFsModule = mod;
+  return mod || null;
+}
+
+function getRealNodeChildProcessModule(): any | null {
+  if (realNodeChildProcessModule !== undefined) return realNodeChildProcessModule;
+  const mod = getRealNodeBuiltin('child_process');
+  if (mod) realNodeChildProcessModule = mod;
+  return mod || null;
+}
+
+function formatSyncOutput(value: any): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return BufferPolyfill.from(toUint8Array(value)).toString();
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+function buildSyncCommandEnv(options?: { env?: Record<string, string> }): Record<string, string> {
+  const baseEnv = { ...((_realNodeProcess?.env || {}) as Record<string, string>) };
+  const extraPaths = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    '/usr/bin', '/usr/sbin', '/bin', '/sbin',
+  ];
+  const currentPath = (options?.env?.PATH ?? baseEnv.PATH ?? '');
+  const augmentedPath = [
+    ...extraPaths,
+    ...String(currentPath).split(':').filter(Boolean),
+  ].filter((value, index, all) => all.indexOf(value) === index).join(':');
+  return {
+    ...baseEnv,
+    ...(options?.env || {}),
+    PATH: augmentedPath,
+  };
+}
+
+function runNodeCommandSync(
+  command: string,
+  args: string[],
+  options?: { shell?: boolean | string; input?: string; env?: Record<string, string>; cwd?: string }
+): SyncCommandResult | null {
+  const childProcess = getRealNodeChildProcessModule();
+  if (!childProcess || typeof childProcess.spawnSync !== 'function') return null;
+  try {
+    const spawnOptions: any = {
+      shell: options?.shell ?? false,
+      env: buildSyncCommandEnv(options),
+      cwd: options?.cwd || _realNodeProcess?.cwd?.() || undefined,
+      input: options?.input,
+      encoding: 'utf-8',
+      timeout: 60_000,
+    };
+    const result = options?.shell
+      ? childProcess.spawnSync([command, ...(args || [])].join(' '), [], { ...spawnOptions, shell: true })
+      : childProcess.spawnSync(command, args || [], spawnOptions);
+    return {
+      stdout: formatSyncOutput(result?.stdout),
+      stderr: formatSyncOutput(result?.stderr || result?.error?.message),
+      exitCode: typeof result?.status === 'number' ? result.status : result?.error ? 1 : 0,
+    };
+  } catch (error: any) {
+    return {
+      stdout: '',
+      stderr: error?.message || 'Failed to execute command',
+      exitCode: 1,
+    };
+  }
+}
+
+function runExtensionCommandSync(
+  command: string,
+  args: string[],
+  options?: { shell?: boolean | string; input?: string; env?: Record<string, string>; cwd?: string }
+): SyncCommandResult {
+  const nodeResult = runNodeCommandSync(command, args, options);
+  if (nodeResult) return nodeResult;
+  try {
+    return (window as any).electron?.execCommandSync?.(command, args, options) || { stdout: '', stderr: '', exitCode: 0 };
+  } catch (error: any) {
+    return { stdout: '', stderr: error?.message || 'Failed to execute command', exitCode: 1 };
+  }
+}
+
+function realFileExistsSync(path: string): boolean {
+  const fs = getRealNodeFsModule();
+  if (fs && typeof fs.existsSync === 'function') {
+    try {
+      return Boolean(fs.existsSync(path));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return (window as any).electron?.fileExistsSync?.(path) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function readRealFileSyncText(path: string): { data: string | null; error: string | null } {
+  const fs = getRealNodeFsModule();
+  if (fs && typeof fs.readFileSync === 'function') {
+    try {
+      return { data: String(fs.readFileSync(path, 'utf-8')), error: null };
+    } catch (error: any) {
+      return { data: null, error: error?.message || String(error) };
+    }
+  }
+  try {
+    return (window as any).electron?.readFileSync?.(path) || { data: null, error: 'readFileSync unavailable' };
+  } catch (error: any) {
+    return { data: null, error: error?.message || String(error) };
+  }
+}
+
+function toRealFsStatPayload(stat: any): RealFsStatPayload {
+  return {
+    exists: true,
+    isDirectory: typeof stat?.isDirectory === 'function' ? stat.isDirectory() : Boolean(stat?.isDirectory),
+    isFile: typeof stat?.isFile === 'function' ? stat.isFile() : Boolean(stat?.isFile),
+    size: Number(stat?.size) || 0,
+    mode: Number(stat?.mode) || undefined,
+    uid: Number(stat?.uid) || undefined,
+    gid: Number(stat?.gid) || undefined,
+    dev: Number(stat?.dev) || undefined,
+    ino: Number(stat?.ino) || undefined,
+    nlink: Number(stat?.nlink) || undefined,
+    atimeMs: Number(stat?.atimeMs) || undefined,
+    mtimeMs: Number(stat?.mtimeMs) || undefined,
+    ctimeMs: Number(stat?.ctimeMs) || undefined,
+    birthtimeMs: Number(stat?.birthtimeMs) || undefined,
+  };
+}
+
+function realStatSync(path: string): RealFsStatPayload {
+  const fs = getRealNodeFsModule();
+  if (fs && typeof fs.statSync === 'function') {
+    try {
+      return toRealFsStatPayload(fs.statSync(path));
+    } catch {
+      return { exists: false, isDirectory: false, isFile: false, size: 0 };
+    }
+  }
+  try {
+    return (window as any).electron?.statSync?.(path) || { exists: false, isDirectory: false, isFile: false, size: 0 };
+  } catch {
+    return { exists: false, isDirectory: false, isFile: false, size: 0 };
+  }
+}
+
 function isBareCommandPath(p: string): boolean {
   if (!p) return false;
   if (p.includes('/') || p.includes('\\')) return false;
@@ -540,7 +738,7 @@ function resolveCommandOnPath(command: string): string | null {
   if (!isBareCommandPath(command)) return null;
   if (commandPathCache.has(command)) return commandPathCache.get(command) || null;
   try {
-    const result = (window as any).electron?.execCommandSync?.(
+    const result = runExtensionCommandSync(
       '/bin/zsh',
       ['-lc', `command -v -- ${JSON.stringify(command)} 2>/dev/null || true`],
       {}
@@ -553,7 +751,7 @@ function resolveCommandOnPath(command: string): string | null {
     const commonDirs = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
     for (const dir of commonDirs) {
       const candidate = `${dir}/${command}`;
-      if ((window as any).electron?.fileExistsSync?.(candidate)) {
+      if (realFileExistsSync(candidate)) {
         commandPathCache.set(command, candidate);
         return candidate;
       }
@@ -572,7 +770,7 @@ function resolveExecutablePath(input: any): string {
 
   if (raw.startsWith('/')) {
     try {
-      const exists = (window as any).electron?.fileExistsSync?.(raw);
+      const exists = realFileExistsSync(raw);
       if (exists) return raw;
       const base = raw.split('/').filter(Boolean).pop() || '';
       if (base) {
@@ -705,8 +903,16 @@ function collectVirtualDirectoryEntries(dirPath: string): Map<string, FsEntryKin
 }
 
 function getRealDirectoryEntriesSync(dirPath: string): string[] {
+  const fs = getRealNodeFsModule();
+  if (fs && typeof fs.readdirSync === 'function') {
+    try {
+      return fs.readdirSync(dirPath).map((entry: any) => String(entry || '')).filter((entry: string) => entry.length > 0);
+    } catch {
+      return [];
+    }
+  }
   try {
-    const result = (window as any).electron?.execCommandSync?.('/bin/ls', ['-A1', dirPath], {});
+    const result = runExtensionCommandSync('/bin/ls', ['-A1', dirPath], {});
     if (!result || result.exitCode !== 0) return [];
     return String(result.stdout || '')
       .split(/\r?\n/)
@@ -729,7 +935,7 @@ async function getRealDirectoryEntriesAsync(dirPath: string): Promise<string[]> 
 
 function getEntryKindFromRealStat(path: string): FsEntryKind {
   try {
-    const stat = (window as any).electron?.statSync?.(path);
+    const stat = realStatSync(path);
     if (!stat?.exists) return 'unknown';
     if (stat.isDirectory) return 'directory';
     if (stat.isFile) return 'file';
@@ -773,7 +979,7 @@ function combineDirectoryEntries(
 }
 
 function assertReadableDirectory(path: string, hasEntries: boolean): void {
-  const stat = (window as any).electron?.statSync?.(path);
+  const stat = realStatSync(path);
   if (stat?.exists && !stat.isDirectory) {
     throw createFsError('ENOTDIR', 'scandir', path);
   }
@@ -819,7 +1025,7 @@ const fsStub: Record<string, any> = {
     if (getStoredText(path) !== null) return true;
     // Fall back to real file system via sync IPC
     try {
-      return (window as any).electron?.fileExistsSync?.(path) ?? false;
+      return realFileExistsSync(path);
     } catch {
       return false;
     }
@@ -834,7 +1040,7 @@ const fsStub: Record<string, any> = {
     }
     // Fall back to real file system via sync IPC (for reading extension assets etc.)
     try {
-      const result = (window as any).electron?.readFileSync?.(path);
+      const result = readRealFileSyncText(path);
       if (result && result.data !== null) {
         if (opts?.encoding || typeof opts === 'string') return result.data;
         return BufferPolyfill.from(result.data);
@@ -876,7 +1082,7 @@ const fsStub: Record<string, any> = {
     const content = getStoredText(path);
     if (content !== null) return fsStatResult(true, false, content.length);
     try {
-      const result = (window as any).electron?.statSync?.(path);
+      const result = realStatSync(path);
       if (result?.exists) return fsStatResult(true, result.isDirectory, Number(result.size) || 0, result);
     } catch {}
     return fsStatResult(false);
@@ -886,15 +1092,36 @@ const fsStub: Record<string, any> = {
     const content = getStoredText(path);
     if (content !== null) return fsStatResult(true, false, content.length);
     try {
-      const result = (window as any).electron?.statSync?.(path);
+      const result = realStatSync(path);
       if (result?.exists) return fsStatResult(true, result.isDirectory, Number(result.size) || 0, result);
     } catch {}
     return fsStatResult(false);
   },
   realpathSync: (p: string) => resolveFsLookupPath(p),
-  unlinkSync: (p: string) => { removeStoredText(resolveFsLookupPath(p)); },
-  rmdirSync: noop,
-  rmSync: (p: string) => { removeStoredText(resolveFsLookupPath(p)); },
+  unlinkSync: (p: string) => {
+    const path = resolveFsLookupPath(p);
+    const hadVirtual = getStoredText(path) !== null;
+    removeStoredText(path);
+    if (!hadVirtual) {
+      const fs = getRealNodeFsModule();
+      if (fs && typeof fs.unlinkSync === 'function') fs.unlinkSync(path);
+    }
+  },
+  rmdirSync: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.rmdirSync === 'function') {
+      return fs.rmdirSync(resolveFsLookupPath(p), ...args);
+    }
+  },
+  rmSync: (p: string, ...args: any[]) => {
+    const path = resolveFsLookupPath(p);
+    const hadVirtual = getStoredText(path) !== null;
+    removeStoredText(path);
+    if (!hadVirtual) {
+      const fs = getRealNodeFsModule();
+      if (fs && typeof fs.rmSync === 'function') return fs.rmSync(path, ...args);
+    }
+  },
   renameSync: (oldPath: string, newPath: string) => {
     const src = resolveFsLookupPath(oldPath);
     const dest = resolveFsLookupPath(newPath);
@@ -902,33 +1129,67 @@ const fsStub: Record<string, any> = {
     if (content !== null) {
       setStoredText(dest, content);
       removeStoredText(src);
+      return;
     }
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.renameSync === 'function') fs.renameSync(src, dest);
   },
   copyFileSync: (src: string, dest: string) => {
     const source = resolveFsLookupPath(src);
     const destination = resolveFsLookupPath(dest);
     const content = getStoredText(source);
-    if (content !== null) setStoredText(destination, content);
+    if (content !== null) {
+      setStoredText(destination, content);
+      return;
+    }
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.copyFileSync === 'function') fs.copyFileSync(source, destination);
   },
-  chmodSync: noop,
+  chmodSync: (p: string, mode: string | number) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.chmodSync === 'function') {
+      fs.chmodSync(resolveFsLookupPath(p), mode);
+    }
+  },
   accessSync: (p: any) => {
     const path = resolveFsLookupPath(p);
     if (getStoredText(path) !== null) return;
     try {
-      if ((window as any).electron?.fileExistsSync?.(path)) return;
+      if (realFileExistsSync(path)) return;
     } catch {}
     const err: any = new Error(`ENOENT: no such file or directory, access '${path}'`);
     err.code = 'ENOENT';
     throw err;
   },
-  openSync: () => 0,
-  closeSync: noop,
-  readSync: () => 0,
-  writeSync: () => 0,
-  createReadStream: (p: any) => {
+  openSync: (p: any, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.openSync === 'function') {
+      return fs.openSync(resolveFsLookupPath(p), ...args);
+    }
+    return 0;
+  },
+  closeSync: (fd: number) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.closeSync === 'function') fs.closeSync(fd);
+  },
+  readSync: (...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.readSync === 'function') return fs.readSync(...args);
+    return 0;
+  },
+  writeSync: (...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.writeSync === 'function') return fs.writeSync(...args);
+    return 0;
+  },
+  createReadStream: (p: any, ...args: any[]) => {
     const path = resolveFsLookupPath(p);
-    const s: any = new (nodeBuiltinStubs?.stream?.Readable || class {})();
     const content = getStoredText(path);
+    const fs = getRealNodeFsModule();
+    if (content == null && fs && typeof fs.createReadStream === 'function') {
+      return fs.createReadStream(path, ...args);
+    }
+    const s: any = new (nodeBuiltinStubs?.stream?.Readable || class {})();
     setTimeout(() => {
       if (content != null) {
         const bytes = toUint8Array(content);
@@ -939,8 +1200,12 @@ const fsStub: Record<string, any> = {
     }, 0);
     return s;
   },
-  createWriteStream: (p: any) => {
+  createWriteStream: (p: any, ...args: any[]) => {
     const filePath = resolveFsLookupPath(p);
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.createWriteStream === 'function') {
+      return fs.createWriteStream(filePath, ...args);
+    }
     const s: any = new WritableStub();
     const chunks: Uint8Array[] = [];
     const defer = (fn: () => void) => {
@@ -1007,7 +1272,7 @@ const fsStub: Record<string, any> = {
         cb(null, content);
       } else {
         // Fall back to real file system
-        const exists = Boolean((window as any).electron?.fileExistsSync?.(path));
+        const exists = realFileExistsSync(path);
         ((window as any).electron?.readFile?.(path) as Promise<string>)
           ?.then((data: string) => {
             if (exists) {
@@ -1049,7 +1314,7 @@ const fsStub: Record<string, any> = {
       if (getStoredText(path) !== null) cb(null);
       else {
         try {
-          if ((window as any).electron?.fileExistsSync?.(path)) { cb(null); return; }
+          if (realFileExistsSync(path)) { cb(null); return; }
         } catch {}
         const err: any = new Error(`ENOENT: no such file or directory, access '${path}'`);
         err.code = 'ENOENT';
@@ -1067,7 +1332,7 @@ const fsStub: Record<string, any> = {
       return;
     }
     try {
-      const result = (window as any).electron?.statSync?.(path);
+      const result = realStatSync(path);
       if (result?.exists) {
         cb(null, fsStatResult(true, result.isDirectory, Number(result.size) || 0, result));
         return;
@@ -1085,7 +1350,7 @@ const fsStub: Record<string, any> = {
       return;
     }
     try {
-      const result = (window as any).electron?.statSync?.(path);
+      const result = realStatSync(path);
       if (result?.exists) {
         cb(null, fsStatResult(true, result.isDirectory, Number(result.size) || 0, result));
         return;
@@ -1117,9 +1382,25 @@ const fsStub: Record<string, any> = {
     fsStub.renameSync(oldPath, newPath);
     if (typeof cb === 'function') cb(null);
   },
-  watch: () => ({ close: noop, on: noop }),
-  watchFile: noop,
-  unwatchFile: noop,
+  watch: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.watch === 'function') {
+      return fs.watch(resolveFsLookupPath(p), ...args);
+    }
+    return { close: noop, on: noop };
+  },
+  watchFile: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.watchFile === 'function') {
+      return fs.watchFile(resolveFsLookupPath(p), ...args);
+    }
+  },
+  unwatchFile: (p: string, ...args: any[]) => {
+    const fs = getRealNodeFsModule();
+    if (fs && typeof fs.unwatchFile === 'function') {
+      return fs.unwatchFile(resolveFsLookupPath(p), ...args);
+    }
+  },
   constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
   promises: {
     readFile: async (p: string, opts?: any) => {
@@ -1131,7 +1412,7 @@ const fsStub: Record<string, any> = {
       }
       // Fall back to real file system
       try {
-        const exists = Boolean((window as any).electron?.fileExistsSync?.(path));
+        const exists = realFileExistsSync(path);
         const data = await (window as any).electron?.readFile?.(path);
         if (exists) {
           if (opts?.encoding || typeof opts === 'string') return data;
@@ -1167,7 +1448,7 @@ const fsStub: Record<string, any> = {
       const content = getStoredText(path);
       if (content !== null) return fsStatResult(true, false, content.length);
       try {
-        const result = (window as any).electron?.statSync?.(path);
+        const result = realStatSync(path);
         if (result?.exists) return fsStatResult(true, result.isDirectory, Number(result.size) || 0, result);
       } catch {}
       throw createFsError('ENOENT', 'stat', path);
@@ -1177,7 +1458,7 @@ const fsStub: Record<string, any> = {
       const content = getStoredText(path);
       if (content !== null) return fsStatResult(true, false, content.length);
       try {
-        const result = (window as any).electron?.statSync?.(path);
+        const result = realStatSync(path);
         if (result?.exists) return fsStatResult(true, result.isDirectory, Number(result.size) || 0, result);
       } catch {}
       throw createFsError('ENOENT', 'lstat', path);
@@ -1187,7 +1468,7 @@ const fsStub: Record<string, any> = {
       const path = resolveFsLookupPath(p);
       if (getStoredText(path) !== null) return;
       try {
-        if ((window as any).electron?.fileExistsSync?.(path)) return;
+        if (realFileExistsSync(path)) return;
       } catch {}
       const err: any = new Error(`ENOENT: no such file or directory, access '${path}'`);
       err.code = 'ENOENT';
@@ -1212,7 +1493,13 @@ const fsStub: Record<string, any> = {
         throw new Error(result.stderr || `chmod failed with exit code ${result.exitCode}`);
       }
     },
-    open: noopAsync,
+    open: async (p: string, ...args: any[]) => {
+      const fs = getRealNodeFsModule();
+      if (fs?.promises && typeof fs.promises.open === 'function') {
+        return fs.promises.open(resolveFsLookupPath(p), ...args);
+      }
+      return noopAsync();
+    },
   },
 };
 
@@ -1874,7 +2161,7 @@ const childProcessStub = {
   },
   execSync: (command: string) => {
     const normalizedCommand = rewriteShellCommandForMissingBinary(command);
-    const result = (window as any).electron?.execCommandSync?.(
+    const result = runExtensionCommandSync(
       '/bin/zsh',
       ['-lc', normalizedCommand],
       { shell: false }
@@ -1982,11 +2269,11 @@ const childProcessStub = {
       options = args[1];
     }
 
-    const result = (window as any).electron?.execCommandSync?.(
+    const result = runExtensionCommandSync(
       file,
       execArgs,
       { shell: false, env: options?.env, cwd: options?.cwd, input: options?.input }
-    ) || { stdout: '', stderr: '', exitCode: 0 };
+    );
 
     if (result.exitCode !== 0) {
       const stderrOrMsg = String(result?.stderr || '');
@@ -2203,11 +2490,11 @@ const childProcessStub = {
   },
   spawnSync: (command: string, spawnArgs?: string[], options?: any) => {
     const resolvedCommand = resolveExecutablePath(command);
-    const result = (window as any).electron?.execCommandSync?.(
+    const result = runExtensionCommandSync(
       resolvedCommand,
       Array.isArray(spawnArgs) ? spawnArgs : [],
       { shell: options?.shell ?? false, env: options?.env, cwd: options?.cwd, input: options?.input }
-    ) || { stdout: '', stderr: '', exitCode: 0 };
+    );
 
     const stdoutBuf = BufferPolyfill.from(result.stdout || '');
     const stderrBuf = BufferPolyfill.from(result.stderr || '');
@@ -2233,7 +2520,13 @@ const childProcessStub = {
       error: undefined,
     };
   },
-  fork: () => createStubChildProcess(),
+  fork: (...args: any[]) => {
+    const childProcess = getRealNodeChildProcessModule();
+    if (childProcess && typeof childProcess.fork === 'function') {
+      return childProcess.fork(...args);
+    }
+    return createStubChildProcess();
+  },
 };
 
 // ── timers stubs ────────────────────────────────────────────────
@@ -3037,6 +3330,64 @@ function isNodeBuiltinRequest(name: string): boolean {
   return false;
 }
 
+function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  return normalized === 'fs' || normalized === 'fs/promises' || normalized === 'child_process';
+}
+
+const superCmdBuiltinFacadeCache = new Map<string, any>();
+
+function getSuperCmdBuiltinFacade(name: string): any | undefined {
+  if (!shouldUseSuperCmdBuiltinFacade(name)) return undefined;
+  const normalized = name.startsWith('node:') ? name.slice(5) : name;
+  const facade = nodeBuiltinStubs[normalized] || nodeBuiltinStubs[name] || nodeBuiltinStubs[`node:${normalized}`];
+  if (!facade) return undefined;
+
+  const realModule = getRealNodeBuiltin(name) || getRealNodeBuiltin(normalized);
+  if (!realModule || typeof realModule !== 'object') return facade;
+
+  const cacheKey = normalized;
+  const cached = superCmdBuiltinFacadeCache.get(cacheKey);
+  if (cached?.realModule === realModule && cached?.facade === facade) {
+    return cached.proxy;
+  }
+
+  const proxy = new Proxy(facade, {
+    get(target, prop, receiver) {
+      if (prop === Symbol.toStringTag && prop in realModule) return realModule[prop as any];
+      if (Reflect.has(target, prop)) {
+        const value = Reflect.get(target, prop, receiver);
+        const realValue = realModule[prop as any];
+        if (
+          prop === 'constants' &&
+          value &&
+          realValue &&
+          typeof value === 'object' &&
+          typeof realValue === 'object'
+        ) {
+          return { ...realValue, ...value };
+        }
+        return value;
+      }
+      return realModule[prop as any];
+    },
+    has(target, prop) {
+      return Reflect.has(target, prop) || prop in realModule;
+    },
+    ownKeys(target) {
+      return Array.from(new Set([...Reflect.ownKeys(realModule), ...Reflect.ownKeys(target)]));
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      const targetDescriptor = Reflect.getOwnPropertyDescriptor(target, prop);
+      if (targetDescriptor) return targetDescriptor;
+      const realDescriptor = Reflect.getOwnPropertyDescriptor(realModule, prop);
+      return realDescriptor ? { ...realDescriptor, configurable: true } : undefined;
+    },
+  });
+  superCmdBuiltinFacadeCache.set(cacheKey, { facade, realModule, proxy });
+  return proxy;
+}
+
 // Capture real Node globals once, then remove them from globalThis so
 // extensions can't reach around fakeRequire. Runs at module load, before
 // any extension code executes.
@@ -3571,7 +3922,8 @@ end tell`.trim();
 function loadExtensionExport(
   code: string,
   extensionPath?: string,
-  timerRegistry?: TimerRegistry
+  timerRegistry?: TimerRegistry,
+  extensionIdentity = extensionPath || 'unknown-extension'
 ): Function | null {
   const patchSchemeDynamicImports = (sourceCode: string): string => {
     // Extension bundles may emit dynamic imports for native Raycast bridges
@@ -3747,6 +4099,10 @@ function loadExtensionExport(
       // Prefer real Node (via the preload bridge) when the hosting window
       // has Node enabled. Falls back to the stub if the module isn't a
       // recognised built-in, or if real require throws.
+      if (shouldUseSuperCmdBuiltinFacade(name)) {
+        const facade = getSuperCmdBuiltinFacade(name);
+        if (facade) return facade;
+      }
       const realModule = tryRealNodeRequire(name);
       if (realModule !== undefined) {
         return realModule;
@@ -3962,28 +4318,14 @@ function loadExtensionExport(
     // anyway because requests are routed through the main process). Code
     // that genuinely needs navigator can still reach it via
     // `globalThis.navigator` or `window.navigator`.
-    const fn = new Function(
-      'exports',
-      'require',
-      'module',
-      '__filename',
-      '__dirname',
-      'process',
-      'Buffer',
-      'global',
-      'globalThis',
-      'setImmediate',
-      'clearImmediate',
-      'setInterval',
-      'clearInterval',
-      'setTimeout',
-      'clearTimeout',
-      'requestAnimationFrame',
-      'cancelAnimationFrame',
-      'navigator',
-      '__scDynamicImport',
-      executableCode
-    );
+    const { wrapper: fn, cacheHit } = getCompiledExtensionWrapper({
+      extensionIdentity,
+      code,
+      executableCode,
+    });
+    if ((globalThis as any).__SUPERCMD_DEBUG_EXTENSION_WRAPPER_CACHE) {
+      console.debug(`[loadExtensionExport] Wrapper cache ${cacheHit ? 'hit' : 'miss'} for ${extensionIdentity}`);
+    }
 
     fn(
       moduleExports,
@@ -4239,6 +4581,11 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     mode,
   ]);
 
+  const extensionWrapperIdentity = useMemo(
+    () => [owner, extensionName, commandName, extensionPath].map((part) => String(part || '')).join('\0'),
+    [owner, extensionName, commandName, extensionPath]
+  );
+
   // Set extension context before loading (so getPreferenceValues etc. work)
   useEffect(() => {
     setExtensionContext(extensionCtx);
@@ -4266,9 +4613,9 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     // Load under the extension's scoped context so other async extension work
     // cannot leak a different context into this bundle.
     return withExtensionContext(extensionCtx, () =>
-      loadExtensionExport(code, extensionPath, timerRegistryRef.current)
+      loadExtensionExport(code, extensionPath, timerRegistryRef.current, extensionWrapperIdentity)
     );
-  }, [code, buildError, extensionCtx, extensionPath]);
+  }, [code, buildError, extensionCtx, extensionPath, extensionWrapperIdentity]);
 
   // Is this a no-view command? Trust the mode from package.json.
   // NOTE: 'menu-bar' commands ARE React components (they use hooks),
