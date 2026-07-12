@@ -3,7 +3,17 @@
  * Purpose: Shared extension storage change event bridge.
  */
 
-type ExtensionCtx = { extensionName?: string };
+export type ExtensionStorageChangedDetail = {
+  extensionName: string;
+  commandName?: string;
+  commandMode?: string;
+};
+
+type ExtensionCtx = {
+  extensionName?: string;
+  commandName?: string;
+  commandMode?: string;
+};
 
 let getExtensionContextRef: () => ExtensionCtx = () => ({ extensionName: '' });
 
@@ -11,14 +21,21 @@ export function configureStorageEvents(deps: { getExtensionContext: () => Extens
   getExtensionContextRef = deps.getExtensionContext;
 }
 
-export function emitExtensionStorageChanged(): void {
+export function emitExtensionStorageChanged(origin?: Partial<ExtensionStorageChangedDetail>): void {
   try {
-    const extensionName = (getExtensionContextRef().extensionName || '').trim();
+    const context = getExtensionContextRef();
+    const extensionName = (origin?.extensionName || context.extensionName || '').trim();
     if (!extensionName) return;
+
+    const commandName = (origin?.commandName || context.commandName || '').trim();
+    const commandMode = (origin?.commandMode || context.commandMode || '').trim();
+    const detail: ExtensionStorageChangedDetail = { extensionName };
+    if (commandName) detail.commandName = commandName;
+    if (commandMode) detail.commandMode = commandMode;
 
     window.dispatchEvent(
       new CustomEvent('sc-extension-storage-changed', {
-        detail: { extensionName },
+        detail,
       })
     );
   } catch {

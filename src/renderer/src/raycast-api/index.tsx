@@ -1387,11 +1387,22 @@ export namespace Cache {
   export type Subscription = () => void;
 }
 
+const CACHE_METADATA_VERSION = 2;
+
+interface CacheStorageMetadata {
+  version?: number;
+  lruOrder?: unknown;
+  sizeByKey?: unknown;
+  totalSize?: unknown;
+}
+
 export class Cache {
   private storageKey: string;
   private capacity: number;
   private subscribers: Set<Cache.Subscriber> = new Set();
   private lruOrder: string[] = []; // Track access order for LRU
+  private sizeByKey: Map<string, number> = new Map();
+  private totalSize = 0;
 
   constructor(options: Cache.Options = {}) {
     this.capacity = options.capacity ?? 10 * 1024 * 1024; // 10MB default
@@ -1403,21 +1414,146 @@ export class Cache {
   }
 
   private loadFromStorage(): void {
+    let metadata: CacheStorageMetadata | null = null;
+    let hadStoredMetadata = false;
+
     try {
       const stored = localStorage.getItem(this.storageKey);
+      hadStoredMetadata = stored !== null;
       if (stored) {
-        const parsed = JSON.parse(stored);
-        this.lruOrder = parsed.lruOrder || [];
+        metadata = JSON.parse(stored);
       }
     } catch (e) {
       console.error('Failed to load cache from storage:', e);
+      this.recoverFromStorage(undefined, true);
+      return;
+    }
+
+    if (!metadata || typeof metadata !== 'object') {
+      this.recoverFromStorage(undefined, hadStoredMetadata);
+      return;
+    }
+
+    const lruOrder = this.parseLruOrder(metadata.lruOrder);
+    if (!lruOrder) {
+      this.recoverFromStorage(undefined, true);
+      return;
+    }
+
+    const storedSizes = this.parseStoredSizes(metadata.sizeByKey);
+    if (!storedSizes) {
+      this.recoverFromStorage(lruOrder, true);
+      return;
+    }
+
+    let totalSize = 0;
+    const nextSizes = new Map<string, number>();
+    let hasAllSizes = true;
+
+    for (const key of lruOrder) {
+      const size = storedSizes.get(key);
+      if (size === undefined) {
+        hasAllSizes = false;
+        break;
+      }
+      nextSizes.set(key, size);
+      totalSize += size;
+    }
+
+    if (!hasAllSizes) {
+      this.recoverFromStorage(lruOrder, true);
+      return;
+    }
+
+    this.lruOrder = lruOrder;
+    this.sizeByKey = nextSizes;
+    this.totalSize = totalSize;
+
+    if (
+      metadata.version !== CACHE_METADATA_VERSION ||
+      metadata.totalSize !== totalSize ||
+      storedSizes.size !== lruOrder.length
+    ) {
+      this.saveToStorage();
+    }
+  }
+
+  private parseLruOrder(value: unknown): string[] | null {
+    if (!Array.isArray(value)) return null;
+
+    const seen = new Set<string>();
+    const order: string[] = [];
+    for (const key of value) {
+      if (typeof key !== 'string') return null;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      order.push(key);
+    }
+    return order;
+  }
+
+  private parseStoredSizes(value: unknown): Map<string, number> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+    const sizes = new Map<string, number>();
+    for (const [key, size] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) return null;
+      sizes.set(key, size);
+    }
+    return sizes;
+  }
+
+  private recoverFromStorage(preferredOrder?: string[], shouldSave = false): void {
+    this.lruOrder = [];
+    this.sizeByKey.clear();
+    this.totalSize = 0;
+
+    const recovered = new Set<string>();
+    const recoverKey = (key: string): void => {
+      if (recovered.has(key)) return;
+      recovered.add(key);
+
+      const value = localStorage.getItem(this.getItemKey(key));
+      if (value === null) return;
+
+      this.lruOrder.push(key);
+      this.sizeByKey.set(key, value.length);
+      this.totalSize += value.length;
+    };
+
+    if (preferredOrder) {
+      for (const key of preferredOrder) recoverKey(key);
+    } else {
+      const itemPrefix = this.getItemPrefix();
+      const storageKeys: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const storageKey = localStorage.key(index);
+        if (storageKey?.startsWith(itemPrefix)) storageKeys.push(storageKey);
+      }
+
+      for (const storageKey of storageKeys) {
+        recoverKey(storageKey.slice(itemPrefix.length));
+      }
+    }
+
+    if (shouldSave || this.lruOrder.length > 0) {
+      this.saveToStorage();
     }
   }
 
   private saveToStorage(): void {
     try {
+      const sizeByKey: Record<string, number> = {};
+      for (const key of this.lruOrder) {
+        const size = this.sizeByKey.get(key);
+        if (size !== undefined) sizeByKey[key] = size;
+      }
+
       const data = {
+        version: CACHE_METADATA_VERSION,
         lruOrder: this.lruOrder,
+        sizeByKey,
+        totalSize: this.totalSize,
       };
       localStorage.setItem(this.storageKey, JSON.stringify(data));
     } catch (e) {
@@ -1425,19 +1561,16 @@ export class Cache {
     }
   }
 
+  private getItemPrefix(): string {
+    return `${this.storageKey}-item-`;
+  }
+
   private getItemKey(key: string): string {
-    return `${this.storageKey}-item-${key}`;
+    return `${this.getItemPrefix()}${key}`;
   }
 
   private getCurrentSize(): number {
-    let total = 0;
-    for (const key of this.lruOrder) {
-      const value = localStorage.getItem(this.getItemKey(key));
-      if (value) {
-        total += value.length;
-      }
-    }
-    return total;
+    return this.totalSize;
   }
 
   private evictLRU(): void {
@@ -1445,6 +1578,9 @@ export class Cache {
     const oldestKey = this.lruOrder.shift();
     if (oldestKey) {
       localStorage.removeItem(this.getItemKey(oldestKey));
+      const size = this.sizeByKey.get(oldestKey) ?? 0;
+      this.sizeByKey.delete(oldestKey);
+      this.totalSize = Math.max(0, this.totalSize - size);
     }
   }
 
@@ -1456,6 +1592,29 @@ export class Cache {
     }
     // Add to end (most recently used)
     this.lruOrder.push(key);
+  }
+
+  private removeTrackedKey(key: string): boolean {
+    const index = this.lruOrder.indexOf(key);
+    const trackedSize = this.sizeByKey.get(key);
+    const existed = index !== -1 || trackedSize !== undefined;
+
+    if (index !== -1) {
+      this.lruOrder.splice(index, 1);
+    }
+    if (trackedSize !== undefined) {
+      this.sizeByKey.delete(key);
+      this.totalSize = Math.max(0, this.totalSize - trackedSize);
+    }
+
+    return existed;
+  }
+
+  private trackItem(key: string, dataSize: number): void {
+    this.removeTrackedKey(key);
+    this.sizeByKey.set(key, dataSize);
+    this.totalSize += dataSize;
+    this.updateLRU(key);
   }
 
   private notifySubscribers(key: string | undefined, data: string | undefined): void {
@@ -1471,9 +1630,17 @@ export class Cache {
   get(key: string): string | undefined {
     const value = localStorage.getItem(this.getItemKey(key));
     if (value !== null) {
+      if (this.sizeByKey.get(key) !== value.length) {
+        this.removeTrackedKey(key);
+        this.sizeByKey.set(key, value.length);
+        this.totalSize += value.length;
+      }
       this.updateLRU(key);
       this.saveToStorage();
       return value;
+    }
+    if (this.removeTrackedKey(key)) {
+      this.saveToStorage();
     }
     return undefined;
   }
@@ -1483,15 +1650,14 @@ export class Cache {
     const dataSize = data.length;
 
     // Check if adding this item would exceed capacity
-    let currentSize = this.getCurrentSize();
-    while (currentSize + dataSize > this.capacity && this.lruOrder.length > 0) {
+    this.removeTrackedKey(key);
+    while (this.getCurrentSize() + dataSize > this.capacity && this.lruOrder.length > 0) {
       this.evictLRU();
-      currentSize = this.getCurrentSize();
     }
 
     // Store the item
     localStorage.setItem(itemKey, data);
-    this.updateLRU(key);
+    this.trackItem(key, dataSize);
     this.saveToStorage();
 
     // Notify subscribers
@@ -1500,14 +1666,11 @@ export class Cache {
 
   remove(key: string): boolean {
     const itemKey = this.getItemKey(key);
-    const existed = localStorage.getItem(itemKey) !== null;
+    const existedInStorage = localStorage.getItem(itemKey) !== null;
+    const existed = this.removeTrackedKey(key) || existedInStorage;
 
     if (existed) {
       localStorage.removeItem(itemKey);
-      const index = this.lruOrder.indexOf(key);
-      if (index !== -1) {
-        this.lruOrder.splice(index, 1);
-      }
       this.saveToStorage();
       this.notifySubscribers(key, undefined);
     }
@@ -1516,7 +1679,22 @@ export class Cache {
   }
 
   has(key: string): boolean {
-    return localStorage.getItem(this.getItemKey(key)) !== null;
+    const value = localStorage.getItem(this.getItemKey(key));
+    if (value !== null) {
+      if (this.sizeByKey.get(key) !== value.length) {
+        this.removeTrackedKey(key);
+        this.sizeByKey.set(key, value.length);
+        this.totalSize += value.length;
+        this.updateLRU(key);
+        this.saveToStorage();
+      }
+      return true;
+    }
+
+    if (this.removeTrackedKey(key)) {
+      this.saveToStorage();
+    }
+    return false;
   }
 
   get isEmpty(): boolean {
@@ -1531,6 +1709,8 @@ export class Cache {
       localStorage.removeItem(this.getItemKey(key));
     }
     this.lruOrder = [];
+    this.sizeByKey.clear();
+    this.totalSize = 0;
     this.saveToStorage();
 
     // Notify subscribers
