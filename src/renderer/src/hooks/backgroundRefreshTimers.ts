@@ -43,7 +43,6 @@ export function createInFlightBackgroundRefreshTick(runTick: BackgroundRefreshTi
       });
   };
 }
-
 export function parseExtensionCommandPath(pathValue: string): { extName: string; cmdName: string } | null {
   const rawPath = String(pathValue || '').trim();
   const separatorIndex = rawPath.indexOf('/');

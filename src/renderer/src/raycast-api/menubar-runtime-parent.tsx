@@ -6,6 +6,11 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getMenuBarRuntimeDeps } from './menubar-runtime-config';
 import {
+  createMenuBarVisiblePayloadHashCache,
+  shouldSendMenuBarVisiblePayload,
+  type SerializedMenuBarVisiblePayload,
+} from './menubar-runtime-payload-cache';
+import {
   type MBItemRegistration,
   type MBRegistryAPI,
   MBRegistryContext,
@@ -32,6 +37,7 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
   const [registryVersion, setRegistryVersion] = useState(0);
   const mountedRef = useRef(true);
   const pendingRef = useRef(false);
+  const visiblePayloadHashCacheRef = useRef(createMenuBarVisiblePayloadHashCache());
 
   resetMenuBarOrderCounters();
 
@@ -175,7 +181,7 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
 
       if (cancelled) return;
       setMenuBarActions(extId, actions as unknown as Map<string, () => void>);
-      (window as any).electron?.updateMenuBar?.({
+      const payload: SerializedMenuBarVisiblePayload = {
         extId,
         iconPath: trayIconPayload.iconPath,
         iconDataUrl: trayIconPayload.iconDataUrl,
@@ -186,7 +192,13 @@ export function MenuBarExtraComponent({ children, icon, title, tooltip, isLoadin
         title: title || '',
         tooltip: tooltip || '',
         items: dividedSerialized,
-      });
+      };
+
+      if (!shouldSendMenuBarVisiblePayload(visiblePayloadHashCacheRef.current, payload)) {
+        return;
+      }
+
+      (window as any).electron?.updateMenuBar?.(payload);
     };
 
     syncMenuBar().catch((error) => {

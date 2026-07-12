@@ -156,6 +156,35 @@ interface ExtensionBuildInput {
 const extensionBuildStampVersion = 1;
 const extensionBuildStampFile = '.sc-build-stamp.json';
 
+interface InstalledExtensionSourceSignature {
+  extName: string;
+  extPath: string;
+  sourceRoot: string;
+  extPathSignature: FsPathSignature;
+  packageJsonSignature: FsPathSignature;
+}
+
+interface InstalledExtensionsSnapshot {
+  roots: string[];
+  rootSignatures: FsPathSignature[];
+  sources: InstalledExtensionSource[];
+  sourceSignatures: InstalledExtensionSourceSignature[];
+}
+
+interface CachedManifest {
+  signature: FsPathSignature;
+  value: any;
+}
+
+interface CachedTextFile {
+  signature: FsPathSignature;
+  value: string;
+}
+
+let _installedExtensionsSnapshot: InstalledExtensionsSnapshot | null = null;
+const _extensionManifestCache = new Map<string, CachedManifest>();
+const _extensionBundleCodeCache = new Map<string, CachedTextFile>();
+
 function getManagedExtensionsDir(): string {
   const dir = path.join(app.getPath('userData'), 'extensions');
   if (!fs.existsSync(dir)) {
@@ -266,6 +295,30 @@ function sameBuildFileSignatures(a: BuildFileSignature[], b: BuildFileSignature[
   return true;
 }
 
+function samePathSignature(a: FsPathSignature, b: FsPathSignature): boolean {
+  return (
+    a.exists === b.exists &&
+    a.isFile === b.isFile &&
+    a.isDirectory === b.isDirectory &&
+    a.size === b.size &&
+    a.mtimeMs === b.mtimeMs
+  );
+}
+
+function sameRootSnapshot(
+  roots: string[],
+  rootSignatures: FsPathSignature[],
+  snapshot: InstalledExtensionsSnapshot
+): boolean {
+  if (roots.length !== snapshot.roots.length) return false;
+  if (rootSignatures.length !== snapshot.rootSignatures.length) return false;
+  for (let i = 0; i < roots.length; i++) {
+    if (roots[i] !== snapshot.roots[i]) return false;
+    if (!samePathSignature(rootSignatures[i], snapshot.rootSignatures[i])) return false;
+  }
+  return true;
+}
+
 function readExtensionBuildStamp(buildDir: string): ExtensionBuildStamp | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(buildDir, extensionBuildStampFile), 'utf-8'));
@@ -283,6 +336,46 @@ function writeExtensionBuildStamp(buildDir: string, stamp: ExtensionBuildStamp):
   } catch (error: any) {
     console.warn('Failed to write extension build stamp:', error?.message || error);
   }
+}
+
+function getInstalledExtensionSourceSignature(source: InstalledExtensionSource): InstalledExtensionSourceSignature {
+  return {
+    extName: source.extName,
+    extPath: source.extPath,
+    sourceRoot: source.sourceRoot,
+    extPathSignature: getPathSignature(source.extPath),
+    packageJsonSignature: getPathSignature(path.join(source.extPath, 'package.json')),
+  };
+}
+
+function sameInstalledExtensionSourceSignature(
+  a: InstalledExtensionSourceSignature,
+  b: InstalledExtensionSourceSignature
+): boolean {
+  return (
+    a.extName === b.extName &&
+    a.extPath === b.extPath &&
+    a.sourceRoot === b.sourceRoot &&
+    samePathSignature(a.extPathSignature, b.extPathSignature) &&
+    samePathSignature(a.packageJsonSignature, b.packageJsonSignature)
+  );
+}
+
+function getInstalledExtensionSourceSignatures(
+  sources: InstalledExtensionSource[]
+): InstalledExtensionSourceSignature[] {
+  return sources.map((source) => getInstalledExtensionSourceSignature(source));
+}
+
+function sameInstalledExtensionSourceSignatures(
+  a: InstalledExtensionSourceSignature[],
+  b: InstalledExtensionSourceSignature[]
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!sameInstalledExtensionSourceSignature(a[i], b[i])) return false;
+  }
+  return true;
 }
 
 function getConfiguredExtensionRoots(): string[] {
@@ -303,7 +396,7 @@ function getConfiguredExtensionRoots(): string[] {
   return [...unique];
 }
 
-function collectInstalledExtensions(): InstalledExtensionSource[] {
+function scanInstalledExtensions(roots: string[]): InstalledExtensionSource[] {
   const results: InstalledExtensionSource[] = [];
   const seen = new Set<string>();
 
@@ -324,7 +417,7 @@ function collectInstalledExtensions(): InstalledExtensionSource[] {
     results.push({ extName, extPath, sourceRoot });
   };
 
-  for (const sourceRoot of getConfiguredExtensionRoots()) {
+  for (const sourceRoot of roots) {
     if (!fs.existsSync(sourceRoot)) continue;
 
     const sourceRootPkg = path.join(sourceRoot, 'package.json');
@@ -347,6 +440,27 @@ function collectInstalledExtensions(): InstalledExtensionSource[] {
   return results;
 }
 
+function collectInstalledExtensions(): InstalledExtensionSource[] {
+  const roots = getConfiguredExtensionRoots();
+  const rootSignatures = roots.map((root) => getPathSignature(root));
+
+  if (_installedExtensionsSnapshot && sameRootSnapshot(roots, rootSignatures, _installedExtensionsSnapshot)) {
+    const currentSourceSignatures = getInstalledExtensionSourceSignatures(_installedExtensionsSnapshot.sources);
+    if (sameInstalledExtensionSourceSignatures(currentSourceSignatures, _installedExtensionsSnapshot.sourceSignatures)) {
+      return _installedExtensionsSnapshot.sources;
+    }
+  }
+
+  const sources = scanInstalledExtensions(roots);
+  _installedExtensionsSnapshot = {
+    roots,
+    rootSignatures,
+    sources,
+    sourceSignatures: getInstalledExtensionSourceSignatures(sources),
+  };
+  return sources;
+}
+
 function resolveInstalledExtensionPath(extName: string): string | null {
   const normalized = normalizeExtensionName(extName);
   if (!normalized) return null;
@@ -354,11 +468,60 @@ function resolveInstalledExtensionPath(extName: string): string | null {
   return match?.extPath || null;
 }
 
+function readExtensionManifest(extPath: string): any | null {
+  const pkgPath = path.join(extPath, 'package.json');
+  const signature = getPathSignature(pkgPath);
+  if (!signature.exists || !signature.isFile) return null;
+
+  const cached = _extensionManifestCache.get(pkgPath);
+  if (cached && samePathSignature(cached.signature, signature)) {
+    return cached.value;
+  }
+
+  const value = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+  _extensionManifestCache.set(pkgPath, { signature, value });
+  return value;
+}
+
+function readExtensionBundleCode(outFile: string): string {
+  const signature = getPathSignature(outFile);
+  if (!signature.exists || !signature.isFile) return '';
+
+  const cached = _extensionBundleCodeCache.get(outFile);
+  if (cached && samePathSignature(cached.signature, signature)) {
+    return cached.value;
+  }
+
+  const value = fs.readFileSync(outFile, 'utf-8');
+  _extensionBundleCodeCache.set(outFile, { signature, value });
+  return value;
+}
+
+function invalidateExtensionStaticCacheForPath(extPath: string): void {
+  const normalizedExtPath = path.resolve(extPath);
+  _installedExtensionsSnapshot = null;
+  _extensionManifestCache.delete(path.join(normalizedExtPath, 'package.json'));
+
+  const buildDir = path.join(normalizedExtPath, '.sc-build') + path.sep;
+  for (const bundlePath of _extensionBundleCodeCache.keys()) {
+    if (bundlePath.startsWith(buildDir)) {
+      _extensionBundleCodeCache.delete(bundlePath);
+    }
+  }
+}
+
+export function invalidateExtensionRunnerCaches(): void {
+  _installedExtensionsSnapshot = null;
+  _extensionManifestCache.clear();
+  _extensionBundleCodeCache.clear();
+  _extensionIconCache.clear();
+}
+
 // ─── Icon extraction ────────────────────────────────────────────────
 
 // Session-level cache: absolute icon path → stable data URL string.
 // Prevents re-reading and re-encoding the same icon file on every getCommands() call.
-const _extensionIconCache = new Map<string, string>();
+const _extensionIconCache = new Map<string, { signature: FsPathSignature; value: string }>();
 
 function resizeIconWithSips(inputPath: string): Buffer | null {
   const tmp = path.join(os.tmpdir(), `sc-icon-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
@@ -382,10 +545,13 @@ function getExtensionIconDataUrl(
   ];
 
   for (const p of candidates) {
-    if (!fs.existsSync(p)) continue;
+    const signature = getPathSignature(p);
+    if (!signature.exists || !signature.isFile) continue;
 
     const cached = _extensionIconCache.get(p);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined && samePathSignature(cached.signature, signature)) {
+      return cached.value;
+    }
 
     try {
       const ext = path.extname(p).toLowerCase();
@@ -401,7 +567,7 @@ function getExtensionIconDataUrl(
         result = `data:image/png;base64,${finalData.toString('base64')}`;
       }
 
-      _extensionIconCache.set(p, result);
+      _extensionIconCache.set(p, { signature, value: result });
       return result;
     } catch {}
   }
@@ -451,11 +617,11 @@ export function discoverInstalledExtensionCommands(): ExtensionCommandInfo[] {
   const results: ExtensionCommandInfo[] = [];
   for (const source of collectInstalledExtensions()) {
     const extPath = source.extPath;
-    const pkgPath = path.join(extPath, 'package.json');
     const extName = source.extName;
 
     try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const pkg = readExtensionManifest(extPath);
+      if (!pkg) continue;
       if (!isManifestPlatformCompatible(pkg)) continue;
       const iconDataUrl = getExtensionIconDataUrl(
         extPath,
@@ -516,11 +682,11 @@ export function getInstalledExtensionsSettingsSchema(): InstalledExtensionSettin
   const results: InstalledExtensionSettingsSchema[] = [];
   for (const source of collectInstalledExtensions()) {
     const extPath = source.extPath;
-    const pkgPath = path.join(extPath, 'package.json');
     const extName = source.extName;
 
     try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const pkg = readExtensionManifest(extPath);
+      if (!pkg) continue;
       if (!isManifestPlatformCompatible(pkg)) continue;
       const iconDataUrl = getExtensionIconDataUrl(extPath, pkg.icon || 'icon.png');
       const ownerRaw = pkg.owner || pkg.author || '';
@@ -1050,10 +1216,13 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
     return 0;
   }
 
+  invalidateExtensionStaticCacheForPath(extPath);
+
   let commands: any[];
   let buildInput: ExtensionBuildInput;
   try {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const pkg = readExtensionManifest(extPath);
+    if (!pkg) return 0;
     if (!isManifestPlatformCompatible(pkg)) {
       console.warn(`Skipping build for incompatible extension ${extName}`);
       return 0;
@@ -1371,10 +1540,13 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
     return false;
   }
 
+  invalidateExtensionStaticCacheForPath(extPath);
+
   let cmd: any;
   let buildInput: ExtensionBuildInput;
   try {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const pkg = readExtensionManifest(extPath);
+    if (!pkg) return false;
     if (!isManifestPlatformCompatible(pkg)) {
       console.error(`buildSingleCommand: platform not compatible for ${extName}`);
       return false;
@@ -1559,8 +1731,7 @@ export async function getExtensionBundle(
     if (!fs.existsSync(outFile)) {
       let entryMissing = false;
       try {
-        const pkgPath = path.join(extPath, 'package.json');
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const pkg = readExtensionManifest(extPath);
         const cmd = (Array.isArray(pkg?.commands) ? pkg.commands : []).find((c: any) => c?.name === cmdName);
         if (cmd && !resolveEntryFile(extPath, cmd)) entryMissing = true;
       } catch {}
@@ -1590,8 +1761,7 @@ export async function getExtensionBundle(
     if (!fs.existsSync(outFile)) {
       let diagnostic = '';
       try {
-        const pkgPath = path.join(extPath, 'package.json');
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const pkg = readExtensionManifest(extPath);
         const commands = Array.isArray(pkg?.commands) ? pkg.commands : [];
         const cmd = commands.find((c: any) => c?.name === cmdName);
         const nodeModulesExists = fs.existsSync(path.join(extPath, 'node_modules'));
@@ -1617,7 +1787,7 @@ export async function getExtensionBundle(
     }
   }
 
-  const code = fs.readFileSync(outFile, 'utf-8');
+  const code = readExtensionBundleCode(outFile);
   if (!code) {
     const msg = `Pre-built bundle is empty: ${outFile}`;
     console.error(msg);
@@ -1653,8 +1823,8 @@ export async function getExtensionBundle(
   }> = [];
 
   try {
-    const pkgPath = path.join(extPath, 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const pkg = readExtensionManifest(extPath);
+    if (!pkg) return null;
     if (!isManifestPlatformCompatible(pkg)) {
       return null;
     }

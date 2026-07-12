@@ -36,6 +36,13 @@ import { installDepsWithBun } from './bun-manager';
 
 const execAsync = promisify(exec);
 
+function invalidateExtensionRunnerCaches(): void {
+  try {
+    const runner = require('./extension-runner');
+    runner.invalidateExtensionRunnerCaches?.();
+  } catch {}
+}
+
 function shellQuoteSingle(value: string): string {
   return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
 }
@@ -1137,6 +1144,7 @@ async function installExtensionFromBundle(
 
     // Copy to extensions directory
     fs.cpSync(srcDir, installPath, { recursive: true });
+    invalidateExtensionRunnerCaches();
 
     // Cleanup backup
     if (backupPath && fs.existsSync(backupPath)) {
@@ -1244,6 +1252,7 @@ async function installExtensionViaAPI(name: string): Promise<boolean> {
       const { buildAllCommands } = require('./extension-runner');
       const builtCount = await buildAllCommands(name);
       console.log(`  Build: ${Date.now() - t1}ms. Extension "${name}" installed (${builtCount} commands) in ${Date.now() - t0}ms total`);
+      invalidateExtensionRunnerCaches();
     }
 
     // Cleanup backup
@@ -1355,6 +1364,7 @@ async function installExtensionViaGit(name: string): Promise<boolean> {
     const { buildAllCommands } = require('./extension-runner');
     const builtCount = await buildAllCommands(name);
     console.log(`Extension "${name}" installed (${builtCount} commands) at ${installPath}`);
+    invalidateExtensionRunnerCaches();
     if (backupPath && fs.existsSync(backupPath)) {
       fs.rmSync(backupPath, { recursive: true, force: true });
     }
@@ -1535,6 +1545,7 @@ export async function uninstallExtension(name: string): Promise<boolean> {
 
   try {
     fs.rmSync(installPath, { recursive: true, force: true });
+    invalidateExtensionRunnerCaches();
     console.log(`Extension "${name}" uninstalled.`);
 
     // Report uninstall to backend (fire-and-forget)
