@@ -9,8 +9,8 @@ export async function importTs(absPath) {
     bundle: true,
     entryPoints: [absPath],
     format: 'esm',
-    platform: 'browser',
-    target: 'es2020',
+    platform: 'node',
+    target: 'node20',
     write: false,
   });
   const code = result.outputFiles[0].text;
