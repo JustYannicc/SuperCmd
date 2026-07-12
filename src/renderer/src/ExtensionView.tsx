@@ -3414,9 +3414,15 @@ function isNodeBuiltinRequest(name: string): boolean {
   return false;
 }
 
+const SUPERCMD_BUILTIN_FACADE_MODULES = new Set([
+  'fs',
+  'fs/promises',
+  'child_process',
+]);
+
 function shouldUseSuperCmdBuiltinFacade(name: string): boolean {
   const normalized = name.startsWith('node:') ? name.slice(5) : name;
-  return normalized === 'fs' || normalized === 'fs/promises' || normalized === 'child_process';
+  return SUPERCMD_BUILTIN_FACADE_MODULES.has(normalized);
 }
 
 const superCmdBuiltinFacadeCache = new Map<string, any>();

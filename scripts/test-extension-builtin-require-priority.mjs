@@ -23,7 +23,7 @@ function extractBetween(startNeedle, endNeedle) {
 function loadBuiltinFacadeHarness() {
   const helperSource = extractBetween(
     'const SUPERCMD_BUILTIN_FACADE_MODULES',
-    'Real Node built-in bridge'
+    'const superCmdBuiltinFacadeCache'
   );
   const transpiled = ts.transpileModule(
     `${helperSource}
@@ -45,14 +45,17 @@ globalThis.__builtinFacadeHarness = {
   return sandbox.__builtinFacadeHarness;
 }
 
-test('extension require keeps real Node builtins ahead of SuperCmd stubs', () => {
+test('extension require keeps compatibility facades ahead of real Node builtins', () => {
   const { shouldUseSuperCmdBuiltinFacade, facadeModules } = loadBuiltinFacadeHarness();
 
-  assert.equal(JSON.stringify(facadeModules), JSON.stringify(['child_process']));
+  assert.equal(JSON.stringify(facadeModules), JSON.stringify(['fs', 'fs/promises', 'child_process']));
+  assert.equal(shouldUseSuperCmdBuiltinFacade('fs'), true);
+  assert.equal(shouldUseSuperCmdBuiltinFacade('node:fs'), true);
+  assert.equal(shouldUseSuperCmdBuiltinFacade('fs/promises'), true);
   assert.equal(shouldUseSuperCmdBuiltinFacade('child_process'), true);
   assert.equal(shouldUseSuperCmdBuiltinFacade('node:child_process'), true);
 
-  for (const builtin of ['crypto', 'node:crypto', 'zlib', 'node:zlib', 'fs', 'node:fs']) {
+  for (const builtin of ['crypto', 'node:crypto', 'zlib', 'node:zlib']) {
     assert.equal(
       shouldUseSuperCmdBuiltinFacade(builtin),
       false,
