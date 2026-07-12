@@ -49,51 +49,98 @@ export function usePromise<T>(
   const [error, setError] = useState<Error | undefined>(undefined);
 
   const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const abortableRefRef = useRef<React.MutableRefObject<AbortController | null | undefined> | undefined>(undefined);
 
   const stableArgs = useStableArgs(args || []);
 
   const fnRef = useRef(fn);
   const argsRef = useRef(stableArgs);
+  const optionsRef = useRef(options);
   const runtimeCtxRef = useRef<ExtensionContextSnapshot>(snapshotExtensionContext());
   fnRef.current = fn;
   argsRef.current = stableArgs;
+  optionsRef.current = options;
   runtimeCtxRef.current = snapshotExtensionContext();
 
+  const clearAbortController = useCallback((controller: AbortController) => {
+    const abortableRef = abortableRefRef.current;
+    if (abortableRef?.current === controller) {
+      abortableRef.current = null;
+    }
+    if (abortControllerRef.current === controller) {
+      abortControllerRef.current = null;
+      if (abortableRefRef.current === abortableRef) {
+        abortableRefRef.current = undefined;
+      }
+    }
+  }, []);
+
+  const abortCurrentRun = useCallback(() => {
+    const controller = abortControllerRef.current;
+    if (!controller) return;
+    controller.abort();
+    clearAbortController(controller);
+  }, [clearAbortController]);
+
+  const prepareAbortController = useCallback((abortable?: React.MutableRefObject<AbortController | null | undefined>) => {
+    abortCurrentRun();
+    if (!abortable) return null;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    abortableRefRef.current = abortable;
+    abortable.current = controller;
+    return controller;
+  }, [abortCurrentRun]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortCurrentRun();
+    };
+  }, [abortCurrentRun]);
+
   const execute = useCallback(() => {
-    if (options?.execute === false || !mountedRef.current) return;
+    const opts = optionsRef.current;
+    if (opts?.execute === false || !mountedRef.current) return;
+
+    const runController = prepareAbortController(opts?.abortable);
+    const runCtx = runtimeCtxRef.current;
+    const isCurrentRun = () => !runController || abortControllerRef.current === runController;
 
     setIsLoading(true);
     setError(undefined);
-    withExtensionContext(runtimeCtxRef.current, () => {
-      options?.onWillExecute?.(argsRef.current);
+    withExtensionContext(runCtx, () => {
+      opts?.onWillExecute?.(argsRef.current);
     });
 
     Promise.resolve()
-      .then(() => withExtensionContext(runtimeCtxRef.current, () => fnRef.current(...argsRef.current)))
+      .then(() => withExtensionContext(runCtx, () => fnRef.current(...argsRef.current)))
       .then((result) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || !isCurrentRun()) return;
         setData(result);
         setIsLoading(false);
-        withExtensionContext(runtimeCtxRef.current, () => {
-          options?.onData?.(result);
+        withExtensionContext(runCtx, () => {
+          opts?.onData?.(result);
         });
       })
       .catch((err) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || !isCurrentRun()) return;
         const e = err instanceof Error ? err : new Error(String(err));
         setError(e);
         setIsLoading(false);
-        withExtensionContext(runtimeCtxRef.current, () => {
-          options?.onError?.(e);
+        withExtensionContext(runCtx, () => {
+          opts?.onError?.(e);
         });
+      })
+      .finally(() => {
+        if (runController) {
+          clearAbortController(runController);
+        }
       });
-  }, [options?.execute]);
+  }, [options?.execute, prepareAbortController, clearAbortController]);
 
   useEffect(() => {
     execute();
