@@ -19,18 +19,14 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ExtensionBundle } from '../../types/electron';
+import type { ExtensionStorageChangedDetail } from '../raycast-api/storage-events';
+import type { BackgroundNoViewRun } from '../utils/background-no-view-runs';
+
+export type { BackgroundNoViewRun } from '../utils/background-no-view-runs';
 
 export interface MenuBarEntry {
   key: string;
   bundle: ExtensionBundle;
-}
-
-export interface BackgroundNoViewRun {
-  runId: string;
-  bundle: ExtensionBundle;
-  launchType: 'userInitiated' | 'background';
-  /** When true, execution status is mirrored to the system status-bar badge. */
-  reportStatus?: boolean;
 }
 
 export interface UseMenuBarExtensionsReturn {
@@ -46,7 +42,13 @@ export interface UseMenuBarExtensionsReturn {
   hideMenuBarExtension: (bundle: Partial<ExtensionBundle>) => void;
   hideMenuBarExtensionsForExtension: (extensionName: string) => void;
   upsertMenuBarExtension: (bundle: ExtensionBundle, options?: { remount?: boolean }) => void;
-  remountMenuBarExtensionsForExtension: (extensionName: string) => void;
+  remountMenuBarExtensionsForExtension: (
+    extensionName: string,
+    options?: {
+      sourceCommandName?: string;
+      sourceCommandMode?: string;
+    }
+  ) => void;
 }
 
 export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
@@ -133,9 +135,25 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     });
   }, [getMenuBarIdentity]);
 
-  const remountMenuBarExtensionsForExtension = useCallback((extensionName: string) => {
+  const remountMenuBarExtensionsForExtension = useCallback((
+    extensionName: string,
+    options?: {
+      sourceCommandName?: string;
+      sourceCommandMode?: string;
+    }
+  ) => {
     const normalized = (extensionName || '').trim();
     if (!normalized) return;
+    const sourceCommandName = (options?.sourceCommandName || '').trim();
+    const sourceCommandMode = (options?.sourceCommandMode || '').trim();
+    const skipSourceCommand = sourceCommandMode === 'menu-bar' && Boolean(sourceCommandName);
+    const hasRemountTarget = menuBarExtensions.some((entry) => {
+      const entryExt = (entry.bundle.extName || entry.bundle.extensionName || '').trim();
+      if (!entryExt || entryExt !== normalized) return false;
+      const cmdName = (entry.bundle.cmdName || entry.bundle.commandName || '').trim();
+      return !(skipSourceCommand && cmdName === sourceCommandName);
+    });
+    if (!hasRemountTarget) return;
     const now = Date.now();
     const lastTs = menuBarRemountTimestampsRef.current[normalized] || 0;
     if (now - lastTs < 200) return;
@@ -145,8 +163,9 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
       const next = prev.map((entry) => {
         const entryExt = (entry.bundle.extName || entry.bundle.extensionName || '').trim();
         if (!entryExt || entryExt !== normalized) return entry;
+        const cmdName = (entry.bundle.cmdName || entry.bundle.commandName || '').trim();
+        if (skipSourceCommand && cmdName === sourceCommandName) return entry;
         changed = true;
-        const cmdName = entry.bundle.cmdName || entry.bundle.commandName || '';
         return {
           key: `${normalized}:${cmdName}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
           bundle: entry.bundle,
@@ -154,7 +173,7 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
       });
       return changed ? next : prev;
     });
-  }, []);
+  }, [menuBarExtensions]);
 
   // Note: no auto-mount on app startup. Menu-bar extensions are per-session — the
   // user must explicitly run each command from the launcher to mount it.
@@ -163,10 +182,13 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
   // This matches Raycast behavior where menu-bar commands observe state changes quickly.
   useEffect(() => {
     const onStorageChanged = (event: Event) => {
-      const custom = event as CustomEvent<{ extensionName?: string }>;
+      const custom = event as CustomEvent<Partial<ExtensionStorageChangedDetail>>;
       const extensionName = (custom.detail?.extensionName || '').trim();
       if (!extensionName) return;
-      remountMenuBarExtensionsForExtension(extensionName);
+      remountMenuBarExtensionsForExtension(extensionName, {
+        sourceCommandName: custom.detail?.commandName,
+        sourceCommandMode: custom.detail?.commandMode,
+      });
     };
     window.addEventListener('sc-extension-storage-changed', onStorageChanged as EventListener);
     return () => {

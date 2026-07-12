@@ -12,6 +12,7 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionViewPath = path.join(root, 'src/renderer/src/ExtensionView.tsx');
+const extensionWrapperCachePath = path.join(root, 'src/renderer/src/utils/extension-wrapper-cache.ts');
 
 function captureFromOptions(options) {
   if (typeof options === 'boolean') return options;
@@ -338,9 +339,10 @@ test('extension lifecycle sandbox cleanup', async (t) => {
     assert.notEqual(start, -1, 'Could not locate loadExtensionExport start marker');
     assert.notEqual(end, -1, 'Could not locate loadExtensionExport wrapper marker');
     const wrapperSource = source.slice(start, end);
+    const wrapperCacheSource = fs.readFileSync(extensionWrapperCachePath, 'utf8');
 
     assert.match(wrapperSource, /const lifecycleScope = createExtensionLifecycleScope\(timerRegistry\)/);
-    assert.match(wrapperSource, /'window',\s*'self',\s*'document'/);
+    assert.match(wrapperCacheSource, /'window',\s*'self',\s*'document'/);
     assert.match(wrapperSource, /bundleBuffer,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedWindow,\s*scopedDocument,/);
     assert.doesNotMatch(wrapperSource, /const trackTimeout = \(cb: any, ms\?: any/);
   });
