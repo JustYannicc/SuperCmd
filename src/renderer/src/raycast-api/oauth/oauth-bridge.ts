@@ -7,10 +7,28 @@ import { getOAuthRuntimeDeps } from './runtime-config';
 
 const OAUTH_TOKEN_KEY_PREFIX = 'sc-oauth-token:';
 const OAUTH_CLIENT_ID_OVERRIDE_PREFIX = 'sc-oauth-client-id:';
-const OAUTH_CALLBACK_TIMEOUT_MS = 3 * 60 * 1000;
+export const OAUTH_CALLBACK_TIMEOUT_MS = 3 * 60 * 1000;
+export const OAUTH_CALLBACK_QUEUE_MAX_SIZE = 256;
 
-const oauthCallbackWaiters = new Set<(url: string) => void>();
-const oauthCallbackQueue: string[] = [];
+export type OAuthCallbackResult = {
+  code?: string;
+  accessToken?: string;
+  tokenType?: string;
+  provider?: string;
+  state?: string;
+  error?: string;
+  errorDescription?: string;
+};
+
+type QueuedOAuthCallback = {
+  parsed: OAuthCallbackResult;
+  receivedAt: number;
+};
+
+type OAuthCallbackWaiter = (callback: OAuthCallbackResult) => boolean;
+
+const oauthCallbackWaiters = new Set<OAuthCallbackWaiter>();
+const oauthCallbackQueue: QueuedOAuthCallback[] = [];
 let oauthCallbackBridgeInitialized = false;
 
 export function oauthTokenKey(providerId: string): string {
@@ -27,15 +45,46 @@ export function ensureOAuthCallbackBridge() {
 
   try {
     (window as any).electron?.onOAuthCallback?.((url: string) => {
-      if (!url) return;
-      oauthCallbackQueue.push(url);
-      for (const waiter of Array.from(oauthCallbackWaiters)) {
-        waiter(url);
-      }
+      enqueueOAuthCallback(url);
     });
   } catch {
     // best-effort
   }
+}
+
+function pruneOAuthCallbackQueue(now = Date.now()) {
+  const expiresBefore = now - OAUTH_CALLBACK_TIMEOUT_MS;
+
+  let writeIndex = 0;
+  for (const callback of oauthCallbackQueue) {
+    if (callback.receivedAt >= expiresBefore) {
+      oauthCallbackQueue[writeIndex++] = callback;
+    }
+  }
+  oauthCallbackQueue.length = writeIndex;
+
+  if (oauthCallbackQueue.length > OAUTH_CALLBACK_QUEUE_MAX_SIZE) {
+    oauthCallbackQueue.splice(0, oauthCallbackQueue.length - OAUTH_CALLBACK_QUEUE_MAX_SIZE);
+  }
+}
+
+function enqueueOAuthCallback(rawUrl: string) {
+  if (!rawUrl) return;
+
+  const parsed = parseOAuthCallbackUrl(rawUrl);
+  if (!parsed) return;
+
+  const now = Date.now();
+  pruneOAuthCallbackQueue(now);
+
+  let handled = false;
+  for (const waiter of Array.from(oauthCallbackWaiters)) {
+    handled = waiter(parsed) || handled;
+  }
+  if (handled) return;
+
+  oauthCallbackQueue.push({ parsed, receivedAt: now });
+  pruneOAuthCallbackQueue(now);
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -95,15 +144,7 @@ export async function buildAuthorizationRequest(params: {
   };
 }
 
-export function parseOAuthCallbackUrl(rawUrl: string): {
-  code?: string;
-  accessToken?: string;
-  tokenType?: string;
-  provider?: string;
-  state?: string;
-  error?: string;
-  errorDescription?: string;
-} | null {
+export function parseOAuthCallbackUrl(rawUrl: string): OAuthCallbackResult | null {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'supercmd:') return null;
@@ -133,20 +174,21 @@ export function parseOAuthCallbackUrl(rawUrl: string): {
 export async function waitForOAuthCallback(
   state: string,
   timeoutMs = OAUTH_CALLBACK_TIMEOUT_MS
-): Promise<{ code?: string; accessToken?: string; tokenType?: string; provider?: string; error?: string; errorDescription?: string }> {
+): Promise<OAuthCallbackResult> {
   ensureOAuthCallbackBridge();
 
-  const stateMatches = (parsed: ReturnType<typeof parseOAuthCallbackUrl>) => {
+  const stateMatches = (parsed: OAuthCallbackResult) => {
     if (!parsed) return false;
     if (!state) return true;
     return parsed.state === state;
   };
 
+  pruneOAuthCallbackQueue();
   for (let i = 0; i < oauthCallbackQueue.length; i++) {
-    const parsed = parseOAuthCallbackUrl(oauthCallbackQueue[i]);
+    const parsed = oauthCallbackQueue[i].parsed;
     if (stateMatches(parsed)) {
       oauthCallbackQueue.splice(i, 1);
-      return parsed!;
+      return parsed;
     }
   }
 
@@ -156,12 +198,12 @@ export async function waitForOAuthCallback(
       reject(new Error('OAuth authorization timed out'));
     }, timeoutMs);
 
-    const handler = (rawUrl: string) => {
-      const parsed = parseOAuthCallbackUrl(rawUrl);
-      if (!stateMatches(parsed)) return;
+    const handler: OAuthCallbackWaiter = (parsed) => {
+      if (!stateMatches(parsed)) return false;
       clearTimeout(timer);
       oauthCallbackWaiters.delete(handler);
-      resolve(parsed!);
+      resolve(parsed);
+      return true;
     };
 
     oauthCallbackWaiters.add(handler);
