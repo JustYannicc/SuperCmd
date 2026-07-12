@@ -19,7 +19,7 @@ test('MenuBarExtra renderer reuses serialized items for title-only ticks', () =>
 
 test('MenuBarExtra renderer still installs actions before sending payloads', () => {
   const setActionsIndex = source.indexOf('setMenuBarActions(extId, actions');
-  const updateIndex = source.indexOf('updateMenuBar?.({');
+  const updateIndex = source.indexOf('updateMenuBar?.(payload)');
   assert.notEqual(setActionsIndex, -1, 'expected setMenuBarActions call');
   assert.notEqual(updateIndex, -1, 'expected updateMenuBar call');
   assert.ok(setActionsIndex < updateIndex, 'actions should be refreshed before visible payload send');

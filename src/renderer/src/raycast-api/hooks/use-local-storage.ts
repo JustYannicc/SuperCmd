@@ -5,6 +5,7 @@
 
 import { useCallback, useState } from 'react';
 import { emitExtensionStorageChanged } from '../storage-events';
+import { getCurrentScopedExtensionContext } from '../context-scope-runtime';
 import { getScopedLocalStorageKeys, readScopedJsonState } from './storage-scope';
 
 export function useLocalStorage<T>(
@@ -17,6 +18,10 @@ export function useLocalStorage<T>(
   isLoading: boolean;
 } {
   const { scopedKey, legacyKeys } = getScopedLocalStorageKeys(key);
+  const currentContext = getCurrentScopedExtensionContext();
+  const storageEventExtensionName = currentContext.extensionName;
+  const storageEventCommandName = currentContext.commandName;
+  const storageEventCommandMode = currentContext.commandMode;
   const [value, setValueState] = useState<T | undefined>(() => {
     return readScopedJsonState(scopedKey, legacyKeys, initialValue);
   });
@@ -29,8 +34,12 @@ export function useLocalStorage<T>(
     } catch {
       // best-effort
     }
-    emitExtensionStorageChanged();
-  }, [scopedKey]);
+    emitExtensionStorageChanged({
+      extensionName: storageEventExtensionName,
+      commandName: storageEventCommandName,
+      commandMode: storageEventCommandMode,
+    });
+  }, [scopedKey, storageEventCommandMode, storageEventCommandName, storageEventExtensionName]);
 
   const removeValue = useCallback(async () => {
     setValueState(undefined);
@@ -42,8 +51,12 @@ export function useLocalStorage<T>(
     } catch {
       // best-effort
     }
-    emitExtensionStorageChanged();
-  }, [legacyKeys, scopedKey]);
+    emitExtensionStorageChanged({
+      extensionName: storageEventExtensionName,
+      commandName: storageEventCommandName,
+      commandMode: storageEventCommandMode,
+    });
+  }, [legacyKeys, scopedKey, storageEventCommandMode, storageEventCommandName, storageEventExtensionName]);
 
   return { value, setValue, removeValue, isLoading };
 }
