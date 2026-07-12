@@ -41,17 +41,120 @@ function writeLocalJsonObject(key: string, value: Record<string, any>) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-export function writeJsonObject(key: string, value: Record<string, any>) {
+export const COMMAND_ARGUMENT_SETTINGS_SYNC_DEBOUNCE_MS = 250;
+
+type CommandArgumentSettingsSyncMode = 'immediate' | 'debounced';
+
+type WriteJsonObjectOptions = {
+  commandArgumentSettingsSync?: CommandArgumentSettingsSyncMode;
+};
+
+type TimerHandle = number | ReturnType<typeof setTimeout>;
+
+type PendingCommandArgumentSettingsSync = {
+  extName: string;
+  cmdName: string;
+  values: Record<string, any>;
+  timer: TimerHandle | null;
+};
+
+const pendingCommandArgumentSettingsSyncs = new Map<string, PendingCommandArgumentSettingsSync>();
+
+function parseCommandArgumentsStorageKey(key: string): { extName: string; cmdName: string } | null {
+  if (!key.startsWith(CMD_ARGS_KEY_PREFIX)) return null;
+  const slug = key.slice(CMD_ARGS_KEY_PREFIX.length);
+  const slash = slug.indexOf('/');
+  if (slash <= 0) return null;
+  const extName = slug.slice(0, slash);
+  const cmdName = slug.slice(slash + 1);
+  if (!extName || !cmdName) return null;
+  return { extName, cmdName };
+}
+
+function cloneStoragePayload(value: Record<string, any>): Record<string, any> {
+  return { ...value };
+}
+
+function setCommandArgumentSettingsSyncTimer(callback: () => void): TimerHandle {
+  if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+    return window.setTimeout(callback, COMMAND_ARGUMENT_SETTINGS_SYNC_DEBOUNCE_MS);
+  }
+  return setTimeout(callback, COMMAND_ARGUMENT_SETTINGS_SYNC_DEBOUNCE_MS);
+}
+
+function clearCommandArgumentSettingsSyncTimer(timer: TimerHandle): void {
+  if (typeof window !== 'undefined' && typeof window.clearTimeout === 'function') {
+    window.clearTimeout(timer as number);
+    return;
+  }
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
+}
+
+async function saveCommandArgumentsToSettings(
+  extName: string,
+  cmdName: string,
+  values: Record<string, any>
+): Promise<void> {
+  try {
+    const electron = typeof window !== 'undefined' ? window.electron : undefined;
+    await electron?.saveExtensionCommandArguments?.({ extName, cmdName, values });
+  } catch {
+    // best-effort — sync failure must not break local persistence
+  }
+}
+
+function cancelPendingCommandArgumentSettingsSync(key: string): void {
+  const pending = pendingCommandArgumentSettingsSyncs.get(key);
+  if (!pending) return;
+  if (pending.timer !== null) {
+    clearCommandArgumentSettingsSyncTimer(pending.timer);
+  }
+  pendingCommandArgumentSettingsSyncs.delete(key);
+}
+
+function queueCommandArgumentSettingsSync(key: string, value: Record<string, any>): void {
+  const parsed = parseCommandArgumentsStorageKey(key);
+  if (!parsed) return;
+  cancelPendingCommandArgumentSettingsSync(key);
+  const pending: PendingCommandArgumentSettingsSync = {
+    ...parsed,
+    values: cloneStoragePayload(value),
+    timer: null,
+  };
+  pending.timer = setCommandArgumentSettingsSyncTimer(() => {
+    void flushCommandArgumentSettingsSync(key);
+  });
+  pendingCommandArgumentSettingsSyncs.set(key, pending);
+}
+
+export async function flushCommandArgumentSettingsSync(key?: string): Promise<void> {
+  const keys = key ? [key] : Array.from(pendingCommandArgumentSettingsSyncs.keys());
+  await Promise.all(keys.map(async (pendingKey) => {
+    const pending = pendingCommandArgumentSettingsSyncs.get(pendingKey);
+    if (!pending) return;
+    if (pending.timer !== null) {
+      clearCommandArgumentSettingsSyncTimer(pending.timer);
+    }
+    pendingCommandArgumentSettingsSyncs.delete(pendingKey);
+    await saveCommandArgumentsToSettings(pending.extName, pending.cmdName, pending.values);
+  }));
+}
+
+export function writeJsonObject(key: string, value: Record<string, any>, options?: WriteJsonObjectOptions) {
   writeLocalJsonObject(key, value);
   // Mirror extension preferences and command arguments into the synced
   // settings.json so they propagate to other Macs. localStorage stays
   // the synchronous read cache; this is best-effort fire-and-forget.
   // Script-command args (sc-script-cmd-args:) and the hidden-menubar key
   // are intentionally not synced.
-  syncExtensionStorageKeyToSettings(key, value);
+  syncExtensionStorageKeyToSettings(key, value, options);
 }
 
-function syncExtensionStorageKeyToSettings(key: string, value: Record<string, any>): void {
+function syncExtensionStorageKeyToSettings(
+  key: string,
+  value: Record<string, any>,
+  options?: WriteJsonObjectOptions
+): void {
   try {
     if (key.startsWith(EXT_PREFS_KEY_PREFIX)) {
       const extName = key.slice(EXT_PREFS_KEY_PREFIX.length);
@@ -69,12 +172,14 @@ function syncExtensionStorageKeyToSettings(key: string, value: Record<string, an
       return;
     }
     if (key.startsWith(CMD_ARGS_KEY_PREFIX)) {
-      const slug = key.slice(CMD_ARGS_KEY_PREFIX.length);
-      const slash = slug.indexOf('/');
-      if (slash <= 0) return;
-      const extName = slug.slice(0, slash);
-      const cmdName = slug.slice(slash + 1);
-      void window.electron?.saveExtensionCommandArguments?.({ extName, cmdName, values: value });
+      const parsed = parseCommandArgumentsStorageKey(key);
+      if (!parsed) return;
+      if (options?.commandArgumentSettingsSync === 'debounced') {
+        queueCommandArgumentSettingsSync(key, value);
+        return;
+      }
+      cancelPendingCommandArgumentSettingsSync(key);
+      void saveCommandArgumentsToSettings(parsed.extName, parsed.cmdName, value);
       return;
     }
   } catch {

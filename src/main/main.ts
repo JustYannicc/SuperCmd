@@ -218,6 +218,7 @@ import {
   importRaycastConfigFromFile,
   previewRaycastConfigImport,
 } from './raycast-config-import';
+import { runExecCommand, type ExecCommandOptions } from './exec-command';
 
 import { initialize as initAptabase, trackEvent } from "@aptabase/electron/main";
 
@@ -15384,91 +15385,9 @@ app.whenReady().then(async () => {
       _event: any,
       command: string,
       args: string[],
-      options?: { shell?: boolean | string; input?: string; env?: Record<string, string>; cwd?: string }
+      options?: ExecCommandOptions
     ) => {
-      const { spawn, execFile } = require('child_process');
-      const fs = require('fs');
-
-      return new Promise((resolve) => {
-        try {
-          const resolveExecutablePath = (input: string): string => {
-            if (!input || typeof input !== 'string') return input;
-            if (!input.includes('/') && !input.includes('\\')) return input;
-            if (!input.startsWith('/')) return input;
-            if (fs.existsSync(input)) return input;
-            try {
-              const base = input.split('/').filter(Boolean).pop() || '';
-              if (!base) return input;
-              const lookup = execFileSync('/bin/zsh', ['-lc', `command -v -- ${JSON.stringify(base)} 2>/dev/null || true`], { encoding: 'utf-8' }).trim();
-              if (lookup && fs.existsSync(lookup)) return lookup;
-            } catch {}
-            return input;
-          };
-
-          const execFileSync = require('child_process').execFileSync;
-          const normalizedCommand = resolveExecutablePath(command);
-          // Augment PATH so extensions can find brew, npm, nvm, etc. even when
-          // the app is launched from the Dock (where macOS strips the login PATH).
-          const extraPaths = [
-            '/opt/homebrew/bin', '/opt/homebrew/sbin',
-            '/usr/local/bin', '/usr/local/sbin',
-            '/usr/bin', '/usr/sbin', '/bin', '/sbin',
-          ];
-          const currentPath = (options?.env?.PATH ?? process.env.PATH ?? '');
-          const augmentedPath = [
-            ...extraPaths,
-            ...currentPath.split(':').filter(Boolean),
-          ].filter((v, i, a) => a.indexOf(v) === i).join(':');
-          const spawnOptions: any = {
-            shell: options?.shell ?? false,
-            env: { ...process.env, ...options?.env, PATH: augmentedPath },
-            cwd: options?.cwd || process.cwd(),
-          };
-
-          let proc: any;
-          if (options?.shell) {
-            // When shell is true, join command and args
-            const fullCommand = [normalizedCommand, ...args].join(' ');
-            proc = spawn(fullCommand, [], { ...spawnOptions, shell: true });
-          } else {
-            proc = spawn(normalizedCommand, args, spawnOptions);
-          }
-
-          let stdout = '';
-          let stderr = '';
-
-          proc.stdout?.on('data', (data: Buffer) => {
-            stdout += data.toString();
-          });
-
-          proc.stderr?.on('data', (data: Buffer) => {
-            stderr += data.toString();
-          });
-
-          if (options?.input && proc.stdin) {
-            proc.stdin.write(options.input);
-            proc.stdin.end();
-          }
-
-          proc.on('close', (code: number | null) => {
-            resolve({ stdout, stderr, exitCode: code ?? 0 });
-          });
-
-          proc.on('error', (err: Error) => {
-            resolve({ stdout, stderr: err.message, exitCode: 1 });
-          });
-
-          // Timeout after 5 minutes — allows long-running commands (brew install, npm install, etc.)
-          setTimeout(() => {
-            try {
-              proc.kill();
-            } catch {}
-            resolve({ stdout, stderr: stderr || 'Command timed out', exitCode: 124 });
-          }, 300000);
-        } catch (e: any) {
-          resolve({ stdout: '', stderr: e?.message || 'Failed to execute command', exitCode: 1 });
-        }
-      });
+      return runExecCommand(command, args, options);
     }
   );
 

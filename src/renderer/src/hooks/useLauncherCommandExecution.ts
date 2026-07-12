@@ -3,6 +3,7 @@ import type React from 'react';
 import type { CommandInfo, ExtensionBundle, QuickLinkDynamicField } from '../../types/electron';
 import { LAST_EXT_KEY } from '../utils/constants';
 import {
+  flushCommandArgumentSettingsSync,
   getCmdArgsKey,
   getScriptCmdArgsKey,
   hydrateExtensionBundlePreferences,
@@ -266,10 +267,13 @@ export function useLauncherCommandExecution(
         };
 
         if (Object.keys(inlineArguments).length > 0 && command.mode === 'no-view') {
+          const commandArgsKey = getCmdArgsKey(extName, cmdName);
           writeJsonObject(
-            getCmdArgsKey(extName, cmdName),
-            { ...((hydratedWithInlineArguments as any).launchArguments || {}) }
+            commandArgsKey,
+            { ...((hydratedWithInlineArguments as any).launchArguments || {}) },
+            { commandArgumentSettingsSync: 'debounced' }
           );
+          await flushCommandArgumentSettingsSync(commandArgsKey);
         }
 
         if (shouldOpenCommandSetup(hydratedWithInlineArguments)) {
